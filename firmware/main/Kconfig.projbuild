@@ -1,0 +1,17 @@
+menu "EchoEar"
+    config ECHOEAR_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config ECHOEAR_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config ECHOEAR_BRIDGE_URL
+        string "Bridge base URL (no trailing slash)"
+        default "http://192.168.1.100:8765"
+
+    config ECHOEAR_BRIDGE_TOKEN
+        string "Bridge and device management token"
+        default ""
+endmenu
