@@ -1,0 +1,12 @@
+/firmware/sdkconfig
+/firmware/sdkconfig.old
+/firmware/sdkconfig.local
+/firmware/build/
+/firmware/managed_components/
+/bridge.env
+
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.log
