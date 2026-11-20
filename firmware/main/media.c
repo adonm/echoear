@@ -15,7 +15,7 @@
 #include "freertos/task.h"
 #include "ws_client.h"
 
-enum { TTS_BYTES = 64 * 1024, TTS_BLOCK = 1280 };
+enum { TTS_BYTES = 1024 * 1024, TTS_BLOCK = 1280 };
 typedef enum { RECORD, STREAM, SPEAK, CHIME } job_kind_t;
 typedef struct {
     job_kind_t kind;
@@ -104,11 +104,21 @@ void media_tts_end(void)
 
 bool media_tts_pcm(const void *data, size_t bytes)
 {
-    if (!atomic_load(&stream_open) || atomic_load(&stream_ended) || atomic_load(&interrupted)) return false;
-    if (xStreamBufferSend(tts, data, bytes, pdMS_TO_TICKS(1000)) != bytes) {
-        ESP_LOGW(TAG, "Speaker stream buffer overrun");
-        media_interrupt();
-        return false;
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t timeout = pdMS_TO_TICKS(15000), slice = pdMS_TO_TICKS(100);
+    const uint8_t *pcm = data;
+    while (bytes) {
+        if (!atomic_load(&stream_open) || atomic_load(&stream_ended) || atomic_load(&interrupted)) return false;
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        if (elapsed >= timeout) {
+            ESP_LOGW(TAG, "Speaker stream buffer overrun");
+            media_interrupt();
+            return false;
+        }
+        TickType_t remaining = timeout - elapsed;
+        size_t sent = xStreamBufferSend(tts, pcm, bytes, remaining < slice ? remaining : slice);
+        pcm += sent;
+        bytes -= sent;
     }
     return true;
 }

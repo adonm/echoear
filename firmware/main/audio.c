@@ -253,7 +253,7 @@ esp_err_t audio_stream_write(const int16_t *pcm, size_t num_samples)
 
 esp_err_t audio_stream_end(void)
 {
-    if (!played_samples) {
+    if (!played_samples || audio_playback_stopped()) {
         return ESP_OK;
     }
     // Fade the last sample and drain the BSP's 90 ms TX queue before yielding the codec.
@@ -265,7 +265,7 @@ esp_err_t audio_stream_end(void)
         ESP_RETURN_ON_ERROR(write_speaker(stereo, FRAMES), TAG, "Fade speech");
         memset(stereo, 0, sizeof(stereo));
     }
-    for (int i = 0; i < DMA_TAIL / FRAMES; ++i) {
+    for (int i = 0; i < DMA_TAIL && !audio_playback_stopped(); i += FRAMES) {
         ESP_RETURN_ON_ERROR(write_speaker(stereo, FRAMES), TAG, "Drain speech");
     }
     return ESP_OK;
