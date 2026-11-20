@@ -17,7 +17,11 @@ if (!/^phone-[0-9a-f]{4}$/.test(phone)) {
   setLocal("echoear-phone", phone);
 }
 const wide = matchMedia("(min-width: 921px)");
-const themeOf = d => ["cake", "mint", "plum", "sunny"].includes(d?.theme) ? d.theme : "cake";
+function colors(el, cat) {
+  const hex = value => /^#[a-f\d]{6}$/i.test(value || "");
+  el.style.setProperty("--cat", hex(cat?.face_bg) ? cat.face_bg : "#f3f4f6");
+  el.style.setProperty("--cat-accent", hex(cat?.accent_color) ? cat.accent_color : "#60a5fa");
+}
 const isLive = d => !!(d?.ws_connected ?? d?.ws);
 const persisted = d => /^virt-[0-9a-f]{8}$/.test(d?.device_id || "");
 const node = (tag, cls, text) => {
@@ -230,6 +234,92 @@ async function loadSaved() {
 }
 $("saved-state").ontoggle = loadSaved;
 
+async function loadSavedCats() {
+  const current = app, selected = view;
+  if (!current || current.scope || !$("reassign-cat").open) return;
+  const request = current.catRequest = (current.catRequest || 0) + 1;
+  const active = () => app === current && view === selected && current.catRequest === request;
+  try {
+    const {cats} = await api(current, "/api/cats");
+    if (!active()) return;
+    const items = cats.map(profile => {
+      const item = node("li", "saved-cat"), heading = node("div", "row"), actions = node("div", "row wrap");
+      colors(item, profile);
+      const dot = node("span", "cat-dot");
+      dot.setAttribute("aria-hidden", "true");
+      heading.append(dot, node("span", "compact-label", profile.name));
+      const load = removeButton("Assign to selected", profile.name, async () => {
+        try {
+          const result = await api(current, `/api/devices/${encodeURIComponent(selected.id)}/cat`,
+            {method:"POST", body:{slug:profile.slug}});
+          if (app === current) updateCat({...result, character:result.cat.name, voice:result.cat.voice});
+          if (view === selected) say("saved-cat-note", `Loaded ${profile.name}.`);
+        } catch {
+          if (view === selected) say("saved-cat-note", "Could not load that cat.");
+        }
+      });
+      load.disabled = !selected?.id;
+      actions.append(load, removeButton("Delete", profile.name, async () => {
+        try {
+          await api(current, `/api/cats/${encodeURIComponent(profile.slug)}`, {method:"DELETE"});
+          if (app === current) loadSavedCats();
+        } catch {
+          if (app === current) say("saved-cat-note", "Could not delete that profile.");
+        }
+      }));
+      item.append(heading, actions);
+      return item;
+    });
+    $("saved-cat-items").replaceChildren(...items);
+    say("saved-cat-note", cats.length ? "" : "No saved cats yet.");
+  } catch {
+    if (active()) say("saved-cat-note", "Could not load saved cats.");
+  }
+}
+$("reassign-cat").ontoggle = loadSavedCats;
+
+function renderReassign() {
+  const select = $("reassign-target");
+  const choices = view?.id ? app.devices.filter(d => d.device_id !== view.id) : [];
+  const version = JSON.stringify(choices.map(d => [d.device_id, d.character]));
+  if (select.dataset.choices !== version) {
+    const previous = select.value;
+    select.replaceChildren(new Option("Choose a device…", ""),
+      ...choices.map(d => new Option(`${d.character} · ${d.device_id}`, d.device_id)));
+    select.value = choices.some(d => d.device_id === previous) ? previous : "";
+    select.dataset.choices = version;
+  }
+  select.disabled = !!app.reassigning || !choices.length;
+  $("swap-cat").disabled = $("move-cat").disabled = select.disabled || !select.value;
+}
+
+async function reassignCat(mode) {
+  const current = app, selected = view, to = $("reassign-target").value;
+  if (!current || current.scope || current.reassigning || !selected?.id || !to) return;
+  current.reassigning = true;
+  renderReassign();
+  say("reassign-note", mode === "swap" ? "Swapping cats…" : "Moving cat…");
+  try {
+    await api(current, "/api/cats/reassign", {method:"POST",
+      body:{from_device_id:selected.id, to_device_id:to, mode}});
+    if (app !== current) return;
+    refreshDevices();
+    loadSavedCats();
+    if (view === selected) {
+      say("reassign-note", mode === "swap" ? "Cats swapped." : "Cat moved. This device now has a blank starter.");
+      loadHistory();
+    }
+  } catch {
+    if (app === current && view === selected) say("reassign-note", "Could not reassign cats.");
+  } finally {
+    current.reassigning = false;
+    if (app === current) renderReassign();
+  }
+}
+$("reassign-target").onchange = renderReassign;
+$("swap-cat").onclick = () => reassignCat("swap");
+$("move-cat").onclick = () => reassignCat("move");
+
 $("sidebar-toggle").onclick = () => { app.sidebar = !app.sidebar; renderSidebar(); };
 wide.addEventListener("change", e => {
   if (app && !app.scope) { app.sidebar = e.matches; renderSidebar(); }
@@ -242,7 +332,7 @@ function deviceRow(d) {
   button.dataset.id = d.device_id;
   const name = node("span", "device-name"), state = node("span", "pill device-state");
   const meta = node("span", "device-meta"), badge = node("span", "pill tunnel-badge", "HTTPS Tunnel");
-  const dot = node("span", "theme-dot");
+  const dot = node("span", "cat-dot");
   dot.setAttribute("aria-hidden", "true");
   button.append(dot, name, state, meta, badge);
   rowParts.set(button, {name, state, meta, badge});
@@ -270,7 +360,7 @@ function renderDevices() {
     for (const d of list) {
       const button = rows.get(d.device_id) ?? deviceRow(d);
       rows.delete(d.device_id);
-      button.dataset.theme = themeOf(d);
+      colors(button, d.cat);
       button.setAttribute("aria-pressed", String(view?.id === d.device_id));
       const {name, state, meta, badge} = rowParts.get(button);
       if (name.textContent !== d.character) name.textContent = d.character;
@@ -292,6 +382,7 @@ function renderDevices() {
   $("join").textContent = view?.quick ? "Switch to mirror" : "Join as Phone Cat";
   $("join").setAttribute("aria-pressed", String(!!view?.quick));
   renderTunnel();
+  renderReassign();
 }
 
 function renderTargets(devices) {
@@ -390,25 +481,26 @@ function safeShareURL(link) {
   } catch { return ""; }
 }
 
-$("create-cat").onsubmit = async e => {
-  e.preventDefault();
-  const current = app, form = e.currentTarget, button = form.querySelector("button");
-  const {character, theme} = Object.fromEntries(new FormData(form));
+$("create-cat").onclick = async e => {
+  const current = app, button = e.currentTarget;
   button.disabled = true;
   say("device-note", "Creating cat…");
   try {
-    const cat = await api(current, "/api/virtual-clients", {method:"POST", body:{character:character.trim(), theme}});
+    const cat = await api(current, "/api/virtual-clients", {method:"POST", body:{}});
     if (app !== current) return;
     const d = {...cat, device_id:cat.id, kind:"virtual"};
     current.deviceVersion++;
     current.devices.push(d);
-    form.reset();
-    $("new-cat").open = false;
-    say("device-note", "Virtual Cat created.");
+    say("device-note", "Say hi to design your new cat!");
     select(d);
+    if (!wide.matches) {
+      current.sidebar = false;
+      renderSidebar();
+      $("sidebar-toggle").focus();
+    }
     refreshDevices();
   } catch {
-    if (app === current) say("device-note", "Could not create that cat. Use 1–40 letters, numbers, spaces, or basic punctuation.");
+    if (app === current) say("device-note", "Could not create a cat.");
   } finally {
     button.disabled = false;
   }
@@ -484,7 +576,7 @@ $("join").onclick = () => {
   if (view?.quick) select(preferredCat(app.devices));
   else {
     audioReady();
-    select({device_id:phone, theme:"plum", character:"Plum", kind:"virtual"}, true);
+    select({device_id:phone, character:"New Cat", kind:"virtual"}, true);
   }
 };
 
@@ -512,9 +604,12 @@ function select(d, quick = false) {
   say("tunnel-note", "");
   say("voice-note", "");
   say("timer-note", "");
+  say("reassign-note", "");
   $("timer-items").replaceChildren();
   $("active-timers").hidden = true;
   loadSaved();
+  $("saved-cat-items").replaceChildren();
+  loadSavedCats();
   renderCurrent();
   renderDevices();
   renderTranscript(true);
@@ -529,7 +624,7 @@ function renderCurrent() {
   const d = view?.device, ready = ws?.readyState === WebSocket.OPEN && rev > 0;
   const active = ready && view?.virtual;
   const mode = d?.mode && !["offline", "http"].includes(d.mode) ? d.mode : "";
-  $("workspace").dataset.theme = themeOf(d);
+  colors($("workspace"), d?.cat);
   say("chat-name", d?.character || "Choose a cat");
   $("chat-mode").hidden = !d;
   say("chat-mode", !d ? "" : view.virtual ? active ? (modeLabel[view.mode] || "Idle") : "Connecting" :
@@ -544,7 +639,9 @@ function renderCurrent() {
   say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
     "Mic needs localhost or an HTTPS opentunnel.xyz link");
   $("text").disabled = !d || view.virtual && !active;
+  $("text").placeholder = d?.cat?.configured === false ? "Say hi to design your cat…" : "Say something to your cat…";
   $("send").disabled = $("text").disabled || !!view?.sending || !!view?.resetting;
+  $("reset").hidden = !!app?.scope;
   $("reset").disabled = !d || view.virtual && !active || !!view?.resetting || !!view?.sending;
   $("refresh").disabled = !d || view.quick && !active || !!view?.loading || !!view?.resetting;
 }
@@ -611,6 +708,7 @@ function connect(attempt = 0) {
   socket.onopen = () => {
     if (ws !== socket) return;
     loadTimers();
+    loadSavedCats();
     send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",volume}
       : {ev:"hello",role:"web"});
   };
@@ -647,6 +745,19 @@ function syncWatch(live) {
 
 const modeLabel = {idle:"Idle", thinking:"Thinking", listening:"Listening", speaking:"Speaking", sleepy:"Sleepy"};
 
+function updateCat({device_id, character, cat, voice}) {
+  const fields = {character, cat, voice};
+  app.deviceVersion++;
+  const device = app.devices.find(d => d.device_id === device_id);
+  if (device) Object.assign(device, fields);
+  if (view?.id === device_id) {
+    Object.assign(view.device, fields);
+    if (rev) updateStatus(view.virtual ? `${character} · Live Virtual Cat` : `Mirroring ${character}`);
+    renderCurrent();
+  }
+  renderDevices();
+}
+
 function command(msg) {
   if (msg.type === "timers") {
     if (msg.device_id === view.id) loadTimers();
@@ -661,6 +772,15 @@ function command(msg) {
     return;
   }
   switch (msg.op) {
+    case "cat":
+      updateCat(msg);
+      break;
+    case "saved_cats":
+      loadSavedCats();
+      break;
+    case "cat_reassigned":
+      if (msg.device_id === view.id) loadHistory();
+      break;
     case "peers": {
       if (app.scope) {
         renderTargets(msg.devices);
@@ -835,6 +955,7 @@ async function loadHistory({replace = true} = {}) {
 $("refresh").onclick = () => loadHistory();
 $("reset").onclick = async () => {
   const cat = view, current = app;
+  if (!current || current.scope || !cat?.id) return;
   cat.loading?.abort();
   cat.loading = cat.liveDuringLoad = null;
   cat.resetting = true;

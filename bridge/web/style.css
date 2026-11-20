@@ -9,13 +9,10 @@
   --muted: #b9bed1;
   --mint: #8ee8ce;
   --sun: #fcd34d;
-  --cat: #fff3d1;
+  --cat: #f3f4f6;
+  --cat-accent: #60a5fa;
   font: 1rem/1.5 system-ui, sans-serif;
 }
-[data-theme="cake"] { --cat: #fff3d1; }
-[data-theme="mint"] { --cat: #7be3c6; }
-[data-theme="plum"] { --cat: #d8c7ff; }
-[data-theme="sunny"] { --cat: #fcd34d; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body {
@@ -53,11 +50,12 @@ h1 span { color: var(--sun); }
 }
 .workspace[data-sidebar="closed"] { grid-template-columns: minmax(0, .9fr) minmax(20rem, 1.2fr); }
 .workspace[data-app="scoped"] { max-width: 64rem; }
+.workspace[data-app="scoped"] #reset { display: none; }
 .panel { border: 1px solid var(--line); border-radius: 1.2rem; background: var(--panel); min-width: 0; }
 .sidebar { max-height: max(32rem, calc(100dvh - 6.4rem)); overflow: auto; padding: 1rem .85rem; }
 .device-group + .device-group { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .eyebrow + h2 { margin-top: .22rem; }
-.device-list, .new-cat-form, #token-form, #share, #tunnel-controls { display: grid; gap: .45rem; }
+.device-list, #token-form, #share, #tunnel-controls { display: grid; gap: .45rem; }
 .device-list { margin-top: .65rem; }
 .device {
   display: grid;
@@ -69,7 +67,7 @@ h1 span { color: var(--sun); }
   padding: .48rem .5rem;
   background: var(--deep);
 }
-.device[aria-pressed="true"] { border-color: var(--cat); background: var(--raised); }
+.device[aria-pressed="true"] { border-color: var(--cat-accent); background: var(--raised); }
 .device-name, .device-meta { overflow-wrap: anywhere; }
 .device-meta, .tunnel-badge { grid-column: 2 / -1; }
 .small, .note, .device-meta, .screen-status { font-size: .8rem; color: var(--muted); }
@@ -88,36 +86,26 @@ h1 span { color: var(--sun); }
   font-weight: 750;
   line-height: 1.35;
 }
-.theme-dot, .device-state::before {
+.cat-dot, .device-state::before {
   width: .55rem;
   height: .55rem;
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--cat);
 }
+.cat-dot { outline: 1px solid var(--cat-accent); }
 .device-state::before { content: ""; width: .42rem; height: .42rem; background: #9299b0; }
 .device-state[data-status="live"]::before { background: var(--mint); }
 .device-state[data-status="http"]::before { background: var(--sun); }
 .tunnel-badge { color: var(--mint); }
 summary { cursor: pointer; font-size: .85rem; font-weight: 750; }
 details { margin-top: .55rem; }
-.new-cat-form { margin-top: .45rem; }
-fieldset { border: 0; min-inline-size: 0; padding: 0; }
 label, legend { font-size: .8rem; color: var(--muted); }
-.swatches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .3rem; }
-.swatches label { display: flex; align-items: center; gap: .3rem; cursor: pointer; }
-.swatches input {
-  appearance: none;
-  margin: 0;
-  width: 1.25rem;
-  height: 1.25rem;
-  border-radius: 50%;
-  border: 1px solid transparent;
-  background: var(--cat);
-  cursor: pointer;
-}
-.swatches input:checked { border: 3px solid var(--deep); box-shadow: 0 0 0 1px var(--cat); }
-.phone-join { margin-top: .6rem; width: 100%; }
+.cat-action { margin-top: .6rem; width: 100%; }
+.reassign-controls { display: grid; gap: .35rem; margin: .5rem 0 .75rem; }
+.reassign-controls select { width: 100%; }
+.saved-cat { margin-top: .4rem; padding: .4rem; border: 1px solid var(--line); border-radius: .55rem; }
+.saved-cat .row + .row { margin-top: .3rem; }
 .tunnel > p:not(.eyebrow), #tunnel-controls, .delete-row { margin-top: .45rem; }
 #tunnel-controls { justify-items: start; }
 #share { width: 100%; }
@@ -174,7 +162,7 @@ label, legend { font-size: .8rem; color: var(--muted); }
   background: var(--deep);
   overflow-wrap: anywhere;
 }
-.bubble.assistant { border-inline-start: 3px solid var(--cat); }
+.bubble.assistant { border-inline-start: 3px solid var(--cat-accent); }
 .bubble.user { align-self: end; background: #38314e; border-radius: .9rem .9rem .28rem .9rem; }
 .bubble.intercom { border-style: dashed; border-color: #779e98; border-radius: .65rem; background: #1d3239; }
 .bubble-head, .bubble-meta { gap: .3rem .5rem; font-size: .74rem; }

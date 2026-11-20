@@ -32,6 +32,8 @@ func TestLiveWebSocket(t *testing.T) {
 	html, res := c.read(t, "/app", nil, "", nil, 200)
 	if !bytes.Contains(html, []byte(`<svg id="screen" viewBox="0 0 360 360"`)) ||
 		!bytes.Contains(html, []byte("Join as Phone Cat")) ||
+		!bytes.Contains(html, []byte("+ New Cat")) ||
+		!bytes.Contains(html, []byte("Reassign / Load Cat")) ||
 		!bytes.Contains(html, []byte("New Chat")) ||
 		res.Header.Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Fatal("missing live app HTML or inline SVG")

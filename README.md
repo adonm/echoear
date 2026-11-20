@@ -68,8 +68,8 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
   Tap again to stop recording early or interrupt speech.
 - Pet the head pad to wake or interrupt. Slide across the pads to change
   volume, or hold a pad for one step. The display dims after 120 seconds idle.
-- **Text** opens the peer drawer, where **New** starts a fresh conversation and
-  **Voice** switches between Heart and Fable. **Cat** closes a diagram.
+- **Text** opens the peer drawer, where **Voice** switches between Heart and
+  Fable. **Cat** closes a diagram. Start a new chat from the LAN web console.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
@@ -80,7 +80,13 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 
 Open `http://<host-lan-ip>:8765/app` on a trusted LAN and enter the bridge
 token. Select a physical EchoEar to mirror and control it, or use
-**New Virtual Cat** to create a named client that persists across restarts.
+**+ New Cat** to create a blank virtual cat. Say hi to design its name, colors,
+accessories, voice, and personality in chat. **New Chat** archives the current
+design and brings back the blank starter without deleting your chat history.
+Open **Reassign / Load Cat** in the LAN sidebar to move or swap a design, voice,
+and active conversation between devices. Use **Saved Cats** there to assign a
+profile to the selected device or delete the saved copy. Shared tunnel links
+can chat but cannot reset or reassign cats.
 The Chat panel loads the cat's conversation history across sessions and
 updates live over `/ws`. Use **Voice** under the screen for one-click Heart or
 Fable, or choose among Heart and all eight UK voices in the dropdown. The
@@ -116,11 +122,14 @@ OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
 reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
-Code Mode exposes 12 tools under `tools.echoear`: `devices`, `snapshot`,
-`scene`, `patch`, `speak`, `chime`, `intercom`, `control`, `memory`, `asset`,
+Code Mode exposes 13 tools under `tools.echoear`: `devices`, `snapshot`,
+`scene`, `patch`, `speak`, `chime`, `intercom`, `control`, `cat`, `memory`, `asset`,
 `timer`, and `wait_event`.
 Use `devices` to discover peers. `control` sets volume (0–100) and/or sleep
 state on a connected device.
+`cat` gets or edits the persistent animated face, including up to 16 decorative
+shapes, and lists, loads, or deletes saved profiles. `reset_blank` clears the
+design without resetting the conversation.
 Scenes and patches support declarative `tap` and `cycle` reactions, named `states`,
 and delayed `after_ms`/`then` feedback. Give related nodes the same `group` and
 use relative `move: {target, dx, dy}` to shift a node or group in pixels.
@@ -153,6 +162,9 @@ in `~/.local/share/echoear/echoear.db` (or `$XDG_DATA_HOME/echoear/echoear.db`);
 `ECHOEAR_DB_PATH` overrides it. Keep the data directory private (0700, database
 0600). The first boot imports valid rows from the six legacy JSON files in that
 directory in one transaction and never modifies those backups.
+Active cat designs and reusable profiles are stored in `cats` and `saved_cats`.
+The cat migration preserves existing devices and their resolved voices without
+changing session mappings, history, or tunnel records.
 
 Optional Turso Cloud sync runs every minute when both `ECHOEAR_TURSO_URL`
 and `ECHOEAR_TURSO_AUTH_TOKEN` are set. Use a dedicated private remote and one
@@ -174,14 +186,18 @@ OpenCode streams its reply over SSE.
 | `GET /health` | Hex, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
-| `GET /api/devices` | `devices` with `device_id`, `character`, `ip`, `online`, `voice` |
+| `GET /api/devices` | `devices` with `device_id`, `character`, `cat`, `ip`, `online`, `voice` |
+| `POST /api/virtual-clients` | `{}` creates a blank cat; optional legacy `character` and `theme` seed a designed cat |
+| `GET /api/cats`, `DELETE /api/cats/{slug}` | List or delete LAN-only saved cat profiles |
+| `POST /api/cats/reassign` | LAN-only `from_device_id`, `to_device_id`, and `mode` (`swap` or `move`) → transfer active cats, voices, and sessions |
+| `POST /api/devices/{id}/cat` | Update active cat fields or send `{"slug":"cake"}` to load a profile (LAN-only) |
 | `GET /api/devices/{id}/messages` | Chronological chat across sessions and bridge events for a device |
 | `POST /api/devices/{id}/voice` | `{"voice":"af_heart"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
 | `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
 | `POST /api/intercom` | Audio and `X-Target` (device ID or name) → transcript and delivery result |
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
 | `POST /api/tts` | `{"text":"Hello!"}`, optional `device_id` → complete PCM clip using that device's voice |
-| `POST /api/reset` | `{"device_id":"my-echoear"}` → forget conversation mapping |
+| `POST /api/reset` | `{"device_id":"my-echoear"}` → save the designed cat, restore the blank starter, and start a fresh session |
 | `GET /api/memory?scope=…`, `GET /api/memory/scopes`, `DELETE /api/memory?scope=…&key=…` | LAN-only saved JSON and populated scopes |
 | `GET /api/assets`, `DELETE /api/assets/{name}` | LAN-only reusable visual assets |
 | `GET /api/timers?device_id=…`, `DELETE /api/timers/{id}` | List/cancel active timers; scoped links can see and cancel only their own cat's timers |
