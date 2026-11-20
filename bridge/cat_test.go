@@ -27,7 +27,7 @@ func TestCatMigration(t *testing.T) {
 			if err := virtualStore(db).save(c.id, virtualClient{ID: c.id, Character: c.name, Theme: "sunny", CreatedAt: time.Now()}, false); err != nil {
 				t.Fatal(err)
 			}
-		} else if err := deviceStore(db).save(c.id, peer{DeviceID: c.id, Character: c.name, IP: "192.168.1.9", Port: 80}, false); err != nil {
+		} else if err := deviceStore(db).save(c.id, peer{DeviceID: c.id, Character: c.name, IP: "192.0.2.9", Port: 80}, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := sessionStore(db).save(c.id, "ses_"+c.slug, false); err != nil {
