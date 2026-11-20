@@ -91,20 +91,85 @@ void gfx_round_rect(uint16_t *fb, int x, int y, int w, int h, int r, int sw, boo
     }
 }
 
-void gfx_thick_line(uint16_t *fb, int x1, int y1, int x2, int y2, int sw, gfx_color_t color)
+static int screen_half_span(int y)
 {
-    float r = max(sw, 1) * 0.5f, r2 = r * r;
-    int pad = (int)ceilf(r);
-    float dx = x2 - x1, dy = y2 - y1, length2 = dx * dx + dy * dy;
+    const int radius = GFX_WIDTH / 2;
+    int dy = y - GFX_HEIGHT / 2;
+    return (int)sqrtf(radius * radius - dy * dy);
+}
+
+static void thick_line(uint16_t *fb, int x1, int y1, int x2, int y2, int sw, gfx_color_t color, bool round_clip)
+{
+    int width = max(sw, 1), pad = width / 2 + width % 2;
+    float r = width * 0.5f, r2 = r * r;
+    float dx = (int64_t)x2 - x1, dy = (int64_t)y2 - y1, length2 = dx * dx + dy * dy;
     float mul = length2 > 0 ? 1.0f / length2 : 0.0f;
-    for (int y = max(min(y1, y2) - pad, 0); y <= min(max(y1, y2) + pad, GFX_HEIGHT - 1); ++y) {
-        for (int x = max(min(x1, x2) - pad, 0); x <= min(max(x1, x2) + pad, GFX_WIDTH - 1); ++x) {
-            float px = x - x1, py = y - y1, t = (px * dx + py * dy) * mul;
+    int64_t left = (int64_t)min(x1, x2) - pad, right = (int64_t)max(x1, x2) + pad;
+    int64_t top = (int64_t)min(y1, y2) - pad, bottom = (int64_t)max(y1, y2) + pad;
+    if (right < 0 || left >= GFX_WIDTH || bottom < 0 || top >= GFX_HEIGHT) return;
+    int first = left < 0 ? 0 : (int)left, last = right >= GFX_WIDTH ? GFX_WIDTH - 1 : (int)right;
+    int start = top < 0 ? 0 : (int)top, end = bottom >= GFX_HEIGHT ? GFX_HEIGHT - 1 : (int)bottom;
+    for (int y = start; y <= end; ++y) {
+        int lo = first, hi = last;
+        if (round_clip) {
+            int span = screen_half_span(y);
+            lo = max(lo, GFX_WIDTH / 2 - span);
+            hi = min(hi, GFX_WIDTH / 2 + span);
+        }
+        for (int x = lo; x <= hi; ++x) {
+            float px = x - (float)x1, py = y - (float)y1, t = (px * dx + py * dy) * mul;
             t = t < 0 ? 0 : t > 1 ? 1 : t;
             px -= t * dx;
             py -= t * dy;
             if (px * px + py * py <= r2) fb[y * GFX_WIDTH + x] = color;
         }
+    }
+}
+
+void gfx_thick_line(uint16_t *fb, int x1, int y1, int x2, int y2, int sw, gfx_color_t color)
+{
+    thick_line(fb, x1, y1, x2, y2, sw, color, false);
+}
+
+void gfx_tri(uint16_t *fb, int x1, int y1, int x2, int y2, int x3, int y3, int sw, bool fill, gfx_color_t color)
+{
+    if (!fill) {
+        if (sw <= 0) return;
+        thick_line(fb, x1, y1, x2, y2, sw, color, true);
+        thick_line(fb, x2, y2, x3, y3, sw, color, true);
+        thick_line(fb, x3, y3, x1, y1, sw, color, true);
+        return;
+    }
+
+    struct point { int x, y; } v[] = {{x1, y1}, {x2, y2}, {x3, y3}};
+    int top = max(0, min(y1, min(y2, y3))), bottom = min(GFX_HEIGHT - 1, max(y1, max(y2, y3)));
+    for (int y = top; y <= bottom; ++y) {
+        int left = GFX_WIDTH, right = -1;
+        for (int i = 0; i < 3; ++i) {
+            struct point a = v[i], b = v[(i + 1) % 3];
+            if (a.y > b.y) {
+                struct point tmp = a;
+                a = b;
+                b = tmp;
+            }
+            if (y < a.y || y > b.y) continue;
+            if (a.y == b.y) {
+                left = min(left, min(a.x, b.x));
+                right = max(right, max(a.x, b.x));
+                continue;
+            }
+            // Weighted interpolation stays in int64_t for any 32-bit coordinate.
+            int64_t rise = (int64_t)b.y - a.y;
+            int64_t num = ((int64_t)b.y - y) * a.x + ((int64_t)y - a.y) * b.x;
+            int x = num / rise;
+            int64_t rem = num % rise;
+            left = min(left, x + (rem > 0));
+            right = max(right, x - (rem < 0));
+        }
+        int span = screen_half_span(y);
+        left = max(left, GFX_WIDTH / 2 - span);
+        right = min(right, min(GFX_WIDTH - 1, GFX_WIDTH / 2 + span));
+        for (int x = left; x <= right; ++x) fb[y * GFX_WIDTH + x] = color;
     }
 }
 

@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+static int min(int a, int b) { return a < b ? a : b; }
+static int max(int a, int b) { return a > b ? a : b; }
+
 static const char *str(const cJSON *obj, const char *key)
 {
     return cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, key));
@@ -23,7 +26,7 @@ static int find(const scene_frame_t *frame, const char *id)
 
 static bool read_kind(const char *name, node_kind_t *out)
 {
-    static const char *const types[] = { "circle", "rect", "line", "arc", "text", "btn" };
+    static const char *const types[] = { "circle", "rect", "line", "arc", "text", "btn", "tri" };
     for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); ++i) {
         if (!strcmp(name, types[i])) {
             *out = (node_kind_t)i;
@@ -38,6 +41,13 @@ static int number(const cJSON *obj, const char *key, int fallback, int lo, int h
     const cJSON *value = cJSON_GetObjectItemCaseSensitive(obj, key);
     return cJSON_IsNumber(value) && value->valuedouble >= lo && value->valuedouble <= hi
            ? value->valueint : fallback;
+}
+
+static int tri_coord(const cJSON *obj, const char *key, int fallback, int extent)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(obj, key);
+    int coord = cJSON_IsNumber(value) ? value->valueint : fallback;
+    return min(extent - 1, max(0, coord));
 }
 
 static bool update(scene_node_t *node, const cJSON *obj)
@@ -56,10 +66,19 @@ static bool update(scene_node_t *node, const cJSON *obj)
     if (tc) node->text_color = gfx_parse_color(cJSON_GetStringValue(tc), &node->tc);
     node->x = number(obj, "x", node->x, -720, 1080);
     node->y = number(obj, "y", node->y, -720, 1080);
-    node->x1 = number(obj, "x1", node->x1, -720, 1080);
-    node->y1 = number(obj, "y1", node->y1, -720, 1080);
-    node->x2 = number(obj, "x2", node->x2, -720, 1080);
-    node->y2 = number(obj, "y2", node->y2, -720, 1080);
+    if (node->kind == NODE_TRI) {
+        node->x1 = tri_coord(obj, "x1", node->x1, GFX_WIDTH);
+        node->y1 = tri_coord(obj, "y1", node->y1, GFX_HEIGHT);
+        node->x2 = tri_coord(obj, "x2", node->x2, GFX_WIDTH);
+        node->y2 = tri_coord(obj, "y2", node->y2, GFX_HEIGHT);
+        node->x3 = tri_coord(obj, "x3", node->x3, GFX_WIDTH);
+        node->y3 = tri_coord(obj, "y3", node->y3, GFX_HEIGHT);
+    } else {
+        node->x1 = number(obj, "x1", node->x1, -720, 1080);
+        node->y1 = number(obj, "y1", node->y1, -720, 1080);
+        node->x2 = number(obj, "x2", node->x2, -720, 1080);
+        node->y2 = number(obj, "y2", node->y2, -720, 1080);
+    }
     node->w = number(obj, "w", node->w, 0, 720);
     node->h = number(obj, "h", node->h, 0, 720);
     node->r = number(obj, "r", node->r, 0, 720);
@@ -79,7 +98,8 @@ static bool add_nodes(scene_frame_t *frame, const cJSON *array)
         if (!valid_id(id) || !type || find(frame, id) >= 0) return false;
         scene_node_t *node = &frame->nodes[frame->count++];
         *node = (scene_node_t){ .c = gfx_rgb565(0xf8fafc), .tc = gfx_rgb565(0x1a1926),
-                                .vis = true, .fill = !strcmp(type, "btn"), .sw = 2, .a2 = 360, .fs = 1,
+                                .vis = true, .fill = !strcmp(type, "btn") || !strcmp(type, "tri"),
+                                .sw = 2, .a2 = 360, .fs = 1,
                                 .r = !strcmp(type, "btn") ? 14 : 0 };
         strcpy(node->id, id);
         if (!update(node, item)) return false;
@@ -166,6 +186,9 @@ void scene_render(const scene_t *scene, uint16_t *fb)
         case NODE_LINE:
             gfx_thick_line(fb, n->x1, n->y1, n->x2, n->y2, n->sw, n->c);
             break;
+        case NODE_TRI:
+            gfx_tri(fb, n->x1, n->y1, n->x2, n->y2, n->x3, n->y3, n->sw, n->fill, n->c);
+            break;
         case NODE_ARC:
             gfx_thick_arc(fb, n->x, n->y, n->r, n->a1, n->a2, n->sw, n->c);
             break;
@@ -191,7 +214,7 @@ void scene_render(const scene_t *scene, uint16_t *fb)
 
 static bool hit(const scene_node_t *n, int x, int y)
 {
-    const int pad = 10;
+    int pad = 10;
     if (n->kind == NODE_CIRCLE || n->kind == NODE_ARC) {
         int dx = x - n->x, dy = y - n->y, r = n->r + pad;
         return dx * dx + dy * dy <= r * r;
@@ -206,7 +229,13 @@ static bool hit(const scene_node_t *n, int x, int y)
         return px * px + py * py <= r * r;
     }
     int left = n->x, top = n->y, w = n->w, h = n->h;
-    if (n->kind == NODE_TEXT) {
+    if (n->kind == NODE_TRI) {
+        pad += n->sw / 2;
+        left = min(n->x1, min(n->x2, n->x3));
+        top = min(n->y1, min(n->y2, n->y3));
+        w = max(n->x1, max(n->x2, n->x3)) - left + 1;
+        h = max(n->y1, max(n->y2, n->y3)) - top + 1;
+    } else if (n->kind == NODE_TEXT) {
         text_box(n, &left, &top, &w, &h);
         if (!n->w) {
             w = (int)strlen(n->s) * n->fs * 8;

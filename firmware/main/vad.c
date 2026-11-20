@@ -32,10 +32,10 @@ vad_result_t vad_update(vad_t *v, uint32_t energy)
         } else if (v->frames >= 550) {
             return VAD_NO_SPEECH;
         }
-    } else if (energy >= v->threshold / 2) {
+    } else if (energy >= v->threshold / 4) {
         ++v->voiced;
         v->silence = 0;
-    } else if (++v->silence >= 130) {
+    } else if (++v->silence >= 180) {
         return v->voiced >= MIN_WORD_FRAMES ? VAD_SEND : VAD_NO_SPEECH;
     }
     return VAD_CONTINUE;

@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -57,6 +58,45 @@ static void primitives(void)
     assert(pixel(359, 359) == blue);
 }
 
+static void triangles(void)
+{
+    const gfx_color_t ink = gfx_rgb565(0x38bdf8);
+    gfx_clear(fb, 0);
+    gfx_tri(fb, 150, 180, 180, 120, 210, 180, 3, true, ink);
+    assert(pixel(180, 120) == ink && pixel(180, 150) == ink);
+    assert(pixel(179, 121) == 0 && pixel(180, 121) == ink && pixel(181, 121) == 0);
+    assert(pixel(149, 180) == 0 && pixel(150, 180) == ink && pixel(210, 180) == ink && pixel(211, 180) == 0);
+    assert(pixel(180, 181) == 0);
+
+    gfx_clear(fb, 0);
+    gfx_tri(fb, 180, 120, 150, 180, 210, 180, 0, false, ink);
+    assert(pixel(165, 150) == 0 && pixel(180, 180) == 0);
+    gfx_tri(fb, 180, 120, 150, 180, 210, 180, 6, false, ink);
+    assert(pixel(165, 150) == ink && pixel(195, 150) == ink && pixel(180, 180) == ink);
+    assert(pixel(180, 150) == 0 && pixel(180, 183) == ink && pixel(180, 184) == 0);
+
+    gfx_clear(fb, 0);
+    gfx_tri(fb, -20, 180, 180, -20, 380, 180, 3, true, ink);
+    for (int y = 0; y < GFX_HEIGHT; ++y) {
+        for (int x = 0; x < GFX_WIDTH; ++x) {
+            int dx = x - 180, dy = y - 180;
+            bool inside = y <= 180 && x + y >= 160 && x - y <= 200 && dx * dx + dy * dy <= 180 * 180;
+            assert(pixel(x, y) == (inside ? ink : 0));
+        }
+    }
+
+    gfx_clear(fb, 0);
+    gfx_tri(fb, -20, 0, 380, 0, 180, 380, 3, false, ink);
+    assert(pixel(180, 0) == ink && pixel(179, 0) == 0 && pixel(181, 0) == 0);
+
+    gfx_clear(fb, 0);
+    gfx_tri(fb, INT_MIN, INT_MIN, INT_MAX, INT_MIN, INT_MAX, INT_MAX, 3, true, ink);
+    assert(pixel(179, 180) == 0 && pixel(180, 180) == ink && pixel(181, 180) == ink);
+    gfx_clear(fb, 0);
+    gfx_tri(fb, INT_MIN, 180, INT_MAX, 180, INT_MAX, INT_MIN, 3, false, ink);
+    assert(pixel(0, 180) == ink && pixel(359, 180) == ink && pixel(180, 182) == 0);
+}
+
 static void scenes(void)
 {
     assert(apply("{\"op\":\"scene\",\"rev\":5,\"bg\":\"#0000FF\",\"nodes\":["
@@ -86,11 +126,50 @@ static void scenes(void)
     hit(155, 30, "top");
 }
 
+static void triangle_scene(void)
+{
+    const gfx_color_t blue = gfx_rgb565(0x38bdf8), red = gfx_rgb565(0xff0000);
+    assert(apply("{\"op\":\"scene\",\"rev\":8,\"bg\":\"#000000\",\"nodes\":["
+                 "{\"id\":\"fin\",\"t\":\"tri\",\"x1\":180,\"y1\":120,\"x2\":150,\"y2\":180,"
+                 "\"x3\":210,\"y3\":180,\"c\":\"#38BDF8\",\"fill\":true,\"sw\":3,\"on\":\"tap\"},"
+                 "{\"id\":\"default\",\"t\":\"tri\",\"x1\":-10,\"y1\":170,\"x2\":60,\"y2\":160,"
+                 "\"x3\":50,\"y3\":220,\"c\":\"#FF0000\",\"on\":\"tap\"}]}"));
+    scene_render(&scene, fb);
+    assert(pixel(180, 150) == blue && pixel(45, 180) == red);
+    const scene_node_t *n = scene_hit_test(&scene, 45, 180);
+    assert(n && n->kind == NODE_TRI && n->x1 == 0 && n->fill && n->sw == 2);
+    hit(139, 109, "fin"); // Padded box, not a point-in-triangle test.
+    hit(138, 109, NULL);
+    hit(221, 191, "fin");
+    hit(222, 191, NULL);
+
+    assert(apply("{\"op\":\"patch\",\"rev\":9,\"set\":{\"fin\":{\"x1\":240,\"y1\":-100,"
+                 "\"x2\":220,\"y2\":100,\"x3\":900,\"y3\":78,\"fill\":false,\"sw\":6,"
+                 "\"c\":\"#FF0000\",\"on\":\"drag\"}}}"));
+    scene_render(&scene, fb);
+    assert(pixel(180, 150) == 0 && pixel(220, 103) == red && pixel(220, 104) == 0);
+    hit(180, 150, NULL);
+    n = scene_hit_test(&scene, 218, 78);
+    assert(n && !strcmp(n->id, "fin") && n->on == NODE_DRAG && !n->fill && n->sw == 6);
+    assert(n->x1 == 240 && n->y1 == 0 && n->x2 == 220 && n->y2 == 100 && n->x3 == 359 && n->y3 == 78);
+
+    assert(apply("{\"op\":\"patch\",\"rev\":10,\"set\":{\"fin\":{\"vis\":false}}}"));
+    scene_render(&scene, fb);
+    assert(pixel(220, 103) == 0);
+    hit(218, 78, NULL);
+    assert(apply("{\"op\":\"patch\",\"rev\":11,\"set\":{\"fin\":{\"vis\":true,\"on\":\"\"}}}"));
+    scene_render(&scene, fb);
+    assert(pixel(220, 103) == red);
+    hit(218, 78, NULL);
+}
+
 int main(void)
 {
     guarded[0] = guarded[GFX_PIXELS + 1] = 0x77aa;
     primitives();
+    triangles();
     scenes();
+    triangle_scene();
     scene_render_offline(fb, "Cake", "203.0.113.1", "Waiting for bridge");
     assert(pixel(172, 100) == gfx_rgb565(0xfff3d1));
     assert(pixel(180, 77) == gfx_rgb565(0xf59e0b));
@@ -100,5 +179,5 @@ int main(void)
     assert(pixel(180, 77) == gfx_rgb565(0x228e81));
     assert(pixel(248, 142) == gfx_rgb565(0x1a1926));
     assert(guarded[0] == 0x77aa && guarded[GFX_PIXELS + 1] == 0x77aa);
-    puts("PASS RGB565 byte order, clipped primitives, text wrapping, keyed scene patches, hit tests, and offline faces");
+    puts("PASS RGB565 byte order, clipped primitives, filled/stroked triangles, scene patches, hit tests, and offline faces");
 }
