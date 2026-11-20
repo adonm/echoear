@@ -15,8 +15,15 @@ if command -v shellcheck >/dev/null; then
 fi
 printf 'PASS shell checks\n'
 
-python3 -m py_compile bridge/{backend,server,state,test_bridge,tts}.py
-python3 -O bridge/test_bridge.py --unit
+# shellcheck source=scripts/go-bin.sh
+source scripts/go-bin.sh
+GO_BIN=$(resolve_go)
+python3 -m py_compile bridge/tts_worker.py
+(
+    cd bridge
+    "$GO_BIN" vet ./...
+    "$GO_BIN" test -race ./...
+)
 
 vad_test=$(mktemp)
 trap 'rm -f -- "$vad_test"' EXIT
@@ -41,5 +48,5 @@ done
 printf 'PASS tracked-file hygiene\n'
 
 if [[ ${1-} == --live ]]; then
-    python3 bridge/test_bridge.py
+    (cd bridge && "$GO_BIN" test -tags=live -v -count=1 ./...)
 fi

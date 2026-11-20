@@ -3,10 +3,10 @@
 EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk voice tutor with interactive diagrams and a cat-to-cat intercom.
 
 ```text
-EchoEar <-- Wi-Fi PCM, replies, cards --> Python bridge :8765
+EchoEar <-- Wi-Fi PCM, replies, cards --> Go bridge :8765
                                            |-- Hex      (speech to text)
-                                           |-- OpenCode (echoear agent)
-                                           `-- Kokoro   (local speech)
+                                           |-- OpenCode (reply deltas over SSE)
+                                           `-- Kokoro   (persistent FP32 worker)
 Bridge :8765 -- intercom card and audio --> Recipient EchoEar :80
 ```
 
@@ -15,17 +15,18 @@ Bridge :8765 -- intercom card and audio --> Recipient EchoEar :80
 
 ## Quickstart
 
-1. On Linux, install Python 3.11+, Hex 3.4.0, OpenCode V2, Vulkan drivers, Podman,
-   `uv`/`uvx`, and `curl`. Use a systemd user session.
+1. On Linux, install Go 1.26, Python 3.11+, Hex 3.4.0, OpenCode V2, Vulkan
+   drivers, Podman, `uv`/`uvx`, and `curl`. Use a systemd user session.
 
    ```sh
    hex model devices
    ./scripts/setup-host.sh --gpu-index 0
    ```
 
-   Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup installs
-   Hex's `parakeet_unified_en` and Kokoro models, links the [EchoEar agent](agents/echoear.md),
-   and starts both services. Set `ECHOEAR_OPENCODE_MODEL` in `bridge.env` to change models.
+   Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup builds
+   the Go bridge, installs Hex's `parakeet_unified_en` and FP32 `kokoro-v1.0.onnx`,
+   links the [EchoEar agent](agents/echoear.md), and starts both services.
+   Set `ECHOEAR_OPENCODE_MODEL` in `bridge.env` to change models.
 
 2. Create the private firmware config once:
 
@@ -54,9 +55,9 @@ Bridge :8765 -- intercom card and audio --> Recipient EchoEar :80
    environment or `bridge.env`. The board confirms the new image after display
    initialization and Wi-Fi DHCP; the script checks the running partition.
 
-5. Run `./scripts/check.sh` for offline checks (host GCC required, ShellCheck optional).
-   Add `--live` for the bridge suite with Hex, OpenCode, Kokoro, and Flite
-   (or pass `--wav` to `bridge/test_bridge.py`).
+5. Run `./scripts/check.sh` for `go vet`, race tests, and the host VAD test
+   (GCC required, ShellCheck optional). Run `./scripts/check.sh --live` to
+   also exercise the running bridge, Hex, OpenCode, and Kokoro.
 
 ## Controls and intercom
 
@@ -76,6 +77,8 @@ Bridge :8765 -- intercom card and audio --> Recipient EchoEar :80
 
 Send `X-EchoEar-Token` except for `/health` and `/status`. Audio is signed 16-bit
 little-endian mono PCM at 16 kHz; voice inputs also accept WAV, up to 2 MiB.
+The bridge starts sentence synthesis in a persistent FP32 Kokoro worker while
+OpenCode is still streaming the reply over SSE.
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
