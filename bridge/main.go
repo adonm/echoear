@@ -32,7 +32,8 @@ func openCodeSettings(agent, spec string) (ocSettings, error) {
 	}
 	s := ocSettings{agent, ocModel{m[1], m[2], m[3]}, []ocPermission{{"*", "*", "deny"}}}
 	if agent == "echoear" {
-		s.Permissions = append(s.Permissions, ocPermission{"webfetch", "*", "allow"})
+		s.Permissions = append(s.Permissions, ocPermission{"webfetch", "*", "allow"},
+			ocPermission{"echoear_*", "*", "allow"}, ocPermission{"execute", "*", "allow"})
 	}
 	return s, nil
 }
@@ -82,8 +83,16 @@ func run() error {
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, peers: loadPeers(filepath.Join(local, "devices.json")),
 		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
+		virtual: loadVirtual(filepath.Join(local, "virtual_clients.json")), history: loadChatHistory(filepath.Join(local, "chat_events.json")),
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
 	b.ws = newWSHub(b)
+	bin := findTunnelCLI(home)
+	var runner tunnelRunner
+	if bin != "" {
+		runner = tunnelCLI(bin)
+	}
+	b.tunnels = newTunnelManager(b, filepath.Join(local, "tunnels.json"), bin, runner)
+	b.tunnels.restore()
 	go func() {
 		ctx, cancel := context.WithTimeout(root, ttsWait)
 		defer cancel()
@@ -106,6 +115,7 @@ func run() error {
 	go func() { served <- server.Serve(listener) }()
 	select {
 	case <-signals.Done():
+		b.tunnels.shutdown()
 		b.ws.shutdown()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -116,6 +126,7 @@ func run() error {
 	case err = <-served:
 	}
 	finish()
+	b.tunnels.shutdown()
 	b.ws.shutdown()
 	<-worker.done
 	oc.client.CloseIdleConnections()
@@ -128,6 +139,12 @@ func run() error {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "mcp" {
+		if err := runMCPStdio(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}

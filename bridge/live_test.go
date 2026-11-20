@@ -308,10 +308,14 @@ func TestLive(t *testing.T) {
 			Devices []struct {
 				DeviceID string `json:"device_id"`
 				IP       string `json:"ip"`
+				Kind     string `json:"kind"`
 			}
 		}](t, c, "/api/devices", nil, nil, "", nil)
 		devices := make(map[string]string, len(got.Devices))
 		for _, p := range got.Devices {
+			if p.Kind == "virtual" {
+				continue
+			}
 			if p.DeviceID == "" || net.ParseIP(p.IP) == nil || devices[p.DeviceID] != "" {
 				t.Fatal("invalid or duplicate peer in live registry")
 			}
@@ -466,7 +470,9 @@ func TestLive(t *testing.T) {
 		checkDelivery()
 		t.Logf("fast_path_intercom_ms=%d tts_first_ms=%d", elapsed, fast.TTSFirstMS)
 		start = time.Now()
-		ai := liveJSON[answer](t, iso, "/api/text", object{"device_id": sender, "text": "Send MockPeer a short dinosaur joke!"}, nil, "", nil)
+		ai := liveJSON[answer](t, iso, "/api/text", object{"device_id": sender,
+			"text": "Send MockPeer a short dinosaur joke! This isolated legacy client has no tool access to MockPeer. Use the legacy fenced echoear-message JSON with to and text, not tools."},
+			nil, "", nil)
 		if ai.SentTo == nil || !slices.Equal(*ai.SentTo, []string{target}) || strings.Contains(ai.Reply, "```") {
 			t.Fatal("AI echoear-message was not delivered or leaked into reply")
 		}
@@ -475,7 +481,7 @@ func TestLive(t *testing.T) {
 		assertLiveActor(t, oc, ai.SessionID, settings)
 		prompt, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+ai.SessionID+"/message?order=desc&limit=1&type=user", nil)
 		if err != nil || len(prompt) != 1 || !strings.HasPrefix(prompt[0].Text,
-			"[EchoEar: you are Cake ("+sender+"); other EchoEars: MockPeer ("+target+")]") {
+			"[EchoEar: you are Cake (device_id="+sender+"); other EchoEars: MockPeer ("+target+"); screen transport=legacy HTTP]") {
 			t.Fatal("OpenCode peer prompt context lost")
 		}
 		reg := liveJSON[struct {

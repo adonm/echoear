@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,6 +53,7 @@ type wsClient struct {
 	role   string
 	watch  string
 	device *wsDevice
+	scope  *virtualClient
 }
 
 type wsDevice struct {
@@ -60,32 +61,36 @@ type wsDevice struct {
 	who      peer
 	key      string
 	firmware string
+	theme    string
 	vol      int
 	pct      int
 	mV       int
 	rssi     int
 	charging bool
 
-	scene   sceneView
-	view    *sceneView
-	pending *sceneView
-	drawer  bool
-	rev     uint64
-	pose    catPose
-	drag    string
-	moodAt  time.Time
-	last    time.Time
-	meter   time.Time
-	pet     time.Time
-	asleep  bool
+	scene       sceneView
+	view        *sceneView
+	pending     *sceneView
+	drawer      bool
+	rev         uint64
+	pose        catPose
+	drag        string
+	moodAt      time.Time
+	last        time.Time
+	meter       time.Time
+	pet         time.Time
+	asleep      bool
+	customScene bool
 
-	recAt     time.Time
-	recOpen   bool
-	recTarget string
-	mic       []byte
-	turn      uint64
-	cancel    context.CancelFunc
-	busy      bool
+	recAt         time.Time
+	recOpen       bool
+	recTarget     string
+	mic           []byte
+	turn          uint64
+	cancel        context.CancelFunc
+	busy          bool
+	agentSetScene bool
+	agentSpoke    bool
 
 	audio      uint64
 	stopAudio  context.CancelFunc
@@ -94,20 +99,27 @@ type wsDevice struct {
 	audioUntil time.Time
 }
 
+func (d *wsDevice) virtual() bool {
+	return virtualID.MatchString(d.key) || phoneID.MatchString(d.key)
+}
+
 // The hub lock orders state changes and outbound frames. Socket writes and
 // backend requests never run under it.
 type wsHub struct {
-	b       *bridge
-	mu      sync.Mutex
-	conns   sync.WaitGroup
-	clients map[*wsClient]struct{}
-	devices map[string]*wsDevice
-	closed  bool
-	peers   string
+	b          *bridge
+	mu         sync.Mutex
+	conns      sync.WaitGroup
+	clients    map[*wsClient]struct{}
+	devices    map[string]*wsDevice
+	events     map[string]*eventRing
+	httpSpeech map[string]*atomic.Bool
+	closed     bool
+	peers      string
 }
 
 func newWSHub(b *bridge) *wsHub {
-	h := &wsHub{b: b, clients: make(map[*wsClient]struct{}), devices: make(map[string]*wsDevice)}
+	h := &wsHub{b: b, clients: make(map[*wsClient]struct{}), devices: make(map[string]*wsDevice),
+		events: make(map[string]*eventRing), httpSpeech: make(map[string]*atomic.Bool)}
 	go h.animate(b.root)
 	return h
 }
@@ -125,15 +137,17 @@ func (h *wsHub) shutdown() {
 }
 
 func (h *wsHub) serve(w http.ResponseWriter, r *http.Request) error {
-	authorized := func(values []string) bool {
-		return len(values) == 1 && h.b.token != "" && subtle.ConstantTimeCompare([]byte(values[0]), []byte(h.b.token)) == 1
-	}
-	if !authorized(r.Header.Values("X-EchoEar-Token")) && !authorized(r.URL.Query()["token"]) {
+	if !tokenMatches(r.Header.Values("X-EchoEar-Token"), h.b.token) && !tokenMatches(r.URL.Query()["token"], h.b.token) {
 		return problem(401, "Unauthorized")
 	}
+	return h.serveScope(w, r, nil)
+}
+
+func (h *wsHub) serveScope(w http.ResponseWriter, r *http.Request, scope *virtualClient) error {
 	if origin := r.Header.Get("Origin"); origin != "" {
 		u, err := url.Parse(origin)
-		if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, r.Host) {
+		if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" ||
+			(u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, r.Host) {
 			return problem(403, "Unexpected WebSocket origin")
 		}
 	}
@@ -147,8 +161,8 @@ func (h *wsHub) serve(w http.ResponseWriter, r *http.Request) error {
 	if err != nil || wire == nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(h.b.root)
-	c := &wsClient{wire: wire, ctx: ctx, cancel: cancel, out: make(chan wsFrame, 192)}
+	ctx, cancel := context.WithCancel(r.Context())
+	c := &wsClient{wire: wire, ctx: ctx, cancel: cancel, out: make(chan wsFrame, 192), scope: scope}
 	h.mu.Lock()
 	if closed := h.closed; closed || len(h.clients) >= wsConnections {
 		h.mu.Unlock()
@@ -253,6 +267,18 @@ func (h *wsHub) detach(c *wsClient) {
 	}
 }
 
+func (h *wsHub) disconnectDevice(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if d := h.devices[id]; d != nil {
+		d.client.cancel()
+		delete(h.devices, id)
+		h.cancelTurn(d)
+		h.stopPlayback(d, false)
+		h.broadcastPeers()
+	}
+}
+
 func (h *wsHub) peerSnapshot(sender string) ([]peer, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -281,6 +307,9 @@ func (h *wsHub) combinedPeers(sender string) ([]peer, error) {
 			continue
 		}
 		p := d.who
+		if d.virtual() {
+			p.IP = ""
+		}
 		p.LastSeen = now
 		if i, ok := index[d.key]; ok {
 			p.IP, p.Port = stored[i].IP, stored[i].Port
@@ -321,7 +350,7 @@ func (h *wsHub) broadcastPeers() {
 	if string(f.data) != h.peers {
 		h.peers = string(f.data)
 		for c := range h.clients {
-			if c.role == "web" {
+			if c.role == "web" && c.scope == nil {
 				c.enqueue(f)
 			}
 		}
@@ -335,17 +364,33 @@ func (h *wsHub) broadcastPeers() {
 
 func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	phone := phoneID.MatchString(ev.DeviceID)
+	var v virtualClient
+	if c.scope != nil {
+		ev.Role, ev.DeviceID = "web", c.scope.ID
+		v = *c.scope
+	} else if virtualID.MatchString(strings.ToLower(ev.DeviceID)) {
+		var ok bool
+		v, ok = h.b.virtualByID(ev.DeviceID)
+		if !ok {
+			c.enqueue(textFrame(object{"op": "error", "status": 404, "error": "Virtual client not found"}))
+			return
+		}
+		ev.Role = "web"
+	}
 	if ev.Role != "device" && ev.Role != "web" ||
 		ev.Role == "device" && !deviceIDRE.MatchString(ev.DeviceID) ||
 		ev.Role == "web" && ev.DeviceID != "" && !deviceIDRE.MatchString(ev.DeviceID) {
 		return
 	}
-	if ev.Role == "web" && !phone {
+	if ev.Role == "web" && !phone && v.ID == "" {
 		c.role = "web"
 		c.enqueue(h.peerFrame())
 		return
 	}
 	character := strings.TrimSpace(ev.Character)
+	if v.ID != "" {
+		character = v.Character
+	}
 	if !characterRE.MatchString(character) {
 		return
 	}
@@ -355,7 +400,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	ip, _ := lanIP(host, true) // Advertised IP never replaces an HTTP registration.
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: peer{DeviceID: ev.DeviceID, Character: character, IP: ip},
-		firmware: shortText(ev.Firmware, 24, false), pct: -1, vol: 80, last: now, moodAt: now}
+		firmware: shortText(ev.Firmware, 24, false), theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
 		h.cancelTurn(old)
@@ -369,7 +414,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	h.push(d, object{"op": "power", "brightness": 85}, true)
 	previous := h.peers
 	h.broadcastPeers()
-	if c.role == "web" && previous == h.peers {
+	if c.scope != nil {
+		c.enqueue(textFrame(object{"op": "peers", "devices": []object{{"device_id": d.key, "character": character, "kind": "virtual", "theme": v.Theme, "online": true, "ws": true, "ws_connected": true}}}))
+	} else if c.role == "web" && previous == h.peers {
 		c.enqueue(h.peerFrame())
 	}
 	if h.b.worker != nil {
@@ -419,13 +466,20 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	var view sceneView
 	switch {
 	case d.drawer && mood == "idle":
-		peers, _ := h.combinedPeers(d.who.DeviceID)
+		var peers []peer
+		if d.client.scope == nil {
+			peers, _ = h.combinedPeers(d.who.DeviceID)
+		}
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
 		view = drawerScene(d.who.Character, peers)
-	case d.view != nil && mood != "sleepy" && mood != "listening":
+	case d.view != nil && (d.customScene || mood != "sleepy" && mood != "listening"):
 		view = *d.view
 	default:
-		view = catScene(d.who.Character, pose)
+		theme := d.theme
+		if theme == "" {
+			theme = d.who.Character
+		}
+		view = catScene(theme, pose)
 	}
 	d.pose = pose
 	d.rev++
@@ -499,6 +553,10 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	if h.closed || c.ctx.Err() != nil {
 		return
 	}
+	if c.scope != nil && ev.DeviceID != "" && ev.DeviceID != c.scope.ID {
+		c.enqueue(textFrame(object{"op": "error", "status": 403, "error": "Device out of scope"}))
+		return
+	}
 	now := time.Now()
 	if c.role == "" {
 		if ev.Event == "hello" {
@@ -538,6 +596,10 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	if d == nil || !h.active(d) {
 		return
 	}
+	if c.scope != nil && ev.Event == "watch" && ev.DeviceID == c.scope.ID {
+		c.enqueue(textFrame(d.scene.full(d.rev)))
+		return
+	}
 	switch ev.Event {
 	case "status":
 		prev := d.vol
@@ -554,6 +616,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.wake(d, now)
 			d.pet = now.Add(300 * time.Millisecond)
 			h.push(d, object{"op": "chime", "kind": "tap"}, false)
+			h.emit(d.who.DeviceID, "head_pet", object{})
 			h.render(d, now, false)
 		case "vol_up", "vol_down":
 			v := d.vol + 5
@@ -567,6 +630,10 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 	case "rec_start":
 		if target, ok := recordTarget(ev.Target); ok && !d.recOpen {
+			if c.scope != nil && target != "" {
+				c.enqueue(textFrame(object{"op": "error", "status": 403, "error": "Intercom is unavailable in public chat"}))
+				return
+			}
 			if target == "" {
 				target = d.recTarget
 			}
@@ -579,8 +646,11 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	case "text":
 		text := strings.TrimSpace(ev.Text)
 		if text != "" && len(text) <= 4096 {
+			if h.emit(d.who.DeviceID, "speech", object{"text": text, "source": "text"}) {
+				return
+			}
 			h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
-				h.runTurn(ctx, d, id, text, nil)
+				h.runTurn(ctx, d, id, text, nil, d.client.scope != nil)
 			})
 		}
 	case "tts_ack":
@@ -620,6 +690,18 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		return
 	}
 	key, a := d.scene.action(ev.ID, ev.X, ev.Y, "tap")
+	if key != "" || d.customScene {
+		waiting := h.emit(d.who.DeviceID, "tap", object{"id": key, "x": ev.X, "y": ev.Y})
+		if d.customScene && key != "" && waiting {
+			if a.kind == "cat" {
+				d.drawer, d.view, d.pending, d.customScene, d.agentSetScene = false, nil, nil, false, d.busy
+				h.render(d, now, true)
+			} else {
+				h.push(d, object{"op": "chime", "kind": "tap"}, false)
+			}
+			return
+		}
+	}
 	switch a.kind {
 	case "drawer":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
@@ -628,11 +710,14 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 	case "cat":
 		h.cancelTurn(d)
 		h.stopPlayback(d, true)
-		d.drawer, d.view, d.pending = false, nil, nil
+		d.drawer, d.view, d.pending, d.customScene = false, nil, nil, false
 		h.render(d, now, true)
 	case "new":
 		h.startTurn(d, now, false, func(ctx context.Context, id uint64) { h.resetTurn(ctx, d, id) })
 	case "listen", "reply", "reply_to":
+		if d.client.scope != nil && a.value != "" {
+			return
+		}
 		if !d.recAt.IsZero() {
 			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
 		} else {
@@ -649,7 +734,9 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 			hint = "Asking…"
 		}
 		d.view = d.scene.hint(hint)
-		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, a.value, nil) })
+		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, a.value, nil, d.client.scope != nil) })
+	case "event":
+		h.push(d, object{"op": "chime", "kind": "tap"}, false)
 	}
 }
 

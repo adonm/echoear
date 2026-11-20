@@ -297,5 +297,5 @@ func turnPrompt(sender peer, others []peer, text string) string {
 	if len(names) != 0 {
 		list = strings.Join(names, ", ")
 	}
-	return fmt.Sprintf("[EchoEar: you are %s (%s); other EchoEars: %s]\n%s", sender.Character, sender.DeviceID, list, text)
+	return fmt.Sprintf("[EchoEar: you are %s (device_id=%s); other EchoEars: %s]\n%s", sender.Character, sender.DeviceID, list, text)
 }

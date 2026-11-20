@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +33,9 @@ type bridge struct {
 	peerHTTP *http.Client
 	ota      otaFile
 	ws       *wsHub
+	virtual  *store[virtualClient]
+	tunnels  *tunnelManager
+	history  *chatHistory
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
@@ -53,27 +56,38 @@ func sendJSON(w http.ResponseWriter, status int, v any) {
 func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.EscapedPath()
 	w.Header().Set("Cache-Control", "no-store")
+	if path == "/mcp" {
+		b.serveMCP(w, r)
+		return
+	}
 	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ota/") {
-		tokens := r.Header.Values("X-EchoEar-Token")
-		if len(tokens) != 1 || subtle.ConstantTimeCompare([]byte(tokens[0]), []byte(b.token)) != 1 {
-			sendJSON(w, 401, object{"error": "Unauthorized"})
+		if !tokenMatches(r.Header.Values("X-EchoEar-Token"), b.token) {
+			sendError(w, problem(401, "Unauthorized"))
 			return
 		}
 	}
 	value, err := b.route(w, r, path)
+	sendResult(w, value, err)
+}
+
+func sendResult(w http.ResponseWriter, value any, err error) {
 	if err != nil {
-		status := 502
-		var api *apiError
-		var upstream *upstreamStatus
-		if errors.As(err, &api) {
-			status = api.status
-		} else if errors.As(err, &upstream) {
-			status = upstream.status
-		}
-		sendJSON(w, status, object{"error": err.Error()})
+		sendError(w, err)
 	} else if value != nil {
 		sendJSON(w, 200, value)
 	}
+}
+
+func sendError(w http.ResponseWriter, err error) {
+	status := 502
+	var api *apiError
+	var upstream *upstreamStatus
+	if errors.As(err, &api) {
+		status = api.status
+	} else if errors.As(err, &upstream) {
+		status = upstream.status
+	}
+	sendJSON(w, status, object{"error": err.Error()})
 }
 
 func body(r *http.Request, audio bool) ([]byte, string, error) {
@@ -156,6 +170,9 @@ func (b *bridge) identity(r *http.Request, obj object, register bool) (peer, err
 	device, err := deviceID(r, obj, register)
 	if err != nil {
 		return peer{}, err
+	}
+	if virtualID.MatchString(strings.ToLower(device)) {
+		return peer{}, problem(400, "Virtual clients use /api/chat and WebSocket")
 	}
 	source, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if addr, err := netip.ParseAddr(source); err == nil {
@@ -394,15 +411,28 @@ func (b *bridge) relay(ctx context.Context, sender peer, others []peer, target, 
 }
 
 func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte, kind string) (answer, error) {
+	return b.turnFor(ctx, sender, text, body, kind, false)
+}
+
+func (b *bridge) turnFor(ctx context.Context, sender peer, text string, body []byte, kind string, scoped bool) (answer, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return answer{}, problem(400, "Expected nonempty text")
 	}
-	others, err := b.peerSnapshot(sender.DeviceID)
-	if err != nil {
-		return answer{}, err
+	var others []peer
+	var err error
+	if !scoped {
+		others, err = b.peerSnapshot(sender.DeviceID)
+		if err != nil {
+			return answer{}, err
+		}
 	}
-	if direct := directMessage(others, text); direct != nil {
+	source := "text"
+	if body != nil {
+		source = "voice"
+	}
+	if direct := directMessage(others, text); !scoped && direct != nil {
+		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
 		pcm := body
 		if kind == wavType {
 			pcm, err = wavPCM(body)
@@ -412,7 +442,23 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 		}
 		return b.relay(ctx, sender, others, direct.target, direct.text, pcm)
 	}
-	gen, err := b.generateReply(ctx, b.root, sender, others, text, nil)
+	options := turnOptions{source: source, scoped: scoped, legacyScreen: !scoped && !virtualID.MatchString(sender.DeviceID)}
+	if b.ws != nil {
+		key := strings.ToLower(sender.DeviceID)
+		spoke := new(atomic.Bool)
+		options.agentSpoke = spoke.Load
+		options.begin = func() func() {
+			b.ws.mu.Lock()
+			b.ws.httpSpeech[key] = spoke
+			b.ws.mu.Unlock()
+			return func() {
+				b.ws.mu.Lock()
+				delete(b.ws.httpSpeech, key)
+				b.ws.mu.Unlock()
+			}
+		}
+	}
+	gen, err := b.generateReply(ctx, b.root, sender, others, text, options)
 	if err != nil {
 		return answer{}, err
 	}
@@ -421,7 +467,7 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 	if gen.reply != "" {
 		b.attachAudio(ctx, &out, gen.audio, gen.ttsStart)
 	}
-	if gen.message != nil {
+	if !scoped && gen.message != nil {
 		d := b.deliver(ctx, sender, targets(others, gen.message.target), gen.message.text, nil)
 		out.SentTo, out.DeliveredTo, out.FailedTo, out.Error = &d.sent, &d.delivered, &d.failed, d.err
 	}
@@ -435,11 +481,23 @@ type generatedReply struct {
 	audio      *AudioStream
 	openMS     int64
 	ttsStart   time.Time
+	spoken     bool
+}
+
+type turnOptions struct {
+	source       string
+	scoped       bool
+	legacyScreen bool
+	publish      func(*AudioStream)
+	agentSpoke   func() bool
+	begin        func() func()
 }
 
 // HTTP verifies the final text before publishing an audio URL. A WebSocket can
 // play the speculative stream; nil tells it to interrupt a superseded stream.
-func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, others []peer, text string, publish func(*AudioStream)) (generatedReply, error) {
+func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, others []peer, text string, options turnOptions) (generatedReply, error) {
+	publish := options.publish
+	agentSpoke := func() bool { return options.agentSpoke != nil && options.agentSpoke() }
 	makeSpeech := func() *speechTurn {
 		deadline, _ := ctx.Deadline()
 		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
@@ -453,12 +511,12 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 	}
 	discard := func() {
 		eager.discard()
-		if publish != nil {
+		if publish != nil && !agentSpoke() {
 			publish(nil)
 		}
 	}
 	onSentence := func(s string) {
-		if b.worker == nil || !b.worker.ready.Load() {
+		if b.worker == nil || !b.worker.ready.Load() || agentSpoke() {
 			return
 		}
 		if eager == nil {
@@ -468,7 +526,20 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 		eager.send(s)
 	}
 	start := time.Now()
-	raw, sid, err := b.oc.ask(ctx, sender.DeviceID, turnPrompt(sender, others, text), onSentence)
+	key := sender.DeviceID
+	prompt := turnPrompt(sender, others, text)
+	if options.scoped {
+		key = scopedSession(key)
+		prompt = strings.Replace(prompt, "; other EchoEars:", "; public chat (spoken prose only); other EchoEars:", 1)
+	} else if options.legacyScreen {
+		prompt = strings.Replace(prompt, "]\n", "; screen transport=legacy HTTP]\n", 1)
+	}
+	raw, sid, err := b.oc.ask(ctx, key, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
+		if entry.Role == "assistant" {
+			entry.Sender = sender.Character
+		}
+		b.chat(sender.DeviceID, entry, false)
+	})
 	openMS := time.Since(start).Milliseconds()
 	if err != nil {
 		if eager != nil {
@@ -477,10 +548,11 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 		return generatedReply{}, err
 	}
 	reply, screen, message := extractPayloads(raw)
+	spoken := agentSpoke()
 	ttsStart := time.Now()
 	var stream *AudioStream
 	clean, speechErr := spokenText(fenced.ReplaceAllString(reply, ""))
-	if speechErr == nil && (eager != nil || b.worker != nil && b.worker.ready.Load()) {
+	if !spoken && speechErr == nil && (eager != nil || b.worker != nil && b.worker.ready.Load()) {
 		final := SplitSentences(clean)
 		if eager == nil {
 			eager = makeSpeech()
@@ -496,7 +568,7 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 	} else if eager != nil {
 		discard()
 	}
-	return generatedReply{reply, sid, screen, message, stream, openMS, ttsStart}, nil
+	return generatedReply{reply, sid, screen, message, stream, openMS, ttsStart, spoken}, nil
 }
 
 func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any, error) {
@@ -525,6 +597,9 @@ func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any
 	if err != nil {
 		return nil, err
 	}
+	if transcript != "" {
+		b.deviceEvent(sender.DeviceID, "speech", object{"text": transcript, "source": "voice"})
+	}
 	out := answer{SampleRate: sampleRate}
 	switch {
 	case intercom:
@@ -549,6 +624,14 @@ func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any
 
 func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any, error) {
 	ctx := r.Context()
+	switch {
+	case path == "/api/virtual-clients" || strings.HasPrefix(path, "/api/virtual-clients/"):
+		return b.virtualAPI(w, r, path)
+	case path == "/api/tunnel/status" || path == "/api/tunnels" || strings.HasPrefix(path, "/api/tunnels/"):
+		return b.tunnelAPI(w, r, path)
+	case r.Method == http.MethodPost && (path == "/api/chat" || path == "/api/reset"):
+		return b.chatAPI(r, path, "")
+	}
 	switch r.Method {
 	case http.MethodGet:
 		switch {
@@ -570,8 +653,12 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			}
 			return object{"ok": true, "hex": <-h, "opencode": o, "tts": ready, "tts_engine": engine}, nil
 		case path == "/api/devices":
-			others, err := b.peerSnapshot("")
-			return object{"devices": publicPeers(others)}, err
+			devices, err := b.deviceList()
+			return object{"devices": devices}, err
+		case strings.HasSuffix(path, "/messages"):
+			if id, ok := messagesDevice(path); ok {
+				return b.messages(ctx, id)
+			}
 		case strings.HasPrefix(path, "/api/audio/"):
 			return nil, b.audio.ServeAudio(w, r, strings.TrimPrefix(path, "/api/audio/"))
 		case path == "/ota/version.json" || path == "/ota/latest.bin":
@@ -584,7 +671,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return b.voice(ctx, r, path == "/api/intercom")
 		}
 		switch path {
-		case "/api/register", "/api/text", "/api/reset", "/api/tts":
+		case "/api/register", "/api/text", "/api/tts":
 			obj, err := jsonBody(r)
 			if err != nil {
 				return nil, err
@@ -603,12 +690,6 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 					return nil, err
 				}
 				return b.turn(ctx, sender, str(obj["text"]), nil, "")
-			case "/api/reset":
-				device, err := deviceID(r, obj, false)
-				if err != nil {
-					return nil, err
-				}
-				return object{"ok": true}, b.oc.reset(ctx, device)
 			case "/api/tts":
 				text, err := spokenText(str(obj["text"]))
 				if err != nil {

@@ -138,9 +138,22 @@ func synthPCM(raw []byte, rate uint32) ([]byte, error) {
 }
 
 func MakeIntercomChimePCM() []byte {
+	return chimePCM("intercom")
+}
+
+func chimePCM(kind string) []byte {
+	tones := []float64{660, 880}
+	switch kind {
+	case "tap":
+		tones = []float64{740}
+	case "think":
+		tones = []float64{520, 620}
+	case "celebrate":
+		tones = []float64{660, 830, 990}
+	}
 	const length, fade, pause = sampleRate / 10, sampleRate / 80, sampleRate / 50
-	pcm := make([]byte, (length*2+pause)*2)
-	for t, tone := range []float64{660, 880} {
+	pcm := make([]byte, (length*len(tones)+pause*(len(tones)-1))*2)
+	for t, tone := range tones {
 		for i := range length {
 			envelope := min(1, float64(i)/fade, float64(length-1-i)/fade)
 			value := math.RoundToEven(4600 * envelope * math.Sin(2*math.Pi*tone*float64(i)/sampleRate))

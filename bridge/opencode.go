@@ -291,6 +291,13 @@ func (o *openCode) ensureSession(ctx context.Context, device string) (string, er
 		ID string `json:"id"`
 		ocSettings
 	}
+	settings := o.settings
+	if strings.HasPrefix(device, "scope-virt-") {
+		// Public chat must not grant a general HTTP or Code Mode client.
+		settings.Permissions = append(slices.Clone(settings.Permissions),
+			ocPermission{"execute", "*", "deny"}, ocPermission{"webfetch", "*", "deny"},
+			ocPermission{"echoear_*", "*", "deny"})
+	}
 	if sid != "" {
 		path := "/api/session/" + sid
 		current, err := ocData[session](ctx, o.upstream, http.MethodGet, path, nil)
@@ -298,7 +305,7 @@ func (o *openCode) ensureSession(ctx context.Context, device string) (string, er
 			if current.ID != sid {
 				return "", o.invalid()
 			}
-			s := o.settings
+			s := settings
 			if s.Agent != current.Agent {
 				if err := o.jsonCall(ctx, http.MethodPost, path+"/agent", object{"agent": s.Agent}, nil); err != nil {
 					return "", err
@@ -325,7 +332,7 @@ func (o *openCode) ensureSession(ctx context.Context, device string) (string, er
 		Title    string `json:"title"`
 		Location object `json:"location"`
 		ocSettings
-	}{"EchoEar: " + device, object{"directory": o.project}, o.settings}
+	}{"EchoEar: " + device, object{"directory": o.project}, settings}
 	created, err := ocData[session](ctx, o.upstream, http.MethodPost, "/api/session", in)
 	if err != nil {
 		return "", err
@@ -341,42 +348,148 @@ func (o *openCode) ensureSession(ctx context.Context, device string) (string, er
 
 type ocMessage struct {
 	ID, Type, Finish, Outcome string
-	Content                   []*struct {
-		Type string
-		Text *string
+	Text                      string
+	Time                      struct{ Created int64 }
+	Metadata                  struct{ EchoEarSource string }
+	Content                   []*ocMessagePart
+	Parts                     []*ocMessagePart
+	Error                     *struct{ Status int }
+}
+
+type ocMessagePart struct {
+	Type, Name, Tool string
+	Text             *string
+	State            struct{ Input struct{ Title string } }
+}
+
+func (m ocMessage) chat(source string) chatEntry {
+	entry := chatEntry{ID: m.ID, Role: m.Type, Source: source, Timestamp: time.UnixMilli(m.Time.Created).UTC()}
+	switch m.Type {
+	case "user":
+		entry.Sender, entry.Text = "You", m.Text
+	case "assistant":
+		entry.Sender = "EchoEar"
+	case "system":
+		entry.Sender, entry.Text = "System", m.Text
+	default:
+		return chatEntry{}
 	}
-	Error *struct{ Status int }
+	parts := m.Content
+	if parts == nil {
+		parts = m.Parts
+	}
+	var text, notes []string
+	for _, p := range parts {
+		if p == nil {
+			continue
+		}
+		if p.Type == "text" && p.Text != nil {
+			text = append(text, *p.Text)
+		}
+		name := p.Name
+		if name == "" {
+			name = p.Tool
+		}
+		if action, ok := strings.CutPrefix(name, "echoear_"); p.Type == "tool" && ok {
+			label := map[string]string{"devices": "Listed cats", "snapshot": "Checked the screen", "scene": "Showed a scene",
+				"patch": "Updated the screen", "speak": "Spoke aloud", "chime": "Played a chime", "intercom": "Sent an intercom message",
+				"wait_event": "Waited for an interaction"}[action]
+			if label != "" && !slices.Contains(notes, label) {
+				notes = append(notes, label)
+			}
+			if action == "scene" {
+				entry.SceneTitle = shortText(p.State.Input.Title, 48, false)
+			}
+		}
+	}
+	if entry.Text == "" {
+		entry.Text = strings.Join(text, "\n")
+	}
+	if m.Type == "user" && strings.HasPrefix(entry.Text, "[EchoEar: ") {
+		if first, rest, ok := strings.Cut(entry.Text, "\n"); ok && strings.HasSuffix(strings.TrimSuffix(first, "\r"), "]") {
+			entry.Text = rest
+		}
+	}
+	if m.Type == "assistant" {
+		entry.Text = fenced.ReplaceAllString(entry.Text, "")
+	}
+	entry.Text = strings.TrimSpace(entry.Text)
+	entry.ToolSummary = strings.Join(notes, "; ")
+	if entry.Text == "" && entry.ToolSummary != "" {
+		entry.Source = "mcp"
+	}
+	return entry
+}
+
+func (o *openCode) GetSessionMessages(ctx context.Context, sid string) ([]chatEntry, error) {
+	if !sessionIDRE.MatchString(sid) {
+		return nil, problem(400, "Invalid session ID")
+	}
+	type page struct {
+		Data   []ocMessage
+		Cursor struct{ Next string }
+	}
+	params := url.Values{"order": {"asc"}, "limit": {"50"}}
+	entries := []chatEntry{}
+	source := "text"
+	seen := make(map[string]bool)
+	for count := 0; count < chatLimit; {
+		var result page
+		if err := o.jsonCall(ctx, http.MethodGet, "/api/session/"+sid+"/message?"+params.Encode(), nil, &result); err != nil {
+			return nil, err
+		}
+		for _, message := range result.Data[:min(len(result.Data), chatLimit-count)] {
+			count++
+			if message.Type == "user" {
+				source = "text"
+				if message.Metadata.EchoEarSource == "voice" {
+					source = "voice"
+				}
+			}
+			if entry := message.chat(source); entry.ID != "" && (entry.Text != "" || entry.ToolSummary != "") {
+				entries = append(entries, entry)
+			}
+		}
+		if result.Cursor.Next == "" || seen[result.Cursor.Next] || len(result.Data) == 0 {
+			break
+		}
+		seen[result.Cursor.Next] = true
+		params.Del("order")
+		params.Set("cursor", result.Cursor.Next)
+	}
+	return entries, nil
 }
 
 var errNoFinal = problem(502, "OpenCode did not return a final assistant reply")
 
-func finalReply(messages []ocMessage, promptID string) (string, error) {
-	reply, found := "", false
+func finalReply(messages []ocMessage, promptID string) (string, ocMessage, error) {
+	var final ocMessage
+	reply := ""
 	for _, m := range messages {
 		if m.ID == "" || m.Type == "" {
-			return "", problem(502, "OpenCode returned invalid data")
+			return "", final, problem(502, "OpenCode returned invalid data")
 		}
 		if m.ID == promptID {
-			if reply != "" {
-				return reply, nil
+			if final.ID != "" {
+				return reply, final, nil
 			}
 			break
 		}
 		if m.Type == "idle" && m.Outcome != "succeeded" {
 			if m.Error != nil && m.Error.Status == 429 {
-				return "", problem(503, "OpenCode model usage limit reached")
+				return "", final, problem(503, "OpenCode model usage limit reached")
 			}
-			return "", problem(502, "OpenCode turn did not complete successfully")
+			return "", final, problem(502, "OpenCode turn did not complete successfully")
 		}
-		if m.Type == "assistant" && !found && (m.Finish == "stop" || m.Finish == "length") {
-			found = true
+		if m.Type == "assistant" && final.ID == "" && (m.Finish == "stop" || m.Finish == "length") {
+			final = m
 			if m.Content == nil {
-				return "", problem(502, "OpenCode returned invalid data")
+				return "", final, problem(502, "OpenCode returned invalid data")
 			}
 			var parts []string
 			for _, part := range m.Content {
 				if part == nil || part.Type == "text" && part.Text == nil {
-					return "", problem(502, "OpenCode returned invalid data")
+					return "", final, problem(502, "OpenCode returned invalid data")
 				}
 				if part.Type == "text" {
 					parts = append(parts, *part.Text)
@@ -385,7 +498,7 @@ func finalReply(messages []ocMessage, promptID string) (string, error) {
 			reply = strings.TrimSpace(strings.Join(parts, "\n"))
 		}
 	}
-	return "", errNoFinal
+	return "", final, errNoFinal
 }
 
 type streamedText struct {
@@ -457,24 +570,43 @@ func (t *streamedText) addEvent(event ocEvent) []string {
 }
 
 func (o *openCode) RunTurnStreaming(ctx context.Context, sid, prompt string, onSentence func(string)) (string, error) {
+	return o.runTurnStreaming(ctx, sid, prompt, onSentence, "", nil)
+}
+
+func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, onSentence func(string), source string, onChat func(chatEntry)) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
 	events, unsubscribe := o.feed.subscribe(ctx, sid)
 	defer unsubscribe()
 	path := "/api/session/" + sid
-	result, err := ocData[struct{ ID string }](ctx, o.upstream, http.MethodPost, path+"/prompt", object{"text": prompt})
+	input := object{"text": prompt}
+	if source != "" {
+		input["metadata"] = object{"echoEarSource": source}
+	}
+	result, err := ocData[struct{ ID string }](ctx, o.upstream, http.MethodPost, path+"/prompt", input)
 	if err != nil {
 		return "", err
 	}
 	if result.ID == "" {
 		return "", o.invalid()
 	}
+	if onChat != nil {
+		message := ocMessage{ID: result.ID, Type: "user", Text: prompt}
+		message.Time.Created = time.Now().UnixMilli()
+		onChat(message.chat(source))
+	}
 	readFinal := func() (string, error) {
 		msgs, err := ocData[[]ocMessage](ctx, o.upstream, http.MethodGet, path+"/message?order=desc&limit=32", nil)
 		if err != nil {
 			return "", err
 		}
-		return finalReply(msgs, result.ID)
+		reply, final, err := finalReply(msgs, result.ID)
+		if err == nil && onChat != nil {
+			if entry := final.chat(source); entry.Text != "" || entry.ToolSummary != "" {
+				onChat(entry)
+			}
+		}
+		return reply, err
 	}
 	var streamed streamedText
 stream:
@@ -513,7 +645,7 @@ stream:
 	return readFinal()
 }
 
-func (o *openCode) ask(ctx context.Context, device, prompt string, onSentence func(string)) (reply, sid string, err error) {
+func (o *openCode) ask(ctx context.Context, device, prompt string, onSentence func(string), source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
 	unlock, err := o.lock(ctx, device)
 	if err != nil {
 		return "", "", err
@@ -523,6 +655,10 @@ func (o *openCode) ask(ctx context.Context, device, prompt string, onSentence fu
 	if err != nil {
 		return "", "", err
 	}
-	reply, err = o.RunTurnStreaming(ctx, sid, prompt, onSentence)
+	if begin != nil {
+		finish := begin()
+		defer finish()
+	}
+	reply, err = o.runTurnStreaming(ctx, sid, prompt, onSentence, source, onChat)
 	return reply, sid, err
 }
