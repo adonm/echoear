@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "gfx.h"
 #include "media.h"
+#include "telemetry.h"
 #include "touch_gesture.h"
 #include "wifi.h"
 #include "ws_client.h"
@@ -32,7 +33,7 @@ static TaskHandle_t painter;
 static uint16_t *fb, *strip;
 static bool linked;
 static bool first_frame;
-static int dirty_top, dirty_bottom;
+static frame_bounds_t dirty_bounds;
 static atomic_int brightness = BRIGHT;
 static atomic_uint last_touch;
 
@@ -45,24 +46,27 @@ static bool color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data
     return awaken == pdTRUE;
 }
 
-static esp_err_t blit(int top, int bottom)
+static esp_err_t blit(frame_bounds_t area)
 {
-    for (int y = top; y < bottom; y += STRIP_ROWS) {
-        int rows = bottom - y < STRIP_ROWS ? bottom - y : STRIP_ROWS;
+    int64_t started = esp_timer_get_time();
+    int width = area.x1 - area.x0;
+    for (int y = area.y0; y < area.y1; y += STRIP_ROWS) {
+        int rows = area.y1 - y < STRIP_ROWS ? area.y1 - y : STRIP_ROWS;
         xSemaphoreTake(fb_lock, portMAX_DELAY);
-        memcpy(strip, fb + y * FRAME_WIDTH, rows * FRAME_WIDTH * sizeof(*strip));
+        if (width == FRAME_WIDTH) {
+            memcpy(strip, fb + y * FRAME_WIDTH, rows * FRAME_WIDTH * sizeof(*strip));
+        } else {
+            for (int row = 0; row < rows; ++row) {
+                memcpy(strip + row * width, fb + (y + row) * FRAME_WIDTH + area.x0, width * sizeof(*strip));
+            }
+        }
         xSemaphoreGive(fb_lock);
-        ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, 0, y, FRAME_WIDTH, y + rows, strip), TAG, "Queue LCD strip");
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, area.x0, y, area.x1, y + rows, strip), TAG, "Queue LCD strip");
         // tx_color borrows the strip until the SPI completion callback.
         xSemaphoreTake(drawn, portMAX_DELAY);
     }
+    atomic_store_explicit(&telemetry_io.display_flush_ms, (esp_timer_get_time() - started) / 1000, memory_order_relaxed);
     return ESP_OK;
-}
-
-static void mark_rows(int top, int bottom)
-{
-    if (dirty_top == dirty_bottom || top < dirty_top) dirty_top = top;
-    if (bottom > dirty_bottom) dirty_bottom = bottom;
 }
 
 static void display_show_offline(void)
@@ -79,12 +83,12 @@ static void paint_task(void *arg)
         if (!linked && now_ms() - atomic_load(&last_touch) >= 120000u) {
             atomic_store(&brightness, DIM);
         }
-        int top = dirty_top, bottom = dirty_bottom;
-        dirty_top = dirty_bottom = 0;
+        frame_bounds_t area = dirty_bounds;
+        dirty_bounds = (frame_bounds_t){ 0 };
         xSemaphoreGive(fb_lock);
         int level = atomic_load(&brightness);
         if (level != applied && bsp_display_brightness_set(level) == ESP_OK) applied = level;
-        if (top < bottom) blit(top, bottom);
+        if (area.x0 < area.x1) blit(area);
     }
 }
 
@@ -95,7 +99,7 @@ void display_set_link(bool connected)
     first_frame = connected;
     if (!connected) {
         display_show_offline();
-        mark_rows(0, FRAME_HEIGHT);
+        dirty_bounds = (frame_bounds_t){ 0, 0, FRAME_WIDTH, FRAME_HEIGHT };
     }
     xSemaphoreGive(fb_lock);
     if (!connected) xTaskNotifyGive(painter);
@@ -106,7 +110,10 @@ bool display_apply_frame(const uint8_t *data, size_t len)
     frame_rect_t dirty;
     xSemaphoreTake(fb_lock, portMAX_DELAY);
     bool applied = linked && frame_apply(fb, data, len, &dirty);
-    if (applied) mark_rows(dirty.y, dirty.y + dirty.h);
+    if (applied) {
+        frame_union(&dirty_bounds, dirty);
+        atomic_store_explicit(&telemetry_io.last_frame_rev, dirty.rev_lo, memory_order_relaxed);
+    }
     bool first = applied && first_frame;
     if (first) first_frame = false;
     xSemaphoreGive(fb_lock);
@@ -174,7 +181,7 @@ esp_err_t display_init(void)
     // BOX-3's BSP sets the panel to landscape and already aligns GT911 coordinates.
     ESP_RETURN_ON_ERROR(bsp_touch_new(NULL, &touch), TAG, "Init " BOARD_TOUCH);
     display_show_offline();
-    ESP_RETURN_ON_ERROR(blit(0, FRAME_HEIGHT), TAG, "First frame");
+    ESP_RETURN_ON_ERROR(blit((frame_bounds_t){ 0, 0, FRAME_WIDTH, FRAME_HEIGHT }), TAG, "First frame");
     ESP_RETURN_ON_ERROR(bsp_display_backlight_on(), TAG, "Enable backlight");
     ESP_RETURN_ON_ERROR(bsp_display_brightness_set(BRIGHT), TAG, "Set initial brightness");
     atomic_store(&last_touch, now_ms());

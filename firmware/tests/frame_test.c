@@ -151,6 +151,21 @@ static void test_malformed(void)
     assert(!frame_apply(fb, packet, sizeof(packet), NULL));
 }
 
+static void test_dirty_union(void)
+{
+    frame_bounds_t dirty = { 0 };
+    frame_union(&dirty, (frame_rect_t){ .x = 65535, .w = 1, .h = 1 });
+    assert(dirty.x0 == dirty.x1);
+    frame_union(&dirty, (frame_rect_t){ .x = 91, .y = 12, .w = 2, .h = 1 });
+    assert(dirty.x0 == 90 && dirty.x1 == 94 && dirty.y0 == 12 && dirty.y1 == 13);
+    frame_union(&dirty, (frame_rect_t){ .x = 92, .y = 11, .w = 1, .h = 5 });
+    assert(dirty.x0 == 90 && dirty.x1 == 94 && dirty.y0 == 11 && dirty.y1 == 16);
+    frame_union(&dirty, (frame_rect_t){ .x = FRAME_WIDTH - 1, .y = FRAME_HEIGHT - 1, .w = 1, .h = 1 });
+    assert(dirty.x0 == 90 && dirty.x1 == FRAME_WIDTH && dirty.y0 == 11 && dirty.y1 == FRAME_HEIGHT);
+    frame_union(&dirty, (frame_rect_t){ .x = 0, .y = 0, .w = FRAME_WIDTH, .h = FRAME_HEIGHT });
+    assert(dirty.x0 == 0 && dirty.x1 == FRAME_WIDTH && dirty.y0 == 0 && dirty.y1 == FRAME_HEIGHT);
+}
+
 int main(void)
 {
     test_raw();
@@ -159,4 +174,6 @@ int main(void)
     puts("PASS RLE565 literal, repeat, mixed and 128-pixel runs, sub-rect isolation");
     test_malformed();
     puts("PASS malformed frames rejected without framebuffer or dirty-rect changes");
+    test_dirty_union();
+    puts("PASS dirty bounds union and word alignment");
 }

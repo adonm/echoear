@@ -9,6 +9,7 @@
 static portMUX_TYPE cpu_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t sampled_us, idle_us;
 static unsigned cpu_pct;
+struct telemetry_io telemetry_io;
 
 static unsigned sample_cpu(uint64_t *uptime_us)
 {
@@ -45,5 +46,10 @@ telemetry_t telemetry_read(void)
         .uptime_s = uptime_us / 1000000,
         .wifi_rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0,
         .cpu_pct = cpu,
+        .last_frame_rev = atomic_load_explicit(&telemetry_io.last_frame_rev, memory_order_relaxed),
+        .display_flush_ms = atomic_load_explicit(&telemetry_io.display_flush_ms, memory_order_relaxed),
+        .input_drops = atomic_load_explicit(&telemetry_io.input_drops, memory_order_relaxed),
+        .audio_underruns = atomic_load_explicit(&telemetry_io.audio_underruns, memory_order_relaxed),
+        .audio_drops = atomic_load_explicit(&telemetry_io.audio_drops, memory_order_relaxed),
     };
 }

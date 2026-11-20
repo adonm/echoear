@@ -2,6 +2,21 @@
 
 #include <string.h>
 
+void frame_union(frame_bounds_t *dirty, frame_rect_t r)
+{
+    if (!r.w || !r.h || r.x + r.w > FRAME_WIDTH || r.y + r.h > FRAME_HEIGHT) return;
+    // Neither panel requires even coordinates, but an even RGB565 width keeps
+    // all SPI DMA strips word-sized, including the final single-row strip.
+    _Static_assert(FRAME_WIDTH % 2 == 0, "LCD width must fit aligned RGB565 strips");
+    int x0 = r.x & ~1, x1 = (r.x + r.w + 1) & ~1;
+    int y0 = r.y, y1 = r.y + r.h;
+    bool empty = dirty->x0 == dirty->x1;
+    if (empty || x0 < dirty->x0) dirty->x0 = x0;
+    if (empty || y0 < dirty->y0) dirty->y0 = y0;
+    if (empty || x1 > dirty->x1) dirty->x1 = x1;
+    if (empty || y1 > dirty->y1) dirty->y1 = y1;
+}
+
 static uint16_t le16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);

@@ -102,19 +102,21 @@ static esp_err_t status_get(httpd_req_t *request)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char json[640];
+    char json[768];
     int len = snprintf(json, sizeof(json),
              "{\"device\":\"%s\",\"character\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
              "\"free_heap\":%zu,\"min_free_heap\":%zu,\"free_psram\":%zu,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
              "\"firmware\":\"%s\",\"running_partition\":\"%s\","
              "\"board\":\"" BOARD_NAME "\",\"width\":%d,\"height\":%d,\"has_battery\":%s,"
-             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s}",
+             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s"
+             TELEMETRY_IO_JSON "}",
              device_id, wifi_character(), device_mac, ip, hw.wifi_rssi,
              hw.free_heap, hw.min_free_heap, hw.free_psram, hw.uptime_s, hw.cpu_pct,
              esp_app_get_description()->version, running->label,
              FRAME_WIDTH, FRAME_HEIGHT, BOARD_HAS_BATTERY ? "true" : "false",
              audio_get_volume(), pct, mv, BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null",
-             display_is_sleeping() ? "true" : "false", ws_client_connected() ? "true" : "false");
+             display_is_sleeping() ? "true" : "false", ws_client_connected() ? "true" : "false",
+             TELEMETRY_IO_VALUES(hw));
     if (len < 0 || (size_t)len >= sizeof(json)) {
         return text_response(request, "500 Internal Server Error", "Status response too large\n");
     }

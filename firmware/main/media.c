@@ -6,12 +6,12 @@
 
 #include "display.h"
 #include "esp_heap_caps.h"
-#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "telemetry.h"
 #include "ws_client.h"
 
 enum { TTS_BYTES = 1024 * 1024, TTS_BLOCK = 1280 };
@@ -23,7 +23,6 @@ typedef struct {
     audio_tone_t tone;
 } job_t;
 
-static const char *TAG = "media";
 static QueueHandle_t jobs;
 static SemaphoreHandle_t lock;
 static TaskHandle_t media_task;
@@ -124,28 +123,21 @@ void media_tts_end(void)
 
 bool media_tts_pcm(const void *data, size_t bytes)
 {
-    const TickType_t start = xTaskGetTickCount();
-    const TickType_t timeout = pdMS_TO_TICKS(15000), slice = pdMS_TO_TICKS(100);
-    const uint8_t *pcm = data;
-    while (bytes) {
-        xSemaphoreTake(lock, portMAX_DELAY);
-        bool accepting = stream.open && !stream.ended;
-        xSemaphoreGive(lock);
-        if (!accepting) return false;
-        TickType_t elapsed = xTaskGetTickCount() - start;
-        if (elapsed >= timeout) {
-            ESP_LOGW(TAG, "Speaker stream buffer overrun");
-            media_interrupt();
-            return false;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool accepted = false;
+    if (stream.open && !stream.ended) {
+        // The WS callback must not wait for speaker space; writes and reads
+        // only hold this lock for the short buffer copies, never codec I/O.
+        if (xStreamBufferSpacesAvailable(tts) >= bytes && xStreamBufferSend(tts, data, bytes, 0) == bytes) {
+            accepted = true;
+            xTaskNotifyGive(media_task);
+        } else {
+            atomic_fetch_add_explicit(&telemetry_io.audio_drops, 1, memory_order_relaxed);
+            interrupt_locked();
         }
-        TickType_t remaining = timeout - elapsed;
-        // Only the WS receive task sends PCM or starts a stream, so reset can't race this send.
-        size_t sent = xStreamBufferSend(tts, pcm, bytes, remaining < slice ? remaining : slice);
-        if (sent) xTaskNotifyGive(media_task);
-        pcm += sent;
-        bytes -= sent;
     }
-    return true;
+    xSemaphoreGive(lock);
+    return accepted;
 }
 
 void media_chime(audio_tone_t tone)
@@ -206,6 +198,7 @@ static void play(void)
     display_wake();
     int16_t chunk[TTS_BLOCK / sizeof(int16_t)];
     esp_err_t err = ESP_OK;
+    bool played = false, starved = false;
     while (err == ESP_OK) {
         xSemaphoreTake(lock, portMAX_DELAY);
         bool owns = owns_stream(serial);
@@ -218,7 +211,15 @@ static void play(void)
             err = ESP_ERR_INVALID_SIZE;
         } else if (bytes) {
             err = audio_stream_write(chunk, bytes / sizeof(*chunk));
+            played = true;
+            starved = false;
         } else {
+            // Count starvation once per gap after playback has started, not
+            // the initial prefill or the normal drain after an end frame.
+            if (played && !starved) {
+                atomic_fetch_add_explicit(&telemetry_io.audio_underruns, 1, memory_order_relaxed);
+                starved = true;
+            }
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
     }

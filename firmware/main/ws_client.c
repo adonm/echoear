@@ -18,7 +18,6 @@
 #include "esp_transport_ws.h"
 #include "esp_websocket_client.h"
 #include "frame.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "media.h"
@@ -27,7 +26,7 @@
 #include "telemetry.h"
 #include "wifi.h"
 
-enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000 };
+enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000, INPUT_CAP = 24 };
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
@@ -50,7 +49,9 @@ static const char *TAG = "ws";
 static esp_websocket_client_handle_t client;
 static esp_transport_handle_t ws_transport;
 static TaskHandle_t service;
-static QueueHandle_t inputs;
+static portMUX_TYPE input_lock = portMUX_INITIALIZER_UNLOCKED;
+static input_t inputs[INPUT_CAP], pending_drag;
+static unsigned input_head, input_count, drag_after;
 static uint8_t *rx_buffer;
 static fragment_t rx;
 static bool tts_accepted;
@@ -111,7 +112,42 @@ static bool send_json(uint32_t session, cJSON *json)
 
 static void enqueue_session(input_t input)
 {
-    if (input.session && inputs && xQueueSend(inputs, &input, 0) == pdPASS) xTaskNotifyGive(service);
+    if (!input.session || !service) return;
+    bool full = false;
+    portENTER_CRITICAL(&input_lock);
+    if (input.kind == INPUT_DRAG) {
+        pending_drag = input;
+        // Place the drag after existing critical events, before anything
+        // queued later (in particular the up that terminates this gesture).
+        drag_after = input_count;
+    } else if (input_count < INPUT_CAP) {
+        inputs[(input_head + input_count) % INPUT_CAP] = input;
+        ++input_count;
+    } else {
+        full = true;
+    }
+    portEXIT_CRITICAL(&input_lock);
+    if (full) atomic_fetch_add_explicit(&telemetry_io.input_drops, 1, memory_order_relaxed);
+    else xTaskNotifyGive(service);
+}
+
+static bool next_input(input_t *input)
+{
+    bool available = true;
+    portENTER_CRITICAL(&input_lock);
+    if (pending_drag.session && !drag_after) {
+        *input = pending_drag;
+        pending_drag.session = 0;
+    } else if (input_count) {
+        *input = inputs[input_head];
+        input_head = (input_head + 1) % INPUT_CAP;
+        --input_count;
+        if (drag_after) --drag_after;
+    } else {
+        available = false;
+    }
+    portEXIT_CRITICAL(&input_lock);
+    return available;
 }
 
 static void enqueue(input_t input)
@@ -232,13 +268,14 @@ static bool send_telemetry(uint32_t session, bool hello)
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT);
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
-    char text[512];
+    char text[704];
     int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\"%s,\"free_heap\":%zu,\"min_free_heap\":%zu,"
                        "\"free_psram\":%zu,\"wifi_rssi\":%d,\"rssi\":%d,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
-                       "\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"volume\":%d}",
+                       "\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"volume\":%d" TELEMETRY_IO_JSON "}",
                        hello ? "hello" : "status", extra, hw.free_heap, hw.min_free_heap, hw.free_psram,
                        hw.wifi_rssi, hw.wifi_rssi, hw.uptime_s, hw.cpu_pct, pct, mv,
-                       BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null", audio_get_volume());
+                       BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null", audio_get_volume(),
+                       TELEMETRY_IO_VALUES(hw));
     if (len <= 0 || (size_t)len >= sizeof(text)) return false;
     // Preflight backpressure: the driver's zero-timeout transport failure can close the link.
     if (!hello && (!socket_writable() || media_is_recording())) return false;
@@ -313,12 +350,14 @@ static void receive_pcm(const uint8_t *bytes, size_t len)
         rx.odd = false;
         if (!media_tts_pcm(sample, sizeof(sample))) {
             rx.drop = true;
+            tts_accepted = false;
             return;
         }
     }
     size_t even = len - len % 2;
     if (even && !media_tts_pcm(bytes, even)) {
         rx.drop = true;
+        tts_accepted = false;
         return;
     }
     if (len != even) {
@@ -381,6 +420,7 @@ static void receive_frame(const esp_websocket_event_data_t *event)
             if (!display_apply_frame(rx_buffer, rx.used)) ESP_LOGD(TAG, "Ignored display frame");
         } else if (rx.odd) {
             media_interrupt();
+            tts_accepted = false;
         }
     }
     rx = (fragment_t){ 0 };
@@ -457,7 +497,7 @@ static void service_task(void *arg)
             after_status = now + STATUS_MS;
         }
         input_t input;
-        while (xQueueReceive(inputs, &input, 0) == pdPASS) send_input(&input);
+        while (next_input(&input)) send_input(&input);
     }
 }
 
@@ -503,9 +543,8 @@ esp_err_t ws_client_init(void)
         .reconnect_timeout_ms = 1000, .network_timeout_ms = 5000, .buffer_size = 4096, .task_stack = 6144,
     };
     rx_buffer = heap_caps_malloc(FRAME_PACKET_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    inputs = xQueueCreate(24, sizeof(input_t));
     client = esp_websocket_client_init(&config);
-    if (!rx_buffer || !inputs || !client) goto fail;
+    if (!rx_buffer || !client) goto fail;
     if (esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, on_event, NULL) != ESP_OK ||
         xTaskCreate(service_task, "ws_service", 5120, NULL, 4, &service) != pdPASS) goto fail;
     return ESP_OK;
@@ -514,11 +553,9 @@ fail:
     if (client) esp_websocket_client_destroy(client);
     if (ws_transport) esp_transport_destroy(ws_transport);
     if (parent) esp_transport_destroy(parent);
-    if (inputs) vQueueDelete(inputs);
     free(rx_buffer);
     client = NULL;
     ws_transport = NULL;
-    inputs = NULL;
     rx_buffer = NULL;
     return ESP_ERR_NO_MEM;
 }

@@ -3,6 +3,11 @@ set -euo pipefail
 
 scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 firmware=$(cd -- "$scripts/../firmware" && pwd -P)
+if (( $# > 1 )); then
+    printf 'Usage: %s [vocat|box3]\n' "$0" >&2
+    exit 2
+fi
+BOARD=${1:-${BOARD:-vocat}}
 # shellcheck source=scripts/board.sh
 source "$scripts/board.sh"
 if [[ ! -f "$firmware/sdkconfig.local" ]]; then
