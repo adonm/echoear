@@ -3,16 +3,16 @@
 EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk tutor with interactive diagrams, intercom, and a browser mirror.
 
 ```text
-EchoEar <-- /ws: keyed scenes and PCM --> Go bridge :8765 <-- /app --> Browser
-                                           |-- Hex      (speech to text)
-                                           |-- OpenCode (reply deltas over SSE)
-                                           `-- Kokoro   (persistent FP32 worker)
+EchoEar <-- /ws: RGB565 frames, taps, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
+                                              |-- Hex      (speech to text)
+                                              |-- OpenCode (reply deltas over SSE)
+                                              `-- Kokoro   (persistent FP32 worker)
 ```
 
 **Target:** EchoEar / ESP-VoCat v1.2 (ESP32-S3, 16 MB flash and 16 MB PSRAM).
-Firmware `v0.7.1` uses a thin client: a pure-C 360×360 RGB565
-rasterizer replaces LVGL, applies keyed scene patches, and draws a fallback
-face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
+Firmware `v0.8.0` is a 1.28 MB thin client. It displays 360×360 RGB565
+updates from the bridge, reports raw touch coordinates, and draws a fallback
+face offline. The bridge runs app logic and renders the display; `/app` uses native SVG.
 
 ## Quickstart
 
@@ -58,8 +58,8 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
    environment or `bridge.env`. The board confirms the new image after display
    initialization and Wi-Fi DHCP; the script checks the running partition.
 
-5. Run `./scripts/check.sh` for Go vet, race tests, and host VAD and graphics
-   tests (GCC, plus cJSON development files or the cached ESP-IDF image).
+5. Run `./scripts/check.sh` for Go vet, race tests, and host VAD, frame decoder,
+   and graphics tests (GCC).
    Add `--live` to exercise the running services; ShellCheck runs if installed.
 
 ## Controls and intercom
@@ -74,7 +74,7 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
 - Ask for a composed message (“Send Mint a knock-knock joke”). The agent uses
-  the `intercom` tool to deliver a card and synthesized speech.
+  `act` to deliver a card and synthesized speech to the recipient.
 
 ## Browser dashboard
 
@@ -122,38 +122,26 @@ OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
 reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
-Code Mode exposes 13 tools under `tools.echoear`: `devices`, `snapshot`,
-`scene`, `patch`, `speak`, `chime`, `intercom`, `control`, `cat`, `memory`, `asset`,
-`timer`, and `wait_event`.
-Use `devices` to discover peers. `control` sets volume (0–100) and/or sleep
-state on a connected device.
-`cat` gets or edits the persistent animated face, including up to 16 decorative
-shapes, and lists, loads, or deletes saved profiles. `reset_blank` clears the
-design without resetting the conversation.
-Scenes and patches support declarative `tap` and `cycle` reactions, named `states`,
-and delayed `after_ms`/`then` feedback. Give related nodes the same `group` and
-use relative `move: {target, dx, dy}` to shift a node or group in pixels.
-`revert_ms` undoes visual changes after the given delay. The bridge runs these
-reactions without holding an OpenCode turn open; only an explicit `ask` starts
-a new turn. Drawings stay on screen across conversation turns until replaced,
-reset, or exited with **Cat** or `preset: "face"`. A `scene` can also play a
-`chime` or `say` text inline. The agent
-defaults to 1–2 short spoken sentences and answers at length when asked.
+Code Mode exposes exactly four MCP tools under `tools.echoear`:
 
-- Join a multiplayer game by drawing the scene with `room: "tictactoe"` on each cat.
-  A tap or cycle reaction with `broadcast: true` applies the same visual/audio
-  changes in the room. Add `store: {scope, key, value}` to persist the move once.
-- `memory` stores JSON under `shared`, a device ID, or `game:<room>`.
-  `set` can require `expected_version`: 0 means create only; a positive value
-  is a compare-and-swap. On conflict, reread before making the next move.
-- Use `asset` to save/load reusable scenes or node sets, or use `scene.save_as`
-  to draw and save together. `scene.asset` loads one with optional overrides
-  and extra nodes.
-- `timer` sets reminders up to 24 hours out (8 per cat, 32 total). Local
-  timers show an **OK** card, chime, and optionally speak. `wake_agent` instead
-  starts a bounded turn; it requires `in_seconds >= 30` and cannot be set during
-  a timer-triggered turn. Future timers survive a restart; reminders missed
-  by at most two minutes fire once after a short grace period.
+| Tool | Purpose |
+| --- | --- |
+| `inspect` | Discover devices or read a cat's live screen, app, peers, timers, and saved state |
+| `run_app` | Show SVG, run a JS micro-app, save or load by slug, or exit to the face |
+| `act` | Send intercom, play a chime or melody, change volume or sleep, manage reminders, or edit a cat |
+| `store` | Read or write scoped JSON with optional version checks |
+
+The agent can also use OpenCode's `websearch`. There is no `wait_event` tool:
+taps and bounded ticks run in the bridge without keeping an OpenCode turn open.
+The bridge uses the pure-Go `goja` sandbox to run JS that renders SVG. Apps can
+target one player or share state across multiple devices with a separate SVG
+view for each player. `save_as` writes apps and drawings to Turso's `apps`
+table; `load` reopens them. See the [agent guide](agents/echoear.md) for examples.
+
+**One Voice Rule:** Only final assistant prose is spoken as the reply, not
+tool output or intermediate text. The prompt starts with a short identity
+and source header, plus setup or personality hints when applicable. The agent
+uses `inspect` for live state.
 
 ## Bridge data
 
@@ -163,8 +151,10 @@ in `~/.local/share/echoear/echoear.db` (or `$XDG_DATA_HOME/echoear/echoear.db`);
 0600). The first boot imports valid rows from the six legacy JSON files in that
 directory in one transaction and never modifies those backups.
 Active cat designs and reusable profiles are stored in `cats` and `saved_cats`.
-The cat migration preserves existing devices and their resolved voices without
-changing session mappings, history, or tunnel records.
+The canonical `messages` table drives browser history. The v2 migration
+backfills it from legacy bridge chat events and OpenCode session history.
+New rows contain user text, final cat replies, intercom, and display cards,
+not tool traces or prompt headers.
 
 Optional Turso Cloud sync runs every minute when both `ECHOEAR_TURSO_URL`
 and `ECHOEAR_TURSO_AUTH_TOKEN` are set. Use a dedicated private remote and one
@@ -175,8 +165,11 @@ or connectivity are required for normal local operation.
 ## API
 
 HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
-The `/ws` hub sends keyed `scene` and `patch` JSON. Binary frames carry 16 kHz
-signed 16-bit little-endian mono PCM (`0x01` mic upload, `0x02` playback). HTTP voice
+Firmware `0.8.0` announces `proto: 2` in its `/ws` hello. The pure-Go
+SVG renderer streams dirty rectangles as `0x03` RGB565 binary frames, using
+RLE565 when smaller than raw pixels. The browser receives SVG instead.
+`0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
+little-endian mono PCM. HTTP voice
 inputs also accept WAV, up to 2 MiB. The bridge appends 150 ms of silence to
 PCM sent to Hex for transcription. Kokoro starts synthesizing sentences while
 OpenCode streams its reply over SSE.
@@ -191,7 +184,7 @@ OpenCode streams its reply over SSE.
 | `GET /api/cats`, `DELETE /api/cats/{slug}` | List or delete LAN-only saved cat profiles |
 | `POST /api/cats/reassign` | LAN-only `from_device_id`, `to_device_id`, and `mode` (`swap` or `move`) → transfer active cats, voices, and sessions |
 | `POST /api/devices/{id}/cat` | Update active cat fields or send `{"slug":"cake"}` to load a profile (LAN-only) |
-| `GET /api/devices/{id}/messages` | Chronological chat across sessions and bridge events for a device |
+| `GET /api/devices/{id}/messages` | Canonical chronological chat for a device |
 | `POST /api/devices/{id}/voice` | `{"voice":"af_heart"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
 | `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
 | `POST /api/intercom` | Audio and `X-Target` (device ID or name) → transcript and delivery result |
@@ -200,6 +193,7 @@ OpenCode streams its reply over SSE.
 | `POST /api/reset` | `{"device_id":"my-echoear"}` → save the designed cat, restore the blank starter, and start a fresh session |
 | `GET /api/memory?scope=…`, `GET /api/memory/scopes`, `DELETE /api/memory?scope=…&key=…` | LAN-only saved JSON and populated scopes |
 | `GET /api/assets`, `DELETE /api/assets/{name}` | LAN-only reusable visual assets |
+| `GET /api/apps`, `DELETE /api/apps/{name}` | LAN-only saved apps and drawings |
 | `GET /api/timers?device_id=…`, `DELETE /api/timers/{id}` | List/cancel active timers; scoped links can see and cancel only their own cat's timers |
 | `GET /ota/version.json`, `GET /ota/latest.bin` | Build manifest or `firmware/build/echoear.bin` with SHA-256 |
 
@@ -213,23 +207,6 @@ Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body
 | `POST /volume` | `{"level":65}` → saved volume (0–100) |
 | `POST /ota`, `POST /ota/upload` | Pull from bridge or upload `echoear.bin` as `application/octet-stream`; reboot on success |
 | `POST /reboot` | Reboot |
-
-Legacy HTTP replies still accept optional fenced payloads. `echoear-screen`
-becomes `screen`; `echoear-message` routes a message to a peer.
-
-```echoear-screen
-{"title":"Radius","shapes":[{"t":"btn","x":85,"y":218,"w":190,"h":46,"s":"Quick fact","tap":"A radius runs from center to edge."}]}
-```
-
-Shapes use pixel coordinates and optional `#RRGGBB` colors. Types: `circle`,
-`rect`, `line`, `tri`, `arc`, `text`, `btn`. A `tri` takes three vertices
-(`x1`, `y1` through `x3`, `y3`) and fills by default. Use `tap` for local
-feedback, `ask` for a bridge follow-up, or `reply_to` on a `btn` for a direct
-intercom recording.
-
-```echoear-message
-{"to":"Mint","text":"Which planet is known for its rings?"}
-```
 
 ## Networking
 
