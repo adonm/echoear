@@ -32,7 +32,7 @@ enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000, 
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
-typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, INPUT_HEAD, TTS_ACK, REJECT_RECORD, CALL_FAILED } input_kind_t;
+typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, TTS_ACK, REJECT_RECORD, CALL_FAILED } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
@@ -176,11 +176,6 @@ void ws_client_pointer(const char *event, int x, int y)
     enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y });
 }
 
-void ws_client_head_pet(int volume)
-{
-    enqueue((input_t){ .kind = INPUT_HEAD, .x = volume });
-}
-
 bool ws_client_rec_start(uint32_t session, const char *target)
 {
     cJSON *json = event_json("rec_start");
@@ -253,12 +248,9 @@ static void send_input(const input_t *input)
         if (len > 0 && (size_t)len < sizeof(text)) send_ready(session, text, len, false);
         return;
     }
-    bool head = input->kind == INPUT_HEAD;
-    const char *event = head ? "head" : input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
+    const char *event = input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
     cJSON *json = event_json(event);
-    bool ok = head ? cJSON_AddStringToObject(json, "action", "pet") &&
-                     cJSON_AddNumberToObject(json, "volume", input->x)
-                   : cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
+    bool ok = cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
     if (ok) send_json(session, json);
     else cJSON_Delete(json);
 }

@@ -13,6 +13,9 @@ EchoEar <-- /ws: RGB565 frames, touch, PCM --> Go bridge :8765 <-- /app: SVG -->
 centered on the BOX-3’s rectangular display. The bridge runs apps and renders
 RGB565 updates for hardware and SVG for `/app`. Boards draw a fallback face offline.
 
+**New in 0.9.3:** Both boards use the touchscreen for all touch controls.
+VoCat’s capacitive head pads are disabled.
+
 **New in 0.9.2:** Live two-way **Call** and all nine Kokoro voices in the paged
 on-device picker. Firmware announces features in `hello` and flushes only the
 dirty LCD columns within changed rows. The bridge and dashboard add paginated
@@ -65,7 +68,7 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 
    BOX-3 builds into `firmware/build-box3/` instead of `firmware/build/`.
    It starts with a blank cat at `box3-xxxx.local` (last four MAC digits)
-   and has no battery gauge or head-touch controls.
+   and has no battery gauge.
 
 4. Update via `./scripts/push-ota.sh <ip|host>`; add `--no-build` to reuse the
    image, and prefix with `BOARD=box3` for BOX-3. The script refuses a board
@@ -82,8 +85,7 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 - Tap the cat face and speak after the tone. Pause 1.5 seconds to send
   automatically, or 3 seconds once you've spoken for 4 seconds. Tap **Send**
   to finish early, **Cancel** to discard, or **Stop** to interrupt a reply.
-- On VoCat, head touch only pets, wakes, or interrupts; it never changes volume.
-  The display dims after 120 seconds idle.
+- The display dims after 120 seconds idle. Tap the touchscreen to wake it.
 - The on-device **Menu** has large, high-contrast buttons with icons and labels:
   **Voice Note** opens intercom, **Volume** sets the level or enables **Auto**,
   **Voice** pages through all nine voices, and **Stats** opens the diagnostics HUD.
@@ -249,9 +251,10 @@ or connectivity are required for normal local operation.
 
 HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
 Hardware needs firmware `0.8.0` or newer and announces `proto: 2` in its
-authenticated `/ws` `hello`. Firmware `0.9.2` also reports `caps` for battery,
-head touch, Call, and drag. The bridge remembers each board there, using the
-socket IP and port 80 unless the hello specifies a port. The SVG renderer
+authenticated `/ws` `hello`. Firmware `0.9.2` and newer report `caps` for battery,
+head pads, Call, and drag. Firmware `0.9.3` reports `head_pads: false` on both
+boards. The bridge remembers each board there, using the socket IP and port 80
+unless the hello specifies a port. The SVG renderer
 streams dirty rectangles as `0x03` RGB565 binary frames, using RLE565 when
 smaller. BOX-3 announces its native size; the bridge centers the square
 artwork and maps raw touch coordinates back into SVG space. Browsers receive

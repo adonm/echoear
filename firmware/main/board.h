@@ -2,6 +2,7 @@
 
 #define BOARD_HAS_CALL 1
 #define BOARD_HAS_DRAG 1
+#define BOARD_HAS_HEAD_PADS 0
 
 #ifdef ECHOEAR_BOX3
 #define BOARD_NAME "esp-box-3"
@@ -10,7 +11,6 @@
 #define BOARD_LCD "ILI9341"
 #define BOARD_TOUCH "GT911"
 #define BOARD_HAS_BATTERY 0
-#define BOARD_HAS_HEAD_PADS 0
 #define BOARD_OTA_PATH "/ota/box3/latest.bin"
 enum { FRAME_WIDTH = 320, FRAME_HEIGHT = 240 };
 #else
@@ -20,7 +20,6 @@ enum { FRAME_WIDTH = 320, FRAME_HEIGHT = 240 };
 #define BOARD_LCD "ST77916"
 #define BOARD_TOUCH "CST816S"
 #define BOARD_HAS_BATTERY 1
-#define BOARD_HAS_HEAD_PADS 1
 #define BOARD_OTA_PATH "/ota/latest.bin"
 enum { FRAME_WIDTH = 360, FRAME_HEIGHT = 360 };
 #endif

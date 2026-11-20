@@ -1,6 +1,5 @@
 #include "audio.h"
 #include "display.h"
-#include "head_touch.h"
 #include "media.h"
 #include "ota_server.h"
 #include "power.h"
@@ -31,7 +30,6 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init());
     esp_err_t ws = ws_client_init();
     if (ws != ESP_OK) ESP_LOGW(TAG, "WebSocket unavailable: %s", esp_err_to_name(ws));
-    if (head_touch_start() != ESP_OK) ESP_LOGW(TAG, "Head touch unavailable");
     if (power_start() != ESP_OK) ESP_LOGW(TAG, "Battery monitor unavailable");
     ESP_ERROR_CHECK(wifi_start(on_wifi));
     ESP_ERROR_CHECK(ota_server_start());
