@@ -223,6 +223,17 @@ type openCode struct {
 	project  string
 	store    *store[string]
 	turns    [64]chan struct{}
+
+	mu            sync.Mutex
+	active        map[string]context.CancelFunc
+	interrupts    map[string]bool
+	resets        map[string]*ocReset
+	cancelSceneUI func(string)
+}
+
+type ocReset struct {
+	count int
+	done  chan struct{}
 }
 
 func newOpenCode(ctx context.Context, u upstream, path, project string, settings ocSettings) *openCode {
@@ -249,8 +260,9 @@ func newOpenCode(ctx context.Context, u upstream, path, project string, settings
 		sessions.data = unified
 	}
 	o := &openCode{upstream: u, project: project, settings: settings,
-		store: sessions,
-		feed:  eventFeed{ready: make(chan struct{}), bySession: make(map[string]map[chan ocEvent]struct{})}}
+		store:  sessions,
+		active: make(map[string]context.CancelFunc), interrupts: make(map[string]bool), resets: make(map[string]*ocReset),
+		feed: eventFeed{ready: make(chan struct{}), bySession: make(map[string]map[chan ocEvent]struct{})}}
 	for i := range o.turns {
 		o.turns[i] = make(chan struct{}, 1)
 	}
@@ -274,6 +286,9 @@ func (o *openCode) save(device, sid string) error {
 }
 
 func (o *openCode) lock(ctx context.Context, device string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, o.unavailable(err)
+	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(device))
 	gate := o.turns[h.Sum32()%uint32(len(o.turns))]
@@ -285,13 +300,109 @@ func (o *openCode) lock(ctx context.Context, device string) (func(), error) {
 	}
 }
 
-func (o *openCode) reset(ctx context.Context, device string) error {
-	unlock, err := o.lock(ctx, device)
-	if err != nil {
-		return err
+func (o *openCode) interrupt(ctx context.Context, sid string) error {
+	if sid == "" {
+		return nil
 	}
-	defer unlock()
-	return o.save(device, "")
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	err := o.jsonCall(ctx, http.MethodPost, "/api/session/"+sid+"/interrupt", nil, nil)
+	var status *upstreamStatus
+	if errors.As(err, &status) && status.code == http.StatusNotFound {
+		return nil
+	}
+	return err // The API reports an idle no-op as success.
+}
+
+func (o *openCode) requestInterrupt(device string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.markInterrupted(device)
+}
+
+func (o *openCode) markInterrupted(device string) bool {
+	if cancel := o.active[device]; cancel != nil {
+		cancel()
+	}
+	queued := o.interrupts[device]
+	o.interrupts[device] = true
+	return !queued
+}
+
+// Hold the turn gate through the interrupt. A failed interrupt stays pending
+// so neither a replacement prompt nor a reset can race the old execution.
+func (o *openCode) flushInterrupt(ctx context.Context, device string) error {
+	o.mu.Lock()
+	pending := o.interrupts[device]
+	o.mu.Unlock()
+	if !pending {
+		return nil
+	}
+	sid, err := o.get(device)
+	if err == nil {
+		err = o.interrupt(ctx, sid)
+	}
+	if err == nil {
+		o.mu.Lock()
+		delete(o.interrupts, device)
+		o.mu.Unlock()
+	}
+	return err
+}
+
+func (o *openCode) interruptDevice(device string) {
+	if !o.requestInterrupt(device) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
+		defer cancel()
+		if unlock, err := o.lock(ctx, device); err == nil {
+			defer unlock()
+			_ = o.flushInterrupt(ctx, device)
+		}
+	}()
+}
+
+func (o *openCode) reset(ctx context.Context, device string) error {
+	return o.prepareReset(device)(ctx)
+}
+
+// Mark the reset before the UI launches its goroutine so a following tap or
+// message cannot start a turn between the reset request and its execution.
+func (o *openCode) prepareReset(device string) func(context.Context) error {
+	o.mu.Lock()
+	reset := o.resets[device]
+	if reset == nil {
+		reset = &ocReset{done: make(chan struct{})}
+		o.resets[device] = reset
+	}
+	reset.count++
+	o.markInterrupted(device)
+	o.mu.Unlock()
+	return func(ctx context.Context) error {
+		defer func() {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			reset.count--
+			if reset.count == 0 {
+				delete(o.resets, device)
+				close(reset.done)
+			}
+		}()
+		if o.cancelSceneUI != nil {
+			o.cancelSceneUI(device)
+		}
+		unlock, err := o.lock(ctx, device)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := o.flushInterrupt(ctx, device); err != nil {
+			return err
+		}
+		return o.save(device, "")
+	}
 }
 
 func ocData[T any](ctx context.Context, api upstream, method, path string, in any) (T, error) {
@@ -306,7 +417,7 @@ func ocData[T any](ctx context.Context, api upstream, method, path string, in an
 	return *envelope.Data, nil
 }
 
-func (o *openCode) ensureSession(ctx context.Context, device string) (string, error) {
+func (o *openCode) ensureSession(ctx context.Context, device, character string) (string, error) {
 	sid, err := o.get(device)
 	if err != nil {
 		return "", err
@@ -346,11 +457,15 @@ func (o *openCode) ensureSession(ctx context.Context, device string) (string, er
 			return "", err
 		}
 	}
+	title := "EchoEar: " + device
+	if character = strings.TrimSpace(character); character != "" && character != device {
+		title = "EchoEar: " + character + " (" + device + ")"
+	}
 	in := struct {
 		Title    string `json:"title"`
 		Location object `json:"location"`
 		ocSettings
-	}{"EchoEar: " + device, object{"directory": o.project}, settings}
+	}{title, object{"directory": o.project}, settings}
 	created, err := ocData[session](ctx, o.upstream, http.MethodPost, "/api/session", in)
 	if err != nil {
 		return "", err
@@ -601,7 +716,17 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, onS
 	if source != "" {
 		input["metadata"] = object{"echoEarSource": source}
 	}
-	result, err := ocData[struct{ ID string }](ctx, o.upstream, http.MethodPost, path+"/prompt", input)
+	if ctx.Err() != nil {
+		return "", o.unavailable(ctx.Err())
+	}
+	// Finish admitting an in-flight prompt before interrupting, even if the
+	// local turn has been cancelled in the meantime.
+	submit, stopSubmit := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	result, err := ocData[struct{ ID string }](submit, o.upstream, http.MethodPost, path+"/prompt", input)
+	stopSubmit()
+	if ctx.Err() != nil {
+		return "", o.unavailable(ctx.Err())
+	}
 	if err != nil {
 		return "", err
 	}
@@ -663,13 +788,53 @@ stream:
 	return readFinal()
 }
 
-func (o *openCode) ask(ctx context.Context, device, prompt string, onSentence func(string), source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
-	unlock, err := o.lock(ctx, device)
+func (o *openCode) lockPrompt(ctx context.Context, device string) (context.Context, func(), error) {
+	for {
+		unlock, err := o.lock(ctx, device)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := o.flushInterrupt(ctx, device); err != nil {
+			unlock()
+			return nil, nil, err
+		}
+		o.mu.Lock()
+		if reset := o.resets[device]; reset != nil {
+			o.mu.Unlock()
+			unlock()
+			select {
+			case <-reset.done:
+				continue
+			case <-ctx.Done():
+				return nil, nil, o.unavailable(ctx.Err())
+			}
+		}
+		if !o.interrupts[device] {
+			turn, cancel := context.WithCancel(ctx)
+			o.active[device] = cancel
+			o.mu.Unlock()
+			return turn, func() {
+				defer unlock()
+				o.mu.Lock()
+				delete(o.active, device)
+				o.mu.Unlock()
+				cancel()
+				_ = o.flushInterrupt(context.WithoutCancel(turn), device)
+			}, nil
+		}
+		o.mu.Unlock()
+		unlock()
+	}
+}
+
+func (o *openCode) ask(ctx context.Context, who peer, prompt string, onSentence func(string), source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
+	device := who.DeviceID
+	ctx, unlock, err := o.lockPrompt(ctx, device)
 	if err != nil {
 		return "", "", err
 	}
 	defer unlock()
-	sid, err = o.ensureSession(ctx, device)
+	sid, err = o.ensureSession(ctx, device, who.Character)
 	if err != nil {
 		return "", "", err
 	}
@@ -678,5 +843,8 @@ func (o *openCode) ask(ctx context.Context, device, prompt string, onSentence fu
 		defer finish()
 	}
 	reply, err = o.runTurnStreaming(ctx, sid, prompt, onSentence, source, onChat)
+	if err != nil {
+		o.requestInterrupt(device)
+	}
 	return reply, sid, err
 }

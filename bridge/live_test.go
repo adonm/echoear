@@ -153,7 +153,7 @@ func liveSessions(t *testing.T, oc upstream, prefix string) {
 			found, err := ocData[[]session](ctx, oc, http.MethodGet, path, nil)
 			var ids []string
 			for _, s := range found {
-				if strings.HasPrefix(s.Title, "EchoEar: "+prefix) && sessionIDRE.MatchString(s.ID) {
+				if strings.HasPrefix(s.Title, "EchoEar: ") && strings.Contains(s.Title, prefix) && sessionIDRE.MatchString(s.ID) {
 					ids = append(ids, s.ID)
 				}
 			}

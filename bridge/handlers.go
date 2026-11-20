@@ -517,7 +517,7 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 	}
 	start := time.Now()
 	prompt := turnPrompt(sender, others, text)
-	raw, sid, err := b.oc.ask(ctx, sender.DeviceID, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
+	raw, sid, err := b.oc.ask(ctx, sender, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
 		if entry.Role == "assistant" {
 			entry.Sender = sender.Character
 		}

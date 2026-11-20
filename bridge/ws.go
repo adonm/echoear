@@ -82,6 +82,9 @@ type wsDevice struct {
 	pet         time.Time
 	asleep      bool
 	customScene bool
+	states      map[string]sceneView
+	cycles      map[string]cyclePosition
+	sceneTimers map[*time.Timer]struct{}
 
 	recAt         time.Time
 	recOpen       bool
@@ -121,6 +124,9 @@ type wsHub struct {
 func newWSHub(b *bridge) *wsHub {
 	h := &wsHub{b: b, clients: make(map[*wsClient]struct{}), devices: make(map[string]*wsDevice),
 		events: make(map[string]*eventRing), httpSpeech: make(map[string]*atomic.Bool)}
+	if b.oc != nil {
+		b.oc.cancelSceneUI = h.cancelSceneUI
+	}
 	go h.animate(b.root)
 	return h
 }
@@ -726,30 +732,31 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		return
 	}
 	key, a := d.scene.action(ev.ID, ev.X, ev.Y, "tap")
+	waiting := false
 	if key != "" || d.customScene {
-		waiting := h.emit(d.who.DeviceID, "tap", object{"id": key, "x": ev.X, "y": ev.Y})
-		if d.customScene && key != "" && waiting {
-			if a.kind == "cat" {
-				d.drawer, d.view, d.pending, d.customScene, d.agentSetScene = false, nil, nil, false, d.busy
-				h.render(d, now, true)
-			} else {
-				h.push(d, object{"op": "chime", "kind": "tap"}, false)
-			}
+		waiting = h.emit(d.who.DeviceID, "tap", object{"id": key, "x": ev.X, "y": ev.Y})
+		if d.customScene && key != "" && waiting && a.kind != "local" && a.kind != "cat" {
+			h.chime(d, "tap")
 			return
 		}
 	}
 	switch a.kind {
 	case "drawer":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
-		d.drawer = true
+		h.clearLocalScene(d)
+		d.drawer, d.view, d.pending, d.customScene = true, nil, nil, false
 		h.render(d, now, false)
 	case "cat":
-		h.cancelTurn(d)
-		h.stopPlayback(d, true)
-		d.drawer, d.view, d.pending, d.customScene = false, nil, nil, false
-		h.render(d, now, true)
+		h.leaveScene(d, waiting && d.customScene, now)
+	case "local":
+		h.localTap(d, key, waiting, now)
 	case "new":
-		h.startTurn(d, now, false, func(ctx context.Context, id uint64) { h.resetTurn(ctx, d, id) })
+		h.cancelLocalTurn(d)
+		var reset func(context.Context) error
+		if h.b.oc != nil {
+			reset = h.b.oc.prepareReset(d.who.DeviceID)
+		}
+		h.beginTurn(d, now, false, func(ctx context.Context, id uint64) { h.resetTurn(ctx, d, id, reset) })
 	case "listen", "reply", "reply_to":
 		if !d.recAt.IsZero() {
 			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
@@ -771,6 +778,20 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 	case "event":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
 	}
+}
+
+func (h *wsHub) leaveScene(d *wsDevice, waiting bool, now time.Time) {
+	if !waiting {
+		if d.busy {
+			h.cancelTurn(d)
+		} else {
+			h.cancelLocalTurn(d)
+		}
+		h.stopPlayback(d, true)
+	}
+	h.clearLocalScene(d)
+	d.drawer, d.view, d.pending, d.customScene, d.agentSetScene = false, nil, nil, false, d.busy
+	h.render(d, now, true)
 }
 
 func (h *wsHub) volume(d *wsDevice, level int, now time.Time) {

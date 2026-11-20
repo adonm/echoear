@@ -145,8 +145,10 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		if b.ws != nil {
 			b.ws.mu.Lock()
 			if d := b.ws.devices[strings.ToLower(id)]; d != nil {
-				b.ws.cancelTurn(d)
+				b.ws.cancelLocalTurn(d)
 				b.ws.stopPlayback(d, true)
+				b.ws.clearLocalScene(d)
+				d.drawer, d.view, d.pending, d.customScene = false, nil, nil, false
 				b.ws.render(d, time.Now(), false)
 			}
 			b.ws.mu.Unlock()

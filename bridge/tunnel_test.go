@@ -378,8 +378,8 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 		if err := writeMap(file, object{"url": upstreamServer.URL, "password": "unit"}); err != nil {
 			t.Fatal(err)
 		}
-		b.oc = &openCode{upstream: upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: file, read: openCodeEndpoint}},
-			store: loadStore(filepath.Join(dir, "sessions.json"), func(_, _ string) bool { return true })}
+		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: file, read: openCodeEndpoint}},
+			filepath.Join(dir, "sessions.json"), dir, ocSettings{})
 		if err := b.oc.save("echoear-history", "ses_test"); err != nil {
 			t.Fatal(err)
 		}

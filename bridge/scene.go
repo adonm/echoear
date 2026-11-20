@@ -34,6 +34,7 @@ type sceneView struct {
 	nodes    []object
 	actions  map[string]sceneAction
 	feedback map[string]string
+	controls map[string]object // Server-only node declarations.
 }
 
 func (s sceneView) full(rev uint64) object {
@@ -148,7 +149,7 @@ func catScene(character string, pose catPose) sceneView {
 	listening, thinking := pose.mood == "listening", pose.mood == "thinking"
 	speaking, sleeping := pose.mood == "speaking", pose.mood == "sleepy"
 	s := sceneView{bg: p.face, nodes: make([]object, 0, 40), actions: map[string]sceneAction{
-		"text": {"drawer", ""}, "new": {"new", ""}, "cat-ring": {"listen", ""}, "volume-track": {"volume", ""},
+		"text": {"drawer", ""}, "cat-ring": {"listen", ""}, "volume-track": {"volume", ""},
 	}}
 	add := func(ns ...object) { s.nodes = append(s.nodes, ns...) }
 	ringColor, ringWidth := catInk, 3
@@ -223,8 +224,7 @@ func catScene(character string, pose catPose) sceneView {
 	meter["on"] = "drag"
 	add(visible(meter, pose.meter), visible(box("volume-fill", 123, 255, max(1, pose.volume*114/100), 15, 7, p.accent), pose.meter),
 		visible(label("volume-label", 180, 263, 1, strconv.Itoa(pose.volume)+"%", catInk), pose.meter))
-	add(visible(comicButton("text", 87, 284, 86, 36, "Text", "#FFFAEE"), !sleeping),
-		visible(comicButton("new", 187, 284, 86, 36, "New", p.accent), !sleeping))
+	add(visible(comicButton("text", 137, 284, 86, 36, "Text", "#FFFAEE"), !sleeping))
 	return s
 }
 
@@ -251,7 +251,7 @@ func screenScene(screen object, accent string) sceneView {
 		bg = "#0B1020"
 	}
 	s := sceneView{bg: bg, nodes: make([]object, 0, 29),
-		actions: map[string]sceneAction{"cat": {"cat", ""}, "new": {"new", ""}}, feedback: make(map[string]string)}
+		actions: map[string]sceneAction{"cat": {"cat", ""}}, feedback: make(map[string]string)}
 	if title := str(screen["title"]); title != "" {
 		s.nodes = append(s.nodes, label("title", 180, 37, 2, title, "#FFF1C8"))
 	}
@@ -299,7 +299,7 @@ func screenScene(screen object, accent string) sceneView {
 		}
 		s.nodes = append(s.nodes, n)
 	}
-	s.nodes = append(s.nodes, comicButton("cat", 108, 301, 67, 32, "Cat", "#FFFAEE"), comicButton("new", 185, 301, 67, 32, "New", accent))
+	s.nodes = append(s.nodes, comicButton("cat", 139, 301, 82, 32, "Cat", accent))
 	return s
 }
 

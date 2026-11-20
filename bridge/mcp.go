@@ -116,7 +116,7 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		result = object{"protocolVersion": version, "capabilities": object{"tools": object{}},
 			"serverInfo":   object{"name": "echoear", "version": "0.3.0"},
-			"instructions": "Use the exact EchoEar device_id from the conversation. For interactive scenes, pass the latest event_cursor to wait_event."}
+			"instructions": "Use the exact EchoEar device_id from the conversation. Use scene/patch tap, cycle, states and after_ms/then for instant local interaction. Reserve wait_event for input needed by the current turn; pass the latest event_cursor."}
 	case "ping":
 		result = object{}
 	case "tools/list":
@@ -179,6 +179,8 @@ var mcpTools = func() []object {
 		return object{"name": name, "description": description, "inputSchema": in}
 	}
 	bg := str("Background color as #RRGGBB")
+	chime := object{"type": "string", "enum": []string{"tap", "think", "intercom", "celebrate"}}
+	ref := func(name string) object { return object{"$ref": "#/$defs/" + name} }
 	node := object{"id": str("Stable node ID (1–24 letters, numbers, dots, underscores or hyphens)"), "t": object{"type": "string", "enum": []string{"circle", "rect", "line", "arc", "text", "btn"}}}
 	for _, key := range strings.Fields("x y x1 y1 x2 y2 w h r") {
 		node[key] = object{"type": "integer", "description": "Pixel coordinate or dimension; clamped to 0–359"}
@@ -195,23 +197,42 @@ var mcpTools = func() []object {
 	node["sw"], node["fs"] = integer("Stroke width", 0, 180), integer("Font scale", 1, 3)
 	node["s"], node["on"] = str("Display text"), object{"type": "string", "enum": []string{"tap", ""}}
 	node["action"] = object{"type": "string", "enum": []string{"exit", ""}, "description": "Optional tap-back to the face"}
-	node["ask"], node["tap"] = str("Optional fallback prompt if no waiter"), str("Optional spoken feedback if no waiter")
+	node["ask"] = str("Legacy fallback prompt if no waiter; prefer tap.ask")
+	node["tap"] = object{"description": "Local reaction; auto-enables taps. Null removes it.", "anyOf": []object{ref("reaction"), str("Legacy spoken feedback"), {"type": "null"}}}
+	node["cycle"] = object{"description": "Rotate through 2–8 local reactions; null removes it.", "anyOf": []object{
+		{"type": "array", "items": ref("reaction"), "minItems": 2, "maxItems": 8}, {"type": "null"},
+	}}
 	fields := maps.Clone(node)
 	delete(fields, "id")
+	nodes := array(ref("node"))
+	nodes["maxItems"] = maxNodes
+	patch := object{"bg": bg, "set": object{"type": "object", "additionalProperties": schema(fields)}, "add": nodes, "del": array(str("Node ID"))}
+	reaction := schema(object{"chime": chime, "speak": object{"type": "string", "maxLength": 240, "description": "Speak locally without the AI"},
+		"patch": ref("patch"), "state": str("Switch to this named state before applying patch"),
+		"after_ms": integer("Delay before then; at most two chained delays", 50, 10000), "then": ref("reaction"),
+		"ask": object{"type": "string", "maxLength": 240, "description": "Start a new AI turn only when needed"}, "exit": object{"type": "boolean"}})
+	reaction["dependentRequired"] = object{"after_ms": []string{"then"}, "then": []string{"after_ms"}}
+	withSceneDefs := func(in object) object {
+		in["$defs"] = object{"node": schema(node, "id", "t"), "reaction": reaction, "patch": schema(patch)}
+		return in
+	}
+	title := str("Optional short title shown at the top")
+	states := object{"type": "object", "maxProperties": maxSceneStates, "additionalProperties": schema(object{"bg": bg, "title": title, "nodes": nodes}, "nodes")}
+	patchArgs := maps.Clone(patch)
+	patchArgs["expected_rev"] = integer("Expected scene revision", 0, 1<<32-1)
 	return []object{
 		tool("devices", "List physical and virtual EchoEars and their connection, mode and cursor.", schema(object{})),
 		tool("snapshot", "Read the device status, 360×360 keyed scene and last 20 events.", withID(object{})),
-		tool("scene", "Replace the entire screen or restore the cat face. Draw in node order on a 360×360 canvas.",
-			withID(object{"bg": bg, "title": str("Optional short title shown at the top"), "nodes": array(schema(node, "id", "t")),
-				"preset": object{"type": "string", "enum": []string{"face"}}})),
-		tool("patch", "Apply a keyed scene delta; snapshot again if expected_rev conflicts.",
-			withID(object{"bg": bg, "expected_rev": integer("Expected scene revision", 0, 1<<32-1),
-				"set": object{"type": "object", "additionalProperties": schema(fields)}, "add": array(schema(node, "id", "t")), "del": array(str("Node ID"))})),
+		tool("scene", "Draw a 360×360 screen or restore the cat face. Use tap, cycle and states for local interaction without waiting.",
+			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states,
+				"preset": object{"type": "string", "enum": []string{"face"}}}))),
+		tool("patch", "Update visuals or local reactions by node ID; snapshot again if expected_rev conflicts.",
+			withSceneDefs(withID(patchArgs))),
 		tool("speak", "Speak plain text on the device. Do not repeat these words in your final reply.", withID(object{"text": str("Plain words to speak")}, "text")),
-		tool("chime", "Play a short sound on the device.", withID(object{"kind": object{"type": "string", "enum": []string{"tap", "think", "intercom", "celebrate"}}}, "kind")),
+		tool("chime", "Play a short sound on the device.", withID(object{"kind": chime}, "kind")),
 		tool("intercom", "Send a spoken message and screen card to an explicit online peer. Use all only if asked.",
 			schema(object{"from_device_id": str("Sender ID"), "to_device_id": str("Recipient ID or all"), "text": str("Message to speak")}, "from_device_id", "to_device_id", "text")),
-		tool("wait_event", "Wait for the next tap, head_pet, speech or intercom after the cursor. If timeout, event is null.",
+		tool("wait_event", "Wait for input needed by the current turn; use local reactions for regular controls. On timeout or cancellation, event is null.",
 			withID(object{"after_cursor": integer("Last cursor seen; defaults to current cursor", 0, 1<<53-1),
 				"timeout_ms": integer("Defaults to 15000; clamped to 60000", 0, 60000)})),
 	}
@@ -237,6 +258,25 @@ type eventSubscription struct {
 }
 
 func (s eventSubscription) active() bool { return s.ctx.Err() == nil && s.device.Err() == nil }
+
+func (h *wsHub) cancelWaiters(key string) {
+	if e := h.events[key]; e != nil {
+		for ch := range e.subs {
+			delete(e.subs, ch)
+			close(ch)
+		}
+	}
+}
+
+func (h *wsHub) cancelSceneUI(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	key := strings.ToLower(id)
+	h.cancelWaiters(key)
+	if d := h.devices[key]; d != nil {
+		h.stopSceneTimers(d)
+	}
+}
 
 func (h *wsHub) hasWaiter(d *wsDevice) bool {
 	if e := h.events[d.key]; e != nil {
@@ -333,7 +373,13 @@ func (h *wsHub) waitEvent(ctx context.Context, id string, after *uint64, timeout
 		return nil, problem(409, "Device disconnected")
 	case <-timer.C:
 		return object{"event": nil, "event_cursor": cursor}, nil
-	case ev := <-ch:
+	case ev, ok := <-ch:
+		if d.client.ctx.Err() != nil {
+			return nil, problem(409, "Device disconnected")
+		}
+		if !ok {
+			return object{"event": nil, "event_cursor": cursor, "cancelled": true}, nil
+		}
 		return object{"event": ev, "event_cursor": ev.Cursor}, nil
 	}
 }
@@ -504,15 +550,20 @@ func listNodes(v any) ([]object, error) {
 }
 
 // Keep only scalar protocol fields; sceneDiff compares the values directly.
-func customNode(raw object) (object, sceneAction, error) {
-	id, t := str(raw["id"]), str(raw["t"])
-	if !deviceIDRE.MatchString(id) || len(id) > 24 || id == exitNode {
-		return nil, sceneAction{}, problem(400, "Invalid or reserved node ID")
+func visualNode(raw object, partial bool) (object, error) {
+	n := object{}
+	if id := str(raw["id"]); !partial {
+		if !validSceneID(id) || id == exitNode {
+			return nil, problem(400, "Invalid or reserved node ID")
+		}
+		n["id"] = id
 	}
-	if _, ok := shapeFields[t]; !ok {
-		return nil, sceneAction{}, problem(400, "Unknown node type")
+	if t, exists := raw["t"]; !partial || exists {
+		if _, ok := shapeFields[str(t)]; !ok {
+			return nil, problem(400, "Unknown node type")
+		}
+		n["t"] = t
 	}
-	n := object{"id": id, "t": t}
 	for _, key := range strings.Fields("x y x1 y1 x2 y2 w h r sw fs a1 a2") {
 		value, exists := raw[key]
 		if !exists {
@@ -532,7 +583,7 @@ func customNode(raw object) (object, sceneAction, error) {
 			num, ok = coordinate(value, float64(limit))
 		}
 		if !ok {
-			return nil, sceneAction{}, problem(400, "Invalid numeric node field "+key)
+			return nil, problem(400, "Invalid numeric node field "+key)
 		}
 		if key == "fs" {
 			num = max(1, num)
@@ -543,7 +594,7 @@ func customNode(raw object) (object, sceneAction, error) {
 		if value, exists := raw[key]; exists {
 			tint := color(value)
 			if tint == "" {
-				return nil, sceneAction{}, problem(400, "Invalid node color")
+				return nil, problem(400, "Invalid node color")
 			}
 			n[key] = tint
 		}
@@ -556,23 +607,7 @@ func customNode(raw object) (object, sceneAction, error) {
 	if v, ok := raw["s"].(string); ok {
 		n["s"] = shortText(v, 128, false)
 	}
-	action := sceneAction{}
-	switch {
-	case raw["action"] == "exit" && n["vis"] != false:
-		action.kind = "cat"
-	case shortText(raw["ask"], 120, true) != "":
-		action = sceneAction{"ask", shortText(raw["ask"], 120, true)}
-	case shortText(raw["tap"], 120, true) != "":
-		action = sceneAction{"tap", shortText(raw["tap"], 120, true)}
-	case raw["on"] == "tap" || t == "btn" && raw["on"] == nil:
-		action.kind = "event"
-	}
-	if action.kind != "" {
-		n["on"] = "tap"
-	} else if raw["on"] == "" {
-		n["on"] = ""
-	}
-	return n, action, nil
+	return n, nil
 }
 
 func (h *wsHub) mcpScene(id, method string, args object) (object, error) {
@@ -589,134 +624,37 @@ func (h *wsHub) mcpScene(id, method string, args object) (object, error) {
 	if rev != nil && *rev != d.rev {
 		return nil, &sceneConflict{d.rev}
 	}
-	now := time.Now()
 	status := func() object {
 		return object{"ok": true, "device_id": id, "rev": d.rev, "event_cursor": h.ring(d.key).cursor}
 	}
+	now := time.Now()
 	if preset, ok := args["preset"]; ok && method == "scene" {
 		if preset != "face" {
 			return nil, problem(400, "Unknown preset")
 		}
+		h.clearLocalScene(d)
 		d.view, d.pending, d.drawer, d.customScene, d.agentSetScene = nil, nil, false, false, d.busy
 		h.wake(d, now)
 		h.render(d, now, true)
 		return status(), nil
 	}
-	nodes, err := listNodes(args["nodes"])
+	if method == "patch" {
+		patch, err := parseScenePatch(args, d.states, 0)
+		if err != nil {
+			return nil, err
+		}
+		if err := h.patchScene(d, patch, now); err != nil {
+			return nil, err
+		}
+		return status(), nil
+	}
+	view, states, err := parseScene(args)
 	if err != nil {
 		return nil, err
 	}
-	title, bg := shortText(args["title"], 48, false), "#0B1020"
-	if method == "patch" {
-		view := d.scene
-		if d.customScene && d.view != nil {
-			view = *d.view
-		}
-		bg = view.bg
-		set, hasSet := args["set"].(object)
-		if args["set"] != nil && !hasSet {
-			return nil, problem(400, "Expected set keyed by node ID")
-		}
-		del, hasDel := args["del"].([]any)
-		if args["del"] != nil && !hasDel {
-			return nil, problem(400, "Expected del array of node IDs")
-		}
-		gone := map[string]bool{}
-		for _, value := range del {
-			key := str(value)
-			if !deviceIDRE.MatchString(key) {
-				return nil, problem(400, "Invalid node ID in del")
-			}
-			gone[key] = true
-		}
-		nodes = make([]object, 0, len(view.nodes))
-		for _, n := range view.nodes {
-			key := str(n["id"])
-			if key == exitNode || gone[key] {
-				continue
-			}
-			n = maps.Clone(n)
-			a := view.actions[key]
-			if fields, ok := set[key]; ok {
-				values, ok := fields.(object)
-				if !ok || values["id"] != nil {
-					return nil, problem(400, "Expected a node field object without id in set")
-				}
-				if _, ok := values["action"]; ok {
-					a = sceneAction{}
-				}
-				if _, ok := values["on"]; ok {
-					a = sceneAction{}
-				}
-				if _, ok := values["ask"]; ok {
-					a = sceneAction{}
-				}
-				if _, ok := values["tap"]; ok {
-					a = sceneAction{}
-				}
-				maps.Copy(n, values)
-			}
-			if a.kind != "" {
-				// Internal only; unmodified native hit actions survive keyed patches.
-				n["sceneAction"] = a
-			}
-			nodes = append(nodes, n)
-		}
-		add, err := listNodes(args["add"])
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, add...)
-	}
-	if value, ok := args["bg"]; ok {
-		bg = color(value)
-		if bg == "" {
-			return nil, problem(400, "Invalid scene background")
-		}
-	}
-	next := sceneView{bg: bg, nodes: make([]object, 0, min(maxNodes, len(nodes)+2)), actions: make(map[string]sceneAction)}
-	ids := make(map[string]bool)
-	hasExit := false
-	if title != "" {
-		next.nodes = append(next.nodes, label("echoear-title", 180, 38, 2, title, "#FFF1C8"))
-		ids["echoear-title"] = true
-	}
-	for _, raw := range nodes[:min(len(nodes), maxNodes-len(next.nodes))] {
-		n, a, err := customNode(raw)
-		if err != nil {
-			return nil, err
-		}
-		key := str(n["id"])
-		if old, ok := raw["sceneAction"].(sceneAction); ok {
-			a = old
-			n["on"] = raw["on"]
-		}
-		if ids[key] {
-			return nil, problem(400, "Duplicate node ID "+key)
-		}
-		ids[key] = true
-		next.nodes = append(next.nodes, n)
-		if a.kind != "" {
-			next.actions[key] = a
-		}
-		hasExit = hasExit || a.kind == "cat" && n["vis"] != false
-	}
-	if !hasExit {
-		if len(next.nodes) == maxNodes {
-			delete(next.actions, str(next.nodes[maxNodes-1]["id"]))
-			next.nodes = next.nodes[:maxNodes-1]
-		}
-		next.nodes = append(next.nodes, comicButton(exitNode, 139, 300, 82, 32, "Cat", "#FFFAEE"))
-		next.actions[exitNode] = sceneAction{"cat", ""}
-	}
-	d.view, d.pending, d.drawer, d.customScene, d.agentSetScene = &next, nil, false, true, d.busy
-	h.wake(d, now)
-	beforeRev, beforeView := d.rev, d.scene
-	h.render(d, now, method == "scene")
-	if d.rev == beforeRev && !maps.Equal(beforeView.actions, next.actions) {
-		d.rev++
-		h.push(d, object{"op": "patch", "rev": d.rev}, true)
-	}
+	h.clearLocalScene(d)
+	d.states = states
+	h.showCustomScene(d, view, now, true)
 	return status(), nil
 }
 
@@ -773,18 +711,25 @@ func (b *bridge) mcpSpeak(ctx context.Context, who peer, text string) (object, e
 	return object{"ok": true, "device_id": who.DeviceID}, nil
 }
 
+func validChime(kind string) bool {
+	return kind == "tap" || kind == "think" || kind == "intercom" || kind == "celebrate"
+}
+
+func (h *wsHub) chime(d *wsDevice, kind string) {
+	if kind == "celebrate" {
+		kind = "intercom" // Existing firmware's happy tone.
+	}
+	h.push(d, object{"op": "chime", "kind": kind}, false)
+}
+
 func (b *bridge) mcpChime(ctx context.Context, who peer, kind string) (object, error) {
-	if kind != "tap" && kind != "think" && kind != "intercom" && kind != "celebrate" {
+	if !validChime(kind) {
 		return nil, problem(400, "Unknown chime kind")
 	}
 	h := b.ws
 	h.mu.Lock()
 	if d := h.devices[strings.ToLower(who.DeviceID)]; d != nil && h.active(d) {
-		wire := kind
-		if kind == "celebrate" {
-			wire = "intercom"
-		} // Existing firmware's happy tone.
-		h.push(d, object{"op": "chime", "kind": wire}, false)
+		h.chime(d, kind)
 		h.mu.Unlock()
 	} else {
 		h.mu.Unlock()

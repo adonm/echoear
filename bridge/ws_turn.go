@@ -26,6 +26,7 @@ func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, reques
 	waiting := target == "" && h.hasWaiter(d)
 	if !waiting {
 		h.cancelTurn(d)
+		h.clearLocalScene(d)
 		d.drawer, d.view, d.pending, d.customScene = false, nil, nil, false
 	}
 	h.stopPlayback(d, true)
@@ -87,6 +88,15 @@ func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 }
 
 func (h *wsHub) cancelTurn(d *wsDevice) {
+	if h.b.oc != nil {
+		h.b.oc.interruptDevice(d.who.DeviceID)
+	}
+	h.cancelLocalTurn(d)
+}
+
+func (h *wsHub) cancelLocalTurn(d *wsDevice) {
+	h.cancelWaiters(d.key)
+	h.stopSceneTimers(d)
 	d.turn++
 	d.busy = false
 	d.agentSetScene, d.agentSpoke = false, false
@@ -97,8 +107,16 @@ func (h *wsHub) cancelTurn(d *wsDevice) {
 }
 
 func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, run func(context.Context, uint64)) {
+	if d.busy || h.hasWaiter(d) {
+		h.cancelTurn(d)
+	} else {
+		h.cancelLocalTurn(d)
+	}
+	h.beginTurn(d, now, keepView, run)
+}
+
+func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, run func(context.Context, uint64)) {
 	h.wake(d, now)
-	h.cancelTurn(d)
 	h.stopPlayback(d, true)
 	if !d.recAt.IsZero() {
 		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
@@ -106,6 +124,7 @@ func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, run func(co
 	}
 	d.drawer, d.pending = false, nil
 	if !keepView {
+		h.clearLocalScene(d)
 		d.view, d.customScene = nil, false
 	}
 	ctx, cancel := context.WithTimeout(d.client.ctx, turnTimeout)
@@ -146,9 +165,11 @@ func (h *wsHub) turnError(d *wsDevice, id uint64, message string) {
 	h.finishTurn(d, id, &view)
 }
 
-func (h *wsHub) resetTurn(ctx context.Context, d *wsDevice, id uint64) {
-	if h.b.oc != nil {
-		if err := h.b.oc.reset(ctx, d.who.DeviceID); err != nil {
+func (h *wsHub) resetTurn(ctx context.Context, d *wsDevice, id uint64, reset func(context.Context) error) {
+	if reset != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), turnTimeout)
+		defer cancel()
+		if err := reset(ctx); err != nil {
 			h.turnError(d, id, "Could not start a new chat.")
 			return
 		}
@@ -310,7 +331,7 @@ func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *Aud
 	h.play(d, ctx, stream)
 }
 
-func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) {
+func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) context.Context {
 	h.stopPlayback(d, true)
 	ctx, cancel := context.WithCancel(ctx)
 	d.stopAudio = cancel
@@ -373,6 +394,7 @@ func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) {
 			d.cancel = nil
 		}
 	}()
+	return ctx
 }
 
 func (h *wsHub) stopPlayback(d *wsDevice, notify bool) {
@@ -441,6 +463,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, text string, pcm [
 		view := intercomScene(sender, text)
 		if !h.hasWaiter(d) {
 			h.cancelTurn(d)
+			h.clearLocalScene(d)
 			h.stopPlayback(d, true)
 			if !d.recAt.IsZero() {
 				h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)

@@ -359,6 +359,13 @@ func TestWSMirrorAndControls(t *testing.T) {
 	_, base := wsHarness(t, nil)
 	dev := testConnectWS(t, base, "unit", false)
 	first := dev.hello(t, "echoear-33d8", "Cake")
+	if bytes.Contains(first.data, []byte(`"id":"new"`)) {
+		t.Fatal("New is still on the cat face")
+	}
+	face := catScene("Cake", catPose{})
+	if text := nodeIn(face, "text"); nodeInt(text, "x")*2+nodeInt(text, "w") != 360 {
+		t.Fatal("Text button is not centered")
+	}
 	web := testConnectWS(t, base, "unit", true)
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.until(t, hasWS("peers", `"ws":true`))
@@ -372,10 +379,10 @@ func TestWSMirrorAndControls(t *testing.T) {
 	if !bytes.Equal(onDevice.data, onWeb.data) {
 		t.Fatal("mirror patch differs from device")
 	}
-	web.json(t, object{"ev": "tap", "id": "text", "x": 133, "y": 300})
+	web.json(t, object{"ev": "tap", "x": 180, "y": 300})
 	drawer := func(f wsFrame) bool { return f.op == wsText && bytes.Contains(f.data, []byte(`"drawer-title"`)) }
-	if a, b := dev.until(t, drawer), web.until(t, drawer); !bytes.Equal(a.data, b.data) {
-		t.Fatal("mirror tap did not open the same drawer")
+	if a, b := dev.until(t, drawer), web.until(t, drawer); !bytes.Equal(a.data, b.data) || !bytes.Contains(a.data, []byte(`"id":"new"`)) {
+		t.Fatal("mirror tap did not open the same drawer with New")
 	}
 	web.json(t, object{"ev": "head", "action": "vol_down", "volume": 62})
 	for _, c := range []*testWS{dev, web} {
@@ -604,7 +611,7 @@ func TestEmbeddedApp(t *testing.T) {
 			}
 		} else if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Referrer-Policy") != "no-referrer" {
 			t.Fatalf("%s: missing app asset or security headers", path)
-		} else if path == "/app" && (!strings.Contains(w.Body.String(), `viewBox="0 0 360 360"`) ||
+		} else if path == "/app" && (!strings.Contains(w.Body.String(), `viewBox="0 0 360 360"`) || !strings.Contains(w.Body.String(), "New Chat") ||
 			!strings.Contains(w.Body.String(), `Join as Phone Cat`)) {
 			t.Fatal("app is missing its SVG or phone controls")
 		}
