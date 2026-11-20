@@ -26,8 +26,9 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 
    Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup builds
    the Go bridge, installs Hex's `parakeet_unified_en` and FP32 `kokoro-v1.0.onnx`,
-   links the [EchoEar agent](agents/echoear.md), and starts both services.
-   Set `ECHOEAR_OPENCODE_MODEL` in `bridge.env` to change models.
+    links the [EchoEar agent](agents/echoear.md), registers its local MCP server,
+    and starts both services. Set `ECHOEAR_OPENCODE_MODEL` in `bridge.env` to
+    change models.
 
 2. Create the private firmware config once:
 
@@ -70,12 +71,42 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
-- Ask for a composed message (“Send Mint a knock-knock joke”). The agent emits
-  an `echoear-message` block; the bridge delivers a card and synthesized speech.
-- Open `http://<host-lan-ip>:8765/app` and enter the bridge token to mirror
-  and control a cat. **Join as Phone Cat** adds a virtual EchoEar for intercom.
-  The browser mic needs HTTPS or localhost; plain LAN HTTP still supports
-  the SVG mirror, text, and audio playback.
+- Ask for a composed message (“Send Mint a knock-knock joke”). The agent uses
+  the `intercom` tool to deliver a card and synthesized speech.
+
+## Browser dashboard
+
+Open `http://<host-lan-ip>:8765/app` on a trusted LAN and enter the bridge
+token. Select a physical EchoEar to mirror and control it, or use
+**New Virtual Cat** to create a named client that persists across restarts.
+The scrollable Chat panel loads recent messages with
+`GET /api/devices/{id}/messages` and updates live over `/ws`.
+
+Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
+Microphone access requires HTTPS or localhost. For a remote phone, install
+the [OpenTunnel CLI](https://opentunnel.xyz) on the bridge host. If it is
+outside the bridge service's `PATH` and `~/.local/bin`, set
+`ECHOEAR_OPENTUNNEL_BIN` to its path in `bridge.env`. Restart the bridge
+with `systemctl --user restart echoear-bridge.service` so it finds the CLI.
+In the dashboard, select a Virtual Cat, choose **Create Tunnel** to start
+its route, then **Copy Share Link**. The HTTPS link has a per-client token; the
+tunnel serves that client's chat, mic, and screen, not the LAN dashboard or
+admin routes. Treat the link as a password and use **Close Tunnel** to revoke it.
+
+## OpenCode MCP
+
+`scripts/setup-host.sh` uses `opencode mcp add --global` to register
+`mcp.servers.echoear` as a local server in `~/.config/opencode/opencode.jsonc`
+(or `$XDG_CONFIG_HOME/opencode/opencode.jsonc`). It reuses an existing
+`opencode.json` if OpenCode selects it and preserves unrelated settings.
+`opencode mcp list` shows whether `echoear` is connected.
+
+OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
+requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
+reads the token from its environment or the private `bridge.env`; the
+OpenCode config contains only the executable and its argument, no secrets.
+Code Mode exposes `tools.echoear.devices`, `snapshot`, `scene`, `patch`,
+`speak`, `chime`, `intercom`, and `wait_event` under `tools.echoear`.
 
 ## API
 
@@ -91,6 +122,7 @@ while OpenCode streams its reply over SSE.
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
 | `GET /api/devices` | `devices` with `device_id`, `character`, `ip`, `online` |
+| `GET /api/devices/{id}/messages` | Recent chat messages and bridge events for a device |
 | `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
 | `POST /api/intercom` | Audio and `X-Target` (device ID or name) → transcript and delivery result |
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
@@ -109,8 +141,8 @@ Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body
 | `POST /ota`, `POST /ota/upload` | Pull from bridge or upload `echoear.bin` as `application/octet-stream`; reboot on success |
 | `POST /reboot` | Reboot |
 
-The agent appends optional fenced payloads. `echoear-screen` becomes `screen`;
-`echoear-message` routes a message to a peer.
+Legacy HTTP replies still accept optional fenced payloads. `echoear-screen`
+becomes `screen`; `echoear-message` routes a message to a peer.
 
 ```echoear-screen
 {"title":"Radius","shapes":[{"t":"btn","x":85,"y":218,"w":190,"h":46,"s":"Quick fact","tap":"A radius runs from center to edge."}]}

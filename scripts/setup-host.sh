@@ -152,6 +152,12 @@ fi
 if [[ "$(hex settings get transcription.model)" != "$model" ]]; then
     hex model use "$model"
 fi
-opencode api get /api/info >/dev/null
 systemctl --user restart echoear-bridge.service
+if [[ ! -e "$config/opencode/opencode.json" && ! -e "$config/opencode/opencode.jsonc" ]]; then
+    ( set -o noclobber
+      printf '{\n  "%s": "https://opencode.ai/config.json"\n}\n' "\$schema" > "$config/opencode/opencode.jsonc"
+    )
+fi
+opencode mcp add echoear --global -- "$bridge_bin" mcp
+opencode api get /api/info >/dev/null
 printf 'Configure firmware/sdkconfig.local as shown in README.md. The bridge token is in %s.\n' "$env_file"
