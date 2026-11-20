@@ -96,7 +96,7 @@ state, handle browser drags, play named sounds, and launch from local timers.
 - Tap **Reply to \<Sender\>** on a message card or choose a peer in
   **Menu → Talk to…** to record directly to that cat.
 - Ask for a composed message (“Send Mint a knock-knock joke”). The agent uses
-  `act` to deliver a card and synthesized speech to the recipient.
+  `emit` to deliver a card and synthesized speech to the recipient.
 
 ## Browser dashboard
 
@@ -177,20 +177,27 @@ Code Mode exposes exactly four MCP tools under `tools.echoear`:
 
 | Tool | Purpose |
 | --- | --- |
-| `inspect` | Discover devices or read a cat's live screen, app, peers, timers, and saved state |
-| `run_app` | Show SVG, run a JS micro-app, save or load by slug, or exit to the face |
-| `act` | Send intercom, play a chime or melody, change volume or sleep, manage reminders, or edit a cat |
-| `store` | Read or write scoped JSON with optional version checks |
+| `state` | Read keyed devices, cats, saved apps, timers, and scoped JSON. Select slices with `include`; add `saved_cats`, `messages`, or `diagnostics` when needed. |
+| `patch` | Update device settings, cat appearance, memory, or a timer. Memory batches commit atomically; `expected_version:0` requires an absent key. |
+| `app` | Show SVG, run or update a JS app, save/load/delete by slug, or exit to the face. |
+| `emit` | Send spoken intercom and a card, play notes, or play a named sound (`sfx` or `chime`). |
+
+With `device_id`, `state` always returns `me.device`, `me.cat`, and
+`me.active_app`. Read source from `me.cat.face_svg` or fetch saved app source
+with `include_code:true`. Read persistent values as `memory[scope][key].value`.
 
 The agent can also use OpenCode's `websearch`. There is no `wait_event` tool:
 pointer events and bounded ticks run in the bridge without keeping an OpenCode turn open.
 The bridge uses the pure-Go `goja` sandbox to run JS that renders SVG. Apps can
 target one player or share state across multiple devices with a separate SVG
-view for each player. `save_as` writes apps and drawings to Turso's `apps`
-table; `load` reopens them. `storeGet(key)` reads persisted state in `init(ctx)`
+view for each player. `initial_state` seeds `ctx.initial_state` (or the state
+directly if there is no `init`). `state_patch` shallow-merges live state and
+redraws all players without restarting. App state must fit in 64 KB of JSON.
+`save_as` writes apps and drawings to Turso's `apps` table; `load` reopens
+them. `storeGet(key)` reads persisted state in `init(ctx)`
 and `render(state, player)`; `storeSet(key, value)` is available only in event
 hooks. On the web, use `onDrag` and `onUp` alongside `onTap` for sliders and
-drawing. `sfx(name)`, `sfxAll(name)`, and `act.chime` support `boing`, `pop`,
+drawing. `sfx(name)`, `sfxAll(name)`, and `emit.sfx` support `boing`, `pop`,
 `win`, `buzz`, `ding`, and `whoosh`. Set `timer.app` to a saved app name to
 launch it on the connected device when the reminder goes off. See the
 [agent guide](agents/echoear.md) for examples.
@@ -198,7 +205,7 @@ launch it on the connected device when the reminder goes off. See the
 **One Voice Rule:** Only final assistant prose is spoken as the reply, not
 tool output or intermediate text. The prompt starts with a short identity
 and source header, plus setup or personality hints when applicable. The agent
-uses `inspect` for live state.
+uses `state` for live context.
 
 ## Bridge data
 
