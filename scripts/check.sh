@@ -21,7 +21,8 @@ GO_BIN=$(resolve_go)
 python3 -m py_compile bridge/tts_worker.py
 node --check bridge/web/client.js
 node --check bridge/web/mic.js
-node --test bridge/tests/*_test.cjs
+# mic.test.mjs imports the mic and playback CJS suites.
+node --test bridge/web/*.test.mjs
 (
     cd bridge
     "$GO_BIN" mod verify
@@ -36,6 +37,9 @@ host_cc=(gcc -std=c11 -Wall -Wextra -Werror -I firmware/main "-fsanitize=address
 "${host_cc[@]}" firmware/tests/vad_test.c firmware/main/vad.c -o "$host_tests/vad"
 "$host_tests/vad"
 printf 'PASS host VAD tests\n'
+
+"${host_cc[@]}" firmware/tests/touch_gesture_test.c firmware/main/touch_gesture.c -o "$host_tests/touch_gesture"
+"$host_tests/touch_gesture"
 
 for board in vocat box3; do
     flags=()

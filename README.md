@@ -122,9 +122,9 @@ section lets you inspect and delete saved keys and visuals.
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
 Microphone access requires HTTPS or localhost and uses the same adaptive
-silence timing as the boards. On manual stop, the browser captures another
-200 ms before flushing the final audio. For a remote phone, install
-the [OpenTunnel CLI](https://opentunnel.xyz) on the bridge host. If it is
+silence timing as the boards. On manual stop, the browser flushes any buffered
+audio before ending the recording, without a fixed recording tail. For a remote
+phone, install the [OpenTunnel CLI](https://opentunnel.xyz) on the bridge host. If it is
 outside the bridge service's `PATH` and `~/.local/bin`, set
 `ECHOEAR_OPENTUNNEL_BIN` to its path in `bridge.env`. Restart the bridge
 with `systemctl --user restart echoear-bridge.service` so it finds the CLI.
@@ -242,8 +242,8 @@ authenticated `/ws` hello. The bridge remembers each board there, using the
 socket IP and port 80 unless the hello specifies a port. The SVG renderer
 streams dirty rectangles as `0x03` RGB565 binary frames, using RLE565 when
 smaller. BOX-3 announces its native size; the bridge centers the square
-artwork and maps raw taps back into SVG space. Browsers receive `op: "svg"`;
-their on-screen controls also work with Tab, Enter, and Space.
+artwork and maps raw touch coordinates back into SVG space. Browsers receive
+`op: "svg"`; their on-screen controls also work with Tab, Enter, and Space.
 `0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
 little-endian mono PCM. Voice capture and intercom use WebSocket. The bridge
 pads voiced PCM sent to Hex with 150 ms of silence on each side. Kokoro starts
@@ -282,7 +282,6 @@ cat’s name. Intercom requires a connected recipient.
 | Device · port 80 | Request → response |
 | --- | --- |
 | `GET /status` | Identity, board, display size, firmware, partition, CPU, memory, RSSI, uptime, battery, volume, sleeping, and `ws_connected` |
-| `POST /speak` | Raw PCM (1.5 MiB max) → queued sample count or 409 if busy |
 | `POST /volume` | `{"level":65}` → saved volume (0–100) |
 | `POST /ota`, `POST /ota/upload` | Pull or upload the board's firmware (`application/octet-stream`); reboot on success |
 | `POST /reboot` | Reboot |
