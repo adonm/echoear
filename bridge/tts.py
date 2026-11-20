@@ -1,5 +1,3 @@
-"""Local Kokoro speech as mono signed 16-bit little-endian PCM."""
-
 import math
 import os
 import re
@@ -18,9 +16,7 @@ INITIALS = re.compile(r"\b(?:[A-Z]\.)+$")
 
 
 def plain_text(value):
-    if not isinstance(value, str):
-        return ""
-    return " ".join(value.translate(MARKDOWN).split())
+    return " ".join(value.translate(MARKDOWN).split()) if isinstance(value, str) else ""
 
 
 def split_sentences(text: str) -> list[str]:
@@ -74,7 +70,7 @@ def normalize_voice_pcm(raw_pcm: bytes) -> bytes:
     rms = math.sqrt(sum(value * value for value in samples) / len(samples))
     if peak < 1100 or rms < 400:
         return raw_pcm
-    gain = min(3.0, 32767 * 10 ** (-2 / 20) / peak)
+    gain = min(3, 32767 * 10 ** (-2 / 20) / peak)
     return pcm_bytes(array("h", (round(value * gain) for value in samples)))
 
 
@@ -88,22 +84,23 @@ class Speech:
     voice = "af_heart"
 
     def __init__(self, models):
-        import numpy
-        import onnxruntime
+        import numpy as np
+        import onnxruntime as ort
         from kokoro_onnx import Kokoro
+        from onnxruntime.capi import onnxruntime_pybind11_state as errors
         from scipy.signal import resample_poly
 
-        options = onnxruntime.SessionOptions()
+        self.errors = (errors.Fail, errors.RuntimeException, errors.InvalidArgument, errors.EPFail, ValueError, OSError)
+        options = ort.SessionOptions()
         options.intra_op_num_threads = min(8, len(os.sched_getaffinity(0)))
         options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        session = onnxruntime.InferenceSession(
-            str(models / "kokoro-v1.0.onnx"), sess_options=options,
-            providers=["CPUExecutionProvider"],
-        )
-        self.kokoro = Kokoro.from_session(session, str(models / "voices-v1.0.bin"))
-        self.numpy = numpy
-        self.resample = resample_poly
-        self.lock = threading.Lock()
+        try:
+            session = ort.InferenceSession(str(models / "kokoro-v1.0.onnx"), sess_options=options,
+                                           providers=["CPUExecutionProvider"])
+            self.kokoro = Kokoro.from_session(session, str(models / "voices-v1.0.bin"))
+        except (*self.errors, errors.NoSuchFile, errors.InvalidGraph, errors.InvalidProtobuf, errors.NoModel) as error:
+            raise RuntimeError(f"Kokoro load: {type(error).__name__}") from None
+        self.np, self.resample, self.lock = np, resample_poly, threading.Lock()
 
     @staticmethod
     def spoken_text(text):
@@ -118,29 +115,28 @@ class Speech:
     def synthesize_sentences(self, text: str):
         sentences = split_sentences(self.spoken_text(text))
         for i, sentence in enumerate(sentences):
-            pcm = self._pcm(sentence)
-            if i + 1 < len(sentences):
-                # Kokoro trims clip edges. Restore a short pause between independently generated sentences.
-                pcm += bytes(SAMPLE_RATE // 10 * 2)
-            yield i, pcm
+            # Restore the inter-sentence pause trimmed by Kokoro.
+            pause = bytes(SAMPLE_RATE // 5) if i + 1 < len(sentences) else b""
+            yield self._pcm(sentence) + pause
 
     def _pcm(self, text):
-        with self.lock:
-            wave, rate = self.kokoro.create(text, voice=self.voice, lang="en-us")
+        try:
+            with self.lock:
+                wave, rate = self.kokoro.create(text, voice=self.voice, lang="en-us")
+        except self.errors as error:
+            raise RuntimeError(f"Kokoro inference: {type(error).__name__}") from None
         if rate != SAMPLE_RATE:
             divisor = math.gcd(SAMPLE_RATE, rate)
             wave = self.resample(wave, SAMPLE_RATE // divisor, rate // divisor)
         if wave.ndim != 1 or not 0 < wave.size <= MAX_PCM // 2:
             raise ValueError("Invalid synthesized audio length")
-        np = self.numpy
-        scaled = wave * 1.8
+        np, scaled = self.np, wave * 1.8
         magnitude = np.abs(scaled)
         peak = float(np.max(magnitude))
         if not math.isfinite(peak) or peak < 1e-5:
             raise ValueError("Synthesized audio is silent or invalid")
         # Fixed voice gain preserves relative loudness. A soft knee limits peaks to -1 dBFS.
-        knee = 0.75
-        headroom = 10 ** (-1 / 20) - knee
+        knee, headroom = 0.75, 10 ** (-1 / 20) - 0.75
         hot = magnitude > knee
         magnitude[hot] = knee + headroom * np.tanh((magnitude[hot] - knee) / headroom)
         return np.rint(np.copysign(magnitude, scaled) * 32767).astype("<i2").tobytes()
