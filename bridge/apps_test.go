@@ -385,10 +385,55 @@ func TestAppAndEmitNamedSFX(t *testing.T) {
 	}
 }
 
-func TestAppReportsStoreWriteFailure(t *testing.T) {
+func TestAppSaveDoesNotCommitStaleLaunch(t *testing.T) {
+	for _, change := range []string{"view changed", "disconnected"} {
+		t.Run(change, func(t *testing.T) {
+			b, base := wsHarness(t, nil)
+			const id, name = "echoear-stale", "stale-app"
+			board := testConnectWS(t, base, "unit", false)
+			board.helloV2(t, id, "Cake")
+			conn, err := b.db.Conn(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			before := b.db.Stats().WaitCount
+			done := make(chan error, 1)
+			go func() {
+				_, err := b.runApp(t.Context(), object{"devices": id, "save_as": name, "code": `function render(){ return "<svg/>"; }`})
+				done <- err
+			}()
+			// Memory loads after the launch captures its device generation.
+			eventually(t, func() bool { return b.db.Stats().WaitCount > before })
+			if change == "disconnected" {
+				b.ws.disconnectDevice(id)
+			} else {
+				b.ws.mu.Lock()
+				b.ws.clearView(b.ws.devices[id])
+				b.ws.mu.Unlock()
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if ae, ok := err.(*apiError); !ok || ae.status != 409 || !strings.Contains(ae.text, change) {
+					t.Fatalf("launch error = %v, want 409 %s", err, change)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("stale launch did not return")
+			}
+			if apps, err := b.listApps(t.Context(), false); err != nil || len(apps) != 0 {
+				t.Fatalf("stale launch persisted an app: %v (%v)", apps, err)
+			}
+		})
+	}
+}
+
+func TestAppStoreEffectsRollBackOnWriteFailure(t *testing.T) {
 	b, base := wsHarness(t, nil)
 	const id = "echoear-storage-full"
-	const code = `function render(){return "<svg/>"} function onTap(){storeSet("overflow",true);}`
+	const code = `function render(){return "<svg/>"} function onTap(){storeSet("k1",true); storeSet("overflow",true);}`
 	dev := testConnectWS(t, base, "unit", false)
 	dev.helloV2(t, id, "Cake")
 	if _, err := b.db.Exec(`WITH RECURSIVE keys(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM keys WHERE n<64)
@@ -398,9 +443,13 @@ func TestAppReportsStoreWriteFailure(t *testing.T) {
 	toolTest(t, base, "app", object{"devices": id, "code": code, "save_as": "full"}, false)
 	dev.until(t, isDisplay)
 	dev.json(t, object{"ev": "tap", "x": 180, "y": 180})
-	dev.until(t, hasWS("error", "Could not save app key"))
+	dev.until(t, hasWS("error", `Could not save app key \"overflow\"`))
 	if a := stateMe(t, base, id)["active_app"]; a != nil {
 		t.Fatal("app stayed active after a failed write")
+	}
+	mem := memoryScope(t, base, "app:full")
+	if existing := mem["k1"].(object); existing["value"] != json.Number("0") || existing["version"] != json.Number("1") || mem["overflow"] != nil {
+		t.Fatal("failed batch did not roll back the first write", existing, mem["overflow"])
 	}
 }
 

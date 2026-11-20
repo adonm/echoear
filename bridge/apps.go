@@ -727,11 +727,6 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	if err != nil {
 		return nil, problem(400, err.Error())
 	}
-	if save != "" {
-		if err := b.saveApp(ctx, a); err != nil {
-			return nil, err
-		}
-	}
 	h.mu.Lock()
 	for i, d := range devices {
 		if !h.active(d) {
@@ -741,6 +736,12 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		if d.appGen != gens[i] {
 			h.mu.Unlock()
 			return nil, problem(409, "Device view changed: "+d.who.DeviceID)
+		}
+	}
+	if save != "" {
+		if err := b.saveApp(ctx, a); err != nil {
+			h.mu.Unlock()
+			return nil, err
 		}
 	}
 	inst.ctx, inst.cancel = context.WithCancel(b.root)
@@ -985,21 +986,41 @@ func (h *wsHub) runAppEvents(a *appInstance) {
 }
 
 func (h *wsHub) storeAppEffects(a *appInstance) error {
-	for _, e := range a.effects {
-		if e.kind == "exit" || a.ctx.Err() != nil {
-			return nil
+	effects := a.effects
+	if i := slices.IndexFunc(effects, func(e appEffect) bool { return e.kind == "exit" }); i >= 0 {
+		effects = effects[:i]
+	}
+	if a.ctx.Err() != nil || !slices.ContainsFunc(effects, func(e appEffect) bool { return e.kind == "store" }) {
+		return nil
+	}
+	if h.b.db == nil {
+		return errors.New("App storage unavailable")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 200*time.Millisecond)
+	defer cancel()
+	tx, err := h.b.db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("EchoEar could not open storage for app %q: %v", a.spec.Name, err)
+		return errors.New("Could not save app storage")
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	for _, e := range effects {
+		if e.kind != "store" {
+			continue
 		}
+		edit := memoryEdit{memoryWrite: memoryWrite{a.scope, e.text, string(e.value)}}
+		if _, err := editMemory(ctx, tx, edit, now); err != nil {
+			log.Printf("EchoEar could not persist app %q key %q: %v", a.spec.Name, e.text, err)
+			return fmt.Errorf("Could not save app key %q", e.text)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("EchoEar could not commit storage for app %q: %v", a.spec.Name, err)
+		return errors.New("Could not save app storage")
+	}
+	for _, e := range effects {
 		if e.kind == "store" {
-			if h.b.db == nil {
-				return errors.New("App storage unavailable")
-			}
-			ctx, cancel := context.WithTimeout(a.ctx, 200*time.Millisecond)
-			_, err := h.b.db.setMemory(ctx, memoryWrite{a.scope, e.text, string(e.value)}, nil)
-			cancel()
-			if err != nil {
-				log.Printf("EchoEar could not persist app %q key %q: %v", a.spec.Name, e.text, err)
-				return fmt.Errorf("Could not save app key %q", e.text)
-			}
 			a.memory[e.text] = e.value
 		}
 	}

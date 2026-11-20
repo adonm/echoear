@@ -43,15 +43,15 @@ type timerManager struct {
 	wg      sync.WaitGroup
 	closed  bool
 	// HTTP MCP calls do not carry a trusted OpenCode session ID. Reject
-	// wake-agent scheduling bridge-wide during any timer-triggered turn.
-	fromTimerTurn int
+	// wake-agent scheduling on a device while its timer-triggered turn runs.
+	fromTimerTurn map[string]int
 }
 
 const timerColumns = "id,device_id,label,say,chime,wake_agent,created_at,fire_at,notes_json,app_name"
 
 func newTimerManager(b *bridge) *timerManager {
 	ctx, cancel := context.WithCancel(b.root)
-	return &timerManager{b: b, ctx: ctx, cancel: cancel, handles: make(map[string]*time.Timer)}
+	return &timerManager{b: b, ctx: ctx, cancel: cancel, handles: make(map[string]*time.Timer), fromTimerTurn: make(map[string]int)}
 }
 
 func scanTimer(r rowScanner) (savedTimer, error) {
@@ -218,7 +218,7 @@ func (m *timerManager) set(ctx context.Context, t savedTimer) error {
 	if m.closed {
 		return problem(503, "Timers unavailable")
 	}
-	if t.WakeAgent && m.fromTimerTurn != 0 {
+	if t.WakeAgent && m.fromTimerTurn[strings.ToLower(t.DeviceID)] != 0 {
 		return problem(409, "Cannot schedule a wake-agent timer during a timer-triggered turn")
 	}
 	notes, _ := json.Marshal(t.Notes)
@@ -274,16 +274,22 @@ func (m *timerManager) claim(id string) (savedTimer, bool) {
 	if m.closed || m.handles[id] == nil {
 		return savedTimer{}, false
 	}
-	m.stopLocked(id)
 	t, err := scanTimer(m.b.db.QueryRowContext(m.ctx, "DELETE FROM timers WHERE id=? RETURNING "+timerColumns, id))
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) && m.ctx.Err() == nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			m.stopLocked(id)
+		case m.ctx.Err() == nil:
 			log.Print("EchoEar could not claim timer")
+			// The callback may already have fired; a lone map entry cannot retry.
+			m.stopLocked(id)
+			m.armLocked(id, timerGrace)
 		}
 		return savedTimer{}, false
 	}
+	m.stopLocked(id)
 	if t.WakeAgent {
-		m.fromTimerTurn++
+		m.fromTimerTurn[strings.ToLower(t.DeviceID)]++
 	}
 	return t, true
 }
@@ -296,7 +302,10 @@ func (m *timerManager) fire(id string) {
 	if t.WakeAgent {
 		defer func() {
 			m.mu.Lock()
-			m.fromTimerTurn--
+			key := strings.ToLower(t.DeviceID)
+			if m.fromTimerTurn[key]--; m.fromTimerTurn[key] == 0 {
+				delete(m.fromTimerTurn, key)
+			}
 			m.mu.Unlock()
 		}()
 	}

@@ -237,8 +237,40 @@ func TestTimerRestartPrunesAndFiresOnce(t *testing.T) {
 	}
 }
 
+func TestTimerClaimRetriesAfterDatabaseError(t *testing.T) {
+	const id = "echoear-timer-retry"
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.timers = newTimerManager(b)
+		t.Cleanup(b.timers.close)
+	})
+	board := testConnectWS(t, base, "unit", false)
+	board.helloV2(t, id, "Cake")
+	now := time.Now()
+	timer := savedTimer{ID: randomHex(12), DeviceID: id, CreatedAt: now, FireAt: now.Add(time.Hour), Label: "Retry", Chime: "celebrate"}
+	if err := b.timers.set(t.Context(), timer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.db.Exec("ALTER TABLE timers RENAME TO paused_timers"); err != nil {
+		t.Fatal(err)
+	}
+	b.timers.fire(timer.ID)
+	if _, err := b.db.Exec("ALTER TABLE paused_timers RENAME TO timers"); err != nil {
+		t.Fatal(err)
+	}
+	board.until(t, hasWS("chime", `"kind":"intercom"`))
+	b.timers.fire(timer.ID)
+	left, err := b.timers.list(t.Context(), id)
+	if err != nil || len(left) != 0 {
+		t.Fatalf("retry did not consume timer: %v (%v)", left, err)
+	}
+	events, err := b.history.list(t.Context(), id)
+	if err != nil || len(events) != 1 || events[0].Text != "Time's up! Retry" {
+		t.Fatalf("retry did not deliver exactly once: %v (%v)", events, err)
+	}
+}
+
 func TestTimerWakeAgentGuard(t *testing.T) {
-	const device, sid = "echoear-timer", "ses-reminder"
+	const device, other, sid = "echoear-timer", "echoear-other", "ses-reminder"
 	prompt, release := make(chan string, 1), make(chan struct{})
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.timers = newTimerManager(b)
@@ -266,6 +298,7 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	})
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, device, "Cake")
+	testConnectWS(t, base, "unit", false).hello(t, other, "Mint")
 	args := object{"device_id": device, "op": "set", "wake_agent": true, "in_seconds": 29}
 	patchTimerTest(t, base, args, true)
 	args["in_seconds"] = 30
@@ -288,6 +321,7 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	if !strings.Contains(str(conflict["error"]), "timer-triggered") {
 		t.Fatal(conflict)
 	}
+	patchTimerTest(t, base, object{"device_id": other, "op": "set", "wake_agent": true, "in_seconds": 3600}, false)
 	args["wake_agent"] = false
 	patchTimerTest(t, base, args, false)
 	close(release)
