@@ -35,10 +35,25 @@ type sceneView struct {
 	actions  map[string]sceneAction
 	feedback map[string]string
 	controls map[string]object // Server-only node declarations.
+	groups   map[string]string // Node ID to group name; excluded from wire nodes.
 }
 
 func (s sceneView) full(rev uint64) object {
 	return object{"op": "scene", "rev": rev, "bg": s.bg, "nodes": s.nodes}
+}
+
+func (s sceneView) snapshotNodes() []object {
+	if len(s.groups) == 0 {
+		return s.nodes
+	}
+	nodes := slices.Clone(s.nodes)
+	for i, n := range nodes {
+		if group := s.groups[str(n["id"])]; group != "" {
+			nodes[i] = maps.Clone(n)
+			nodes[i]["group"] = group
+		}
+	}
+	return nodes
 }
 
 // A patch retains the order of surviving nodes and can only append new ones.
@@ -265,7 +280,7 @@ func screenScene(screen object, accent string) sceneView {
 	for i, shape := range shapes[:min(24, len(shapes))] {
 		id := "shape-" + strconv.Itoa(i)
 		n := object{"id": id, "t": shape["t"], "c": shape["c"]}
-		for _, key := range []string{"x", "y", "x1", "y1", "x2", "y2", "h", "r", "a1", "a2", "s", "fill"} {
+		for _, key := range []string{"x", "y", "x1", "y1", "x2", "y2", "x3", "y3", "h", "r", "a1", "a2", "s", "fill"} {
 			if v, ok := shape[key]; ok {
 				n[key] = v
 			}
@@ -276,7 +291,7 @@ func screenScene(screen object, accent string) sceneView {
 			if n["t"] == "btn" {
 				n["bc"], n["tc"], n["sw"], n["fill"], n["fs"] = catInk, contrastText(str(n["c"])), 3, true, 1
 			}
-		case "circle", "line", "arc":
+		case "circle", "line", "arc", "tri":
 			width := nodeInt(shape, "w")
 			n["sw"] = max(1, width)
 			if width == 0 {
@@ -369,6 +384,17 @@ func hitNode(n object, x, y int) bool {
 		vx, vy := bx-ax, by-ay
 		at := clampFloat(((float64(x)-ax)*vx+(float64(y)-ay)*vy)/max(1, vx*vx+vy*vy), 0, 1)
 		return math.Hypot(float64(x)-ax-at*vx, float64(y)-ay-at*vy) <= float64(max(7, nodeInt(n, "sw")))
+	case "tri":
+		ax, ay := nodeInt(n, "x1"), nodeInt(n, "y1")
+		bx, by := nodeInt(n, "x2"), nodeInt(n, "y2")
+		cx, cy := nodeInt(n, "x3"), nodeInt(n, "y3")
+		sw, ok := n["sw"].(int)
+		if !ok {
+			sw = 2
+		}
+		pad := 10 + sw/2
+		return x >= min(ax, bx, cx)-pad && x <= max(ax, bx, cx)+pad &&
+			y >= min(ay, by, cy)-pad && y <= max(ay, by, cy)+pad
 	}
 	return false
 }

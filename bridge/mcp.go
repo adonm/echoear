@@ -116,7 +116,7 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		result = object{"protocolVersion": version, "capabilities": object{"tools": object{}},
 			"serverInfo":   object{"name": "echoear", "version": "0.3.0"},
-			"instructions": "Use the exact EchoEar device_id from the conversation. Use scene/patch tap, cycle, states and after_ms/then for instant local interaction. Reserve wait_event for input needed by the current turn; pass the latest event_cursor."}
+			"instructions": "Use the exact EchoEar device_id from the conversation. Use scene/patch tap and cycle for local interaction, with move and revert_ms for motion. Reserve wait_event for input needed by the current turn; pass the latest event_cursor."}
 	case "ping":
 		result = object{}
 	case "tools/list":
@@ -179,10 +179,12 @@ var mcpTools = func() []object {
 		return object{"name": name, "description": description, "inputSchema": in}
 	}
 	bg := str("Background color as #RRGGBB")
+	say := object{"type": "string", "maxLength": maxText, "description": "Speak plain text on the device without repeating it in the final reply"}
 	chime := object{"type": "string", "enum": []string{"tap", "think", "intercom", "celebrate"}}
 	ref := func(name string) object { return object{"$ref": "#/$defs/" + name} }
-	node := object{"id": str("Stable node ID (1–24 letters, numbers, dots, underscores or hyphens)"), "t": object{"type": "string", "enum": []string{"circle", "rect", "line", "arc", "text", "btn"}}}
-	for _, key := range strings.Fields("x y x1 y1 x2 y2 w h r") {
+	node := object{"id": str("Stable node ID (1–24 letters, numbers, dots, underscores or hyphens)"),
+		"t": object{"type": "string", "enum": []string{"circle", "rect", "line", "tri", "arc", "text", "btn"}}}
+	for _, key := range strings.Fields("x y x1 y1 x2 y2 x3 y3 w h r") {
 		node[key] = object{"type": "integer", "description": "Pixel coordinate or dimension; clamped to 0–359"}
 	}
 	for _, key := range strings.Fields("a1 a2") {
@@ -191,14 +193,14 @@ var mcpTools = func() []object {
 	for _, key := range strings.Fields("c bc tc") {
 		node[key] = str("Color as #RRGGBB")
 	}
-	for _, key := range strings.Fields("fill vis") {
-		node[key] = object{"type": "boolean"}
-	}
+	node["vis"] = object{"type": "boolean"}
+	node["fill"] = object{"type": "boolean", "description": "Fill the shape; defaults to true for tri"}
+	node["group"] = object{"type": []string{"string", "null"}, "description": "Name for moving nodes together; null clears it"}
 	node["sw"], node["fs"] = integer("Stroke width", 0, 180), integer("Font scale", 1, 3)
 	node["s"], node["on"] = str("Plain ASCII display text (no emoji)"), object{"type": "string", "enum": []string{"tap", ""}}
 	node["action"] = object{"type": "string", "enum": []string{"exit", ""}, "description": "Optional tap-back to the face"}
 	node["ask"] = str("Legacy fallback prompt if no waiter; prefer tap.ask")
-	node["tap"] = object{"description": `Local reaction; auto-enables taps. For example: {"patch":{"set":{"fish":{"y":120}}},"after_ms":400,"then":{"patch":{"set":{"fish":{"y":210}}}}}. Null removes it.`,
+	node["tap"] = object{"description": `Local reaction; auto-enables taps. Example: {"move":{"target":"fish","dx":0,"dy":-90},"revert_ms":400}. Null removes it.`,
 		"anyOf": []object{ref("reaction"), str("Legacy spoken feedback"), {"type": "null"}}}
 	node["cycle"] = object{"description": "Rotate through 2–8 local reactions; null removes it.", "anyOf": []object{
 		{"type": "array", "items": ref("reaction"), "minItems": 2, "maxItems": 8}, {"type": "null"},
@@ -208,10 +210,12 @@ var mcpTools = func() []object {
 	nodes := array(ref("node"))
 	nodes["maxItems"] = maxNodes
 	patch := object{"bg": bg, "set": object{"type": "object", "additionalProperties": schema(fields),
-		"description": `Partial updates keyed by exact existing node ID, e.g. {"fish":{"y":120}}. For lines use x1/y1/x2/y2.`},
+		"description": `Partial updates keyed by exact existing node ID. Lines use two coordinate pairs, triangles use three.`},
 		"add": nodes, "del": array(str("Node ID"))}
+	move := schema(object{"target": str("Exact node ID or group name"), "dx": object{"type": "integer"}, "dy": object{"type": "integer"}}, "target", "dx", "dy")
 	reaction := schema(object{"chime": chime, "speak": object{"type": "string", "maxLength": 240, "description": "Speak locally without the AI"},
-		"patch": ref("patch"), "state": str("Switch to this named state before applying patch"),
+		"patch": ref("patch"), "state": str("Switch to this named state before applying patch or move"),
+		"move": move, "revert_ms": integer("Undo visual attributes changed by move or patch.set, and any background change", 50, 10000),
 		"after_ms": integer("Delay before then; required with then, at most two chained delays", 50, 10000), "then": ref("reaction"),
 		"ask": object{"type": "string", "maxLength": 240, "description": "Start a new AI turn only when needed"}, "exit": object{"type": "boolean"}})
 	reaction["dependentRequired"] = object{"after_ms": []string{"then"}, "then": []string{"after_ms"}}
@@ -226,8 +230,8 @@ var mcpTools = func() []object {
 	return []object{
 		tool("devices", "List physical and virtual EchoEars and their connection, mode and cursor.", schema(object{})),
 		tool("snapshot", "Read the device status, 360×360 keyed scene and last 20 events.", withID(object{})),
-		tool("scene", "Draw with geometric shapes and plain ASCII text (the hardware font cannot display emoji) on a 360×360 screen, or restore the cat face. Use tap, cycle and states for local interaction without waiting. For motion, use tap.patch.set keyed by existing node IDs, then after_ms and then.patch to reset.",
-			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states,
+		tool("scene", "Draw geometric shapes and ASCII text on a 360×360 screen, or restore the cat face. Use tap and cycle for local reactions; move a node or group and undo with revert_ms. Use say or chime for immediate audio.",
+			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states, "chime": chime, "say": say,
 				"preset": object{"type": "string", "enum": []string{"face"}}}))),
 		tool("patch", "Update visuals or local reactions by node ID; snapshot again if expected_rev conflicts.",
 			withSceneDefs(withID(patchArgs))),
@@ -478,7 +482,7 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 				if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
 					view, rev, custom = d.scene, d.rev, d.customScene
 				}
-				return object{"device": mcpDevice(entry), "scene": object{"rev": rev, "bg": view.bg, "nodes": view.nodes, "custom_scene": custom},
+				return object{"device": mcpDevice(entry), "scene": object{"rev": rev, "bg": view.bg, "nodes": view.snapshotNodes(), "custom_scene": custom},
 					"event_cursor": events.cursor, "events": events.last(20)}, nil
 			}
 		}
@@ -493,7 +497,22 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 	}
 	switch name {
 	case "scene", "patch":
-		result, err := b.ws.mcpScene(id, name, args)
+		var say, chime string
+		if name == "scene" {
+			if raw, ok := args["say"]; ok {
+				say, err = spokenText(str(raw))
+				if err != nil {
+					return nil, err
+				}
+			}
+			if raw, ok := args["chime"]; ok {
+				chime = str(raw)
+				if !validChime(chime) {
+					return nil, problem(400, "Unknown chime kind")
+				}
+			}
+		}
+		result, err := b.ws.mcpScene(id, name, args, chime)
 		if err == nil && name == "scene" {
 			title := shortText(args["title"], 48, false)
 			text := "Showed a scene"
@@ -503,6 +522,9 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 			entry := newChat("system", who.Character, text, "mcp")
 			entry.SceneTitle, entry.ToolSummary = title, text
 			b.chat(id, entry, true)
+			if say != "" {
+				_, err = b.speakMCP(ctx, who, say)
+			}
 		}
 		return result, err
 	case "wait_event":
@@ -567,7 +589,7 @@ func visualNode(raw object, partial bool) (object, error) {
 		}
 		n["t"] = t
 	}
-	for _, key := range strings.Fields("x y x1 y1 x2 y2 w h r sw fs a1 a2") {
+	for _, key := range strings.Fields("x y x1 y1 x2 y2 x3 y3 w h r sw fs a1 a2") {
 		value, exists := raw[key]
 		if !exists {
 			continue
@@ -582,7 +604,9 @@ func visualNode(raw object, partial bool) (object, error) {
 			limit = 360
 		}
 		num, ok := value.(int)
-		if !ok {
+		if ok {
+			num = min(limit, max(0, num))
+		} else {
 			num, ok = coordinate(value, float64(limit))
 		}
 		if !ok {
@@ -607,13 +631,16 @@ func visualNode(raw object, partial bool) (object, error) {
 			n[key] = value
 		}
 	}
+	if !partial && n["t"] == "tri" && n["fill"] == nil {
+		n["fill"] = true
+	}
 	if v, ok := raw["s"].(string); ok {
 		n["s"] = shortText(v, 128, false)
 	}
 	return n, nil
 }
 
-func (h *wsHub) mcpScene(id, method string, args object) (object, error) {
+func (h *wsHub) mcpScene(id, method string, args object, chime string) (object, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.devices[strings.ToLower(id)]
@@ -628,6 +655,9 @@ func (h *wsHub) mcpScene(id, method string, args object) (object, error) {
 		return nil, &sceneConflict{d.rev}
 	}
 	status := func() object {
+		if chime != "" {
+			h.chime(d, chime)
+		}
 		return object{"ok": true, "device_id": id, "rev": d.rev, "event_cursor": h.ring(d.key).cursor}
 	}
 	now := time.Now()
@@ -646,7 +676,7 @@ func (h *wsHub) mcpScene(id, method string, args object) (object, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := h.patchScene(d, patch, now); err != nil {
+		if err := h.patchScene(d, patch, nil, now); err != nil {
 			return nil, err
 		}
 		return status(), nil
@@ -666,6 +696,10 @@ func (b *bridge) mcpSpeak(ctx context.Context, who peer, text string) (object, e
 	if err != nil {
 		return nil, err
 	}
+	return b.speakMCP(ctx, who, clean)
+}
+
+func (b *bridge) speakMCP(ctx context.Context, who peer, clean string) (object, error) {
 	if b.worker == nil || !b.worker.ready.Load() {
 		return nil, problem(503, "TTS unavailable")
 	}

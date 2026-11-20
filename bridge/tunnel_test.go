@@ -400,7 +400,7 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 			}
 			data = []object{{"id": "msg1", "type": "user", "time": object{"created": 1000},
 				"metadata": object{"echoEarSource": "voice"},
-				"text":     "[EchoEar: you are Cake (device_id=echoear-history); other EchoEars: none]\nWhy is the sky blue?"}}
+				"text":     "[EchoEar: you are Cake (device_id=echoear-history)]\nWhy is the sky blue?"}}
 			next = "opaque+next="
 		case "opaque+next=":
 			if q.Has("order") {

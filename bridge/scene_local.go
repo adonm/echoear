@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -17,13 +20,22 @@ type tapReaction struct {
 	chime, speak, state, ask string
 	exit                     bool
 	patch                    *scenePatch
-	delay                    time.Duration
+	move                     *nodeMove
+	delay, revert            time.Duration
 	then                     *tapReaction
 }
 
 type reactionCycle []tapReaction
 
-type nodeEdit struct{ visual, controls object }
+type nodeMove struct {
+	target string
+	dx, dy int
+}
+
+type nodeEdit struct {
+	visual, controls object
+	group            *string
+}
 
 type scenePatch struct {
 	bg  string
@@ -64,7 +76,19 @@ func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDep
 			if err != nil {
 				return r, err
 			}
-		case "after_ms", "then":
+		case "move":
+			move, ok := value.(object)
+			if !ok || len(move) != 3 {
+				return r, problem(400, "Expected tap.move with target, dx and dy")
+			}
+			target := str(move["target"])
+			dx, xOK := moveDelta(move["dx"])
+			dy, yOK := moveDelta(move["dy"])
+			if strings.TrimSpace(target) == "" || !xOK || !yOK {
+				return r, problem(400, "Expected tap.move with a target and integer dx and dy")
+			}
+			r.move = &nodeMove{target, dx, dy}
+		case "after_ms", "then", "revert_ms":
 		default:
 			return r, problem(400, "Unknown tap field "+key)
 		}
@@ -81,6 +105,13 @@ func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDep
 		if _, found := states[r.state]; !found {
 			return r, problem(400, "Unknown scene state "+r.state)
 		}
+	}
+	revert, err := mcpUint(raw, "revert_ms")
+	if err != nil || revert != nil && (*revert < 50 || *revert > 10000) {
+		return r, problem(400, "Invalid tap.revert_ms (50–10000 ms)")
+	}
+	if revert != nil {
+		r.revert = time.Duration(*revert) * time.Millisecond
 	}
 	ms, err := mcpUint(raw, "after_ms")
 	then, delayed := raw["then"]
@@ -101,11 +132,29 @@ func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDep
 	return r, nil
 }
 
+func moveDelta(value any) (int, bool) {
+	switch n := value.(type) {
+	case json.Number:
+		delta, err := n.Int64()
+		return int(min(359, max(-359, delta))), err == nil
+	case int:
+		return min(359, max(-359, n)), true
+	}
+	return 0, false
+}
+
 func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth int) (nodeEdit, error) {
 	visual, err := visualNode(raw, partial)
 	edit := nodeEdit{visual: visual}
 	if err != nil {
 		return edit, err
+	}
+	if value, found := raw["group"]; found {
+		group, ok := value.(string)
+		if !ok && value != nil {
+			return edit, problem(400, "Expected a group name or null")
+		}
+		edit.group = &group
 	}
 	for _, key := range []string{"on", "action", "ask", "tap", "cycle"} {
 		value, found := raw[key]
@@ -270,7 +319,7 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 		next.bg = p.bg
 	}
 	seen := map[string]bool{}
-	appendNode := func(n object, a sceneAction, controls object) error {
+	appendNode := func(n object, a sceneAction, controls object, group string) error {
 		id := str(n["id"])
 		if seen[id] {
 			return problem(400, "Duplicate node ID "+id)
@@ -284,6 +333,12 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 			if controls != nil {
 				next.controls[id] = controls
 			}
+			if group != "" {
+				if next.groups == nil {
+					next.groups = map[string]string{}
+				}
+				next.groups[id] = group
+			}
 		}
 		return nil
 	}
@@ -292,10 +347,16 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 		if id == exitNode || p.del[id] {
 			continue
 		}
-		a, controls := old.actions[id], old.controls[id]
+		a, controls, group := old.actions[id], old.controls[id], old.groups[id]
 		if edit, ok := p.set[id]; ok {
 			n = maps.Clone(n)
 			maps.Copy(n, edit.visual)
+			if edit.visual["t"] == "tri" && n["fill"] == nil {
+				n["fill"] = true
+			}
+			if edit.group != nil {
+				group = *edit.group
+			}
 			if edit.controls != nil {
 				updated := object{}
 				maps.Copy(updated, controls)
@@ -310,7 +371,7 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 				a = nodeTapAction(n, controls)
 			}
 		}
-		if err := appendNode(n, a, controls); err != nil {
+		if err := appendNode(n, a, controls, group); err != nil {
 			return sceneView{}, err
 		}
 	}
@@ -321,7 +382,11 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 	}
 	for _, edit := range p.add {
 		n := maps.Clone(edit.visual)
-		if err := appendNode(n, nodeTapAction(n, edit.controls), edit.controls); err != nil {
+		group := ""
+		if edit.group != nil {
+			group = *edit.group
+		}
+		if err := appendNode(n, nodeTapAction(n, edit.controls), edit.controls, group); err != nil {
 			return sceneView{}, err
 		}
 	}
@@ -336,11 +401,105 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 		id := str(next.nodes[maxNodes-1]["id"])
 		delete(next.actions, id)
 		delete(next.controls, id)
+		delete(next.groups, id)
 		next.nodes = next.nodes[:maxNodes-1]
 	}
 	next.nodes = append(next.nodes, comicButton(exitNode, 139, 300, 82, 32, "Cat", "#FFFAEE"))
 	next.actions[exitNode] = sceneAction{"cat", ""}
 	return next, nil
+}
+
+func (m nodeMove) apply(view *sceneView) bool {
+	moved := false
+	for i, n := range view.nodes {
+		id := str(n["id"])
+		if id != m.target && view.groups[id] != m.target {
+			continue
+		}
+		keys := []string{"x", "y"}
+		switch n["t"] {
+		case "line":
+			keys = []string{"x1", "y1", "x2", "y2"}
+		case "tri":
+			keys = []string{"x1", "y1", "x2", "y2", "x3", "y3"}
+		}
+		var updated object
+		for j, key := range keys {
+			delta := [2]int{m.dx, m.dy}[j%2]
+			old := nodeInt(n, key)
+			if v := min(359, max(0, old+delta)); v != old {
+				if updated == nil {
+					updated = maps.Clone(n)
+				}
+				updated[key] = v
+			}
+		}
+		if updated != nil {
+			if !moved {
+				view.nodes = slices.Clone(view.nodes)
+				moved = true
+			}
+			view.nodes[i] = updated
+		}
+	}
+	return moved
+}
+
+type sceneRevert struct {
+	bg  string
+	set map[string]object
+}
+
+func captureSceneRevert(before, after sceneView) sceneRevert {
+	var undo sceneRevert
+	if before.bg != after.bg {
+		undo.bg = before.bg
+	}
+	nodes := make(map[string]object, len(before.nodes))
+	for _, n := range before.nodes {
+		nodes[str(n["id"])] = n
+	}
+	for _, n := range after.nodes {
+		id := str(n["id"])
+		if old := nodes[id]; old != nil {
+			for key, value := range n {
+				if key == "on" || value == old[key] {
+					continue
+				}
+				if undo.set == nil {
+					undo.set = map[string]object{}
+				}
+				if undo.set[id] == nil {
+					undo.set[id] = object{}
+				}
+				undo.set[id][key] = old[key]
+			}
+		}
+	}
+	return undo
+}
+
+func (undo sceneRevert) apply(view sceneView) sceneView {
+	if undo.bg != "" {
+		view.bg = undo.bg
+	}
+	if len(undo.set) > 0 {
+		view.nodes = slices.Clone(view.nodes)
+		for i, n := range view.nodes {
+			if fields := undo.set[str(n["id"])]; fields != nil {
+				n = maps.Clone(n)
+				for key, v := range fields {
+					if v == nil {
+						delete(n, key)
+					} else {
+						n[key] = v
+					}
+				}
+				view.nodes[i] = n
+			}
+		}
+	}
+	return view
 }
 
 func nodeTapAction(n, controls object) sceneAction {
@@ -384,6 +543,29 @@ func (h *wsHub) clearLocalScene(d *wsDevice) {
 	d.states, d.cycles = nil, nil
 }
 
+func (h *wsHub) scheduleSceneTimer(d *wsDevice, delay time.Duration, run func(time.Time)) {
+	if !d.customScene || len(d.sceneTimers) >= maxSceneTimers {
+		return
+	}
+	if d.sceneTimers == nil {
+		d.sceneTimers = make(map[*time.Timer]struct{})
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(delay, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		// Membership identifies the scene generation even if Stop lost
+		// the race with a callback waiting to acquire the hub lock.
+		if _, ok := d.sceneTimers[timer]; ok {
+			delete(d.sceneTimers, timer)
+			if h.active(d) && d.customScene {
+				run(time.Now())
+			}
+		}
+	})
+	d.sceneTimers[timer] = struct{}{}
+}
+
 func (h *wsHub) showCustomScene(d *wsDevice, view sceneView, now time.Time, full bool) {
 	d.view, d.pending, d.drawer, d.customScene, d.agentSetScene = &view, nil, false, true, d.busy
 	h.wake(d, now)
@@ -395,14 +577,21 @@ func (h *wsHub) showCustomScene(d *wsDevice, view sceneView, now time.Time, full
 	}
 }
 
-func (h *wsHub) patchScene(d *wsDevice, patch *scenePatch, now time.Time) error {
+func (h *wsHub) patchScene(d *wsDevice, patch *scenePatch, move *nodeMove, now time.Time) error {
 	view := d.scene
 	if d.customScene && d.view != nil {
 		view = *d.view
 	}
-	next, err := patch.apply(view)
-	if err != nil {
-		return err
+	next := view
+	if patch != nil {
+		var err error
+		next, err = patch.apply(view)
+		if err != nil {
+			return err
+		}
+	}
+	if move != nil && !move.apply(&next) && patch == nil {
+		return nil
 	}
 	for id, pos := range d.cycles {
 		if pos.cycle != next.controls[id]["cycle"] {
@@ -449,9 +638,13 @@ func (h *wsHub) react(d *wsDevice, r tapReaction, waiting bool, now time.Time) b
 			h.showCustomScene(d, view, now, true)
 		}
 	}
-	if r.patch != nil {
-		if err := h.patchScene(d, r.patch, now); err != nil {
+	var undo sceneRevert
+	if r.patch != nil || r.move != nil {
+		before := d.scene
+		if err := h.patchScene(d, r.patch, r.move, now); err != nil {
 			h.push(d, object{"op": "error", "status": 400, "error": err.Error()}, true)
+		} else if r.revert != 0 && !r.exit {
+			undo = captureSceneRevert(before, d.scene)
 		}
 	}
 	if r.exit {
@@ -466,24 +659,17 @@ func (h *wsHub) react(d *wsDevice, r tapReaction, waiting bool, now time.Time) b
 	if r.speak != "" {
 		h.speakLocal(d, r.speak)
 	}
-	if r.then != nil && !r.exit && d.customScene && len(d.sceneTimers) < maxSceneTimers {
-		if d.sceneTimers == nil {
-			d.sceneTimers = make(map[*time.Timer]struct{})
-		}
-		var timer *time.Timer
-		timer = time.AfterFunc(r.delay, func() {
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			// Membership identifies this scene generation even if Stop lost
-			// the race with a callback waiting to acquire the hub lock.
-			if _, ok := d.sceneTimers[timer]; ok {
-				delete(d.sceneTimers, timer)
-				if h.active(d) && d.customScene {
-					h.react(d, *r.then, h.hasWaiter(d), time.Now())
-				}
-			}
+	if undo.bg != "" || len(undo.set) != 0 {
+		h.scheduleSceneTimer(d, r.revert, func(now time.Time) {
+			view := undo.apply(d.scene)
+			d.view = &view
+			h.render(d, now, false)
 		})
-		d.sceneTimers[timer] = struct{}{}
+	}
+	if r.then != nil && !r.exit {
+		h.scheduleSceneTimer(d, r.delay, func(now time.Time) {
+			h.react(d, *r.then, h.hasWaiter(d), now)
+		})
 	}
 	return r.exit
 }

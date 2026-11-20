@@ -435,7 +435,7 @@ function renderCurrent() {
   renderVoice(d, view?.voicePending);
   $("phone-controls").hidden = !view?.virtual;
   const micAvailable = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
-  $("talk").disabled = !active || !micAvailable;
+  $("talk").disabled = !active || !micAvailable || !!mic?.stopping;
   $("sound").disabled = !active;
   $("mic-help").hidden = !view?.virtual || micAvailable;
   say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
@@ -815,6 +815,13 @@ function put(n) {
       if (n.t === "btn") marks.push(textMark(n,n.x+n.w/2,n.y+n.h/2));
       break;
     case "line": marks = [el("line",{x1:n.x1,y1:n.y1,x2:n.x2,y2:n.y2,...stroke})]; break;
+    case "tri": {
+      const filled = n.fill !== false, color = n.c || "#F8FAFC";
+      marks = [el("polygon",{points:`${n.x1 ?? 0},${n.y1 ?? 0} ${n.x2 ?? 0},${n.y2 ?? 0} ${n.x3 ?? 0},${n.y3 ?? 0}`,
+        fill:filled ? color : "none", stroke:filled ? "none" : color, "stroke-width":n.sw ?? 2,
+        "stroke-linejoin":"round"})];
+      break;
+    }
     case "arc": marks = [el("path",{d:arcPath(n),fill:"none",...stroke})]; break;
     case "text": marks = [textMark(n,n.x,n.y)]; break;
     default: return;
@@ -1016,15 +1023,24 @@ function endMic(cancelled, tell = true, flushed = false) {
   if (!mic) return;
   const rec = mic;
   if (rec.node && !cancelled && !flushed) {
-    if (!rec.stopping) { rec.stopping = true; rec.node.port.postMessage("flush"); }
+    if (!rec.stopping) {
+      rec.stopping = true;
+      $("talk").disabled = true;
+      $("talk").textContent = "Finishing…";
+      rec.flushTimer = setTimeout(() => {
+        if (mic === rec) rec.node.port.postMessage("flush");
+      }, 200);
+    }
     return;
   }
+  clearTimeout(rec.flushTimer);
   mic = null;
   rec.stream?.getTracks().forEach(t => t.stop());
   rec.source?.disconnect();
   rec.node?.disconnect();
   rec.node?.port.close();
   recordUI(false);
+  renderCurrent();
   if (tell) {
     cancelled ||= !rec.node;
     send({ev:"rec_end",cancelled,target:rec.target});

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -16,6 +17,94 @@ func localButton(id string, controls object) object {
 }
 
 func localSet(id, text string) object { return object{"set": object{id: object{"s": text}}} }
+
+func TestSceneTriangleProtocol(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-tri"
+	c := testConnectWS(t, base, "unit", false)
+	c.hello(t, id, "Cake")
+	fin := object{"id": "fin", "t": "tri", "x1": 180, "y1": 120, "x2": 150, "y2": 180, "x3": 210, "y3": 180,
+		"c": "#38bdf8", "sw": 3, "tap": object{"chime": "tap"}}
+	toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{fin}}, false)
+	frame := testObject(t, c.until(t, hasWS("scene", `"id":"fin"`)).data)
+	want := testObject(t, []byte(`{"id":"fin","t":"tri","x1":180,"y1":120,"x2":150,"y2":180,"x3":210,"y3":180,"c":"#38BDF8","fill":true,"sw":3,"on":"tap"}`))
+	if got := frame["nodes"].([]any)[0]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("wrong triangle wire fields: %v", got)
+	}
+	// Near the third vertex, outside the nominal triangle, but inside the padded box.
+	c.json(t, object{"ev": "tap", "x": 218, "y": 189})
+	c.until(t, hasWS("chime", `"kind":"tap"`))
+	c.json(t, object{"ev": "tap", "x": 230, "y": 189})
+	c.json(t, object{"ev": "status", "volume": 73}) // Process the tap before inspecting the event ring.
+	c.until(t, hasWS("volume", `"level":73`))
+	snapshot := toolTest(t, base, "snapshot", object{"device_id": id}, false)
+	events := snapshot["events"].([]any)
+	if len(events) != 2 || events[0].(object)["data"].(object)["id"] != "fin" || events[1].(object)["data"].(object)["id"] != "" {
+		t.Fatalf("wrong triangle hit bounds: %v", events)
+	}
+	toolTest(t, base, "patch", object{"device_id": id, "set": object{
+		"fin": object{"x3": 400, "y3": -100, "fill": false},
+	}}, false)
+	got := testObject(t, c.until(t, hasWS("patch", "")).data)["set"]
+	if want := testObject(t, []byte(`{"fin":{"x3":359,"y3":0,"fill":false}}`)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("wrong triangle patch: %v", got)
+	}
+}
+
+func TestLocalGroupMoveRevertsOverWebSocket(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-group"
+	c := testConnectWS(t, base, "unit", false)
+	c.hello(t, id, "Mint")
+	toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
+		{"id": "body", "t": "circle", "group": "fish", "x": 330, "y": 120, "r": 8, "c": "#38BDF8"},
+		{"id": "tail", "t": "line", "x1": 110, "y1": 18, "x2": 120, "y2": 45},
+		{"id": "fish", "t": "text", "x": 140, "y": 80, "s": "Fish"},
+		{"id": "other", "t": "text", "x": 140, "y": 80, "s": "Still"},
+		localButton("swim", object{"cycle": []object{
+			{"move": object{"target": "fish", "dx": 40, "dy": -30}, "revert_ms": 80,
+				"patch": object{"bg": "#123456", "set": object{"body": object{"c": "#ABCDEF"}}}},
+			{"move": object{"target": "tail", "dx": -10, "dy": 0}},
+		}}),
+	}}, false)
+	if first := c.until(t, hasWS("scene", `"id":"body"`)); bytes.Contains(first.data, []byte(`"group"`)) {
+		t.Fatalf("scene leaked group: %s", first.data)
+	}
+	toolTest(t, base, "patch", object{"device_id": id, "set": object{"tail": object{"group": "fish"}}}, false)
+	if meta := c.until(t, hasWS("patch", "")); bytes.Contains(meta.data, []byte(`"group"`)) {
+		t.Fatalf("patch leaked group: %s", meta.data)
+	}
+	toolTest(t, base, "patch", object{"device_id": id, "add": []object{
+		{"id": "fin", "t": "tri", "group": "fish", "x1": 150, "y1": 60, "x2": 130, "y2": 100, "x3": 170, "y3": 80},
+	}}, false)
+	frame := c.until(t, func(f wsFrame) bool {
+		return hasWS("scene", `"id":"fin"`)(f) || hasWS("patch", `"id":"fin"`)(f)
+	})
+	if bytes.Contains(frame.data, []byte(`"group"`)) {
+		t.Fatalf("added node leaked group: %s", frame.data)
+	}
+	rev, _ := testObject(t, frame.data)["rev"].(json.Number).Int64()
+	tap := func() { c.json(t, object{"ev": "tap", "id": "swim"}) }
+	tap()
+	for _, expected := range []struct{ bg, set string }{
+		{"#123456", `{"body":{"x":359,"y":90,"c":"#ABCDEF"},"tail":{"x1":150,"y1":0,"x2":160,"y2":15},"fish":{"x":180,"y":50},"fin":{"x1":190,"y1":30,"x2":170,"y2":70,"x3":210,"y3":50}}`},
+		{"#0B1020", `{"body":{"x":330,"y":120,"c":"#38BDF8"},"tail":{"x1":110,"y1":18,"x2":120,"y2":45},"fish":{"x":140,"y":80},"fin":{"x1":150,"y1":60,"x2":130,"y2":100,"x3":170,"y3":80}}`},
+	} {
+		got := testObject(t, c.until(t, hasWS("patch", "")).data)
+		rev++
+		gotRev, _ := got["rev"].(json.Number).Int64()
+		if got["bg"] != expected.bg || gotRev != rev ||
+			!reflect.DeepEqual(got["set"], testObject(t, []byte(expected.set))) ||
+			len(got["add"].([]any))+len(got["del"].([]any)) != 0 {
+			t.Fatalf("wrong motion patch at rev %d: %v", rev, got)
+		}
+	}
+	tap()
+	got := testObject(t, c.until(t, hasWS("patch", "")).data)["set"]
+	if want := testObject(t, []byte(`{"tail":{"x1":100,"x2":110}}`)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("wrong ID-targeted motion: %v", got)
+	}
+}
 
 func TestLocalTapMovesFishOverWebSocket(t *testing.T) {
 	_, base := wsHarness(t, nil)
@@ -196,7 +285,8 @@ func TestLocalSceneStopsTimers(t *testing.T) {
 			c := testConnectWS(t, base, "unit", false)
 			c.hello(t, id, "Mint")
 			toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
-				localButton("flash", object{"tap": object{"after_ms": 250, "then": object{"patch": localSet("caption", "Late")}}}),
+				localButton("flash", object{"tap": object{"revert_ms": 250, "patch": localSet("caption", "Flash"),
+					"after_ms": 250, "then": object{"patch": localSet("caption", "Late")}}}),
 				localButton("next", object{"tap": object{"state": "new"}}),
 				{"id": "caption", "t": "text", "s": "Before"},
 			}, "states": object{"new": object{"nodes": []object{{"id": "caption", "t": "text", "s": "Switched"}}}}}, false)
@@ -206,7 +296,7 @@ func TestLocalSceneStopsTimers(t *testing.T) {
 				b.ws.mu.Lock()
 				defer b.ws.mu.Unlock()
 				d = b.ws.devices[id]
-				return len(d.sceneTimers) == 1
+				return len(d.sceneTimers) == 2
 			})
 			switch end {
 			case "exit":
@@ -234,7 +324,7 @@ func TestLocalSceneStopsTimers(t *testing.T) {
 			time.Sleep(260 * time.Millisecond)
 			b.ws.mu.Lock()
 			defer b.ws.mu.Unlock()
-			if nodeIn(d.scene, "caption")["s"] == "Late" || len(d.sceneTimers) != 0 {
+			if text := nodeIn(d.scene, "caption")["s"]; text == "Late" || text == "Before" || len(d.sceneTimers) != 0 {
 				t.Fatal("cancelled timer ran")
 			}
 		})
@@ -251,6 +341,10 @@ func TestLocalSceneValidation(t *testing.T) {
 		{"tap": object{"after_ms": 50}},
 		{"tap": object{"after_ms": 50, "then": object{"after_ms": 50, "then": object{"after_ms": 50, "then": object{}}}}},
 		{"tap": object{"state": "missing"}},
+		{"tap": object{"revert_ms": 49}},
+		{"tap": object{"revert_ms": 10001}},
+		{"tap": object{"move": object{"target": "fish", "dx": 1}}},
+		{"tap": object{"move": object{"target": "fish", "dx": 1, "dy": 0.5}}},
 		{"cycle": []object{{}}},
 		{"tap": object{"patch": object{"expected_rev": 10}}},
 	} {

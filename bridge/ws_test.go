@@ -413,6 +413,47 @@ func setupTestHex(t *testing.T, dir string, handle http.HandlerFunc) hexClient {
 		&fileCache[string]{path: settings, read: hexQuery}}
 }
 
+func TestHexTranscriptionSilencePadding(t *testing.T) {
+	pcm := []byte{0, 0, 1, 0, 0, 128, 0, 0}
+	for _, tc := range []struct {
+		name, kind string
+		input      []byte
+		pcm, pad   int
+	}{
+		{"voiced", pcmType, pcm, len(pcm), 4800},
+		{"silent", pcmType, make([]byte, 320), 320, 0},
+		{"empty", pcmType, nil, 0, 0},
+		{"wav passthrough", wavType, WrapWAV(pcm), len(pcm), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupTestHex(t, t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
+				got, err := io.ReadAll(r.Body)
+				wantSize := 44 + tc.pcm + 2*tc.pad
+				if err != nil || len(got) != wantSize || r.ContentLength != int64(wantSize) {
+					t.Errorf("Hex WAV length: got %d (HTTP %d), want %d (%v)", len(got), r.ContentLength, wantSize, err)
+				} else {
+					payload := tc.input
+					if tc.kind == wavType {
+						payload = tc.input[44:]
+					}
+					pad := make([]byte, tc.pad)
+					want := WrapWAV(slices.Concat(pad, payload, pad))
+					if !bytes.Equal(got, want) {
+						t.Error("Hex WAV header, silence edges, or original PCM changed")
+					}
+				}
+				if r.URL.Query().Get("model") != "parakeet_unified_en" || r.Header.Get("Content-Type") != wavType {
+					t.Error("unexpected Hex transcription request")
+				}
+				_, _ = io.WriteString(w, `{"transcript":"Test"}`)
+			})
+			if text, err := h.transcribe(t.Context(), tc.input, tc.kind); err != nil || text != "Test" {
+				t.Fatalf("transcribe: %q, %v", text, err)
+			}
+		})
+	}
+}
+
 func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	allowHex := make(chan struct{})
 	_, base := wsHarness(t, func(b *bridge, dir string) {
@@ -500,8 +541,9 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 	_, base := wsHarness(t, func(b *bridge, dir string) {
 		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
 			got, _ := io.ReadAll(r.Body)
-			if !bytes.Equal(got, WrapWAV(pcm)) {
-				t.Error("Hex did not receive framed PCM")
+			pad := make([]byte, 4800)
+			if !bytes.Equal(got, WrapWAV(slices.Concat(pad, pcm, pad))) {
+				t.Error("Hex did not receive padded, framed PCM")
 			}
 			_, _ = io.WriteString(w, `{"transcript":"What are stars?"}`)
 		})

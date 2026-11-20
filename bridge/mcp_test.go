@@ -281,6 +281,41 @@ func expectChatAndPCM(t *testing.T, client *testWS, text string) {
 	})
 }
 
+func TestMCPSceneInlineChimeAndSay(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, dir string) {
+		b.worker = fakeTTS(b.root, nil)
+		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
+	})
+	const id = "phone-a071"
+	c := testConnectWS(t, base, "unit", false)
+	c.hello(t, id, "Cake")
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
+	b.ws.mu.Unlock()
+	for _, invalid := range []object{
+		{"device_id": id, "chime": "unknown"},
+		{"device_id": id, "chime": "tap", "say": true},
+	} {
+		toolTest(t, base, "scene", invalid, true)
+	}
+	toolTest(t, base, "scene", object{
+		"device_id": id, "title": "Look!", "say": "Hello, fish!", "chime": "celebrate",
+	}, false)
+	c.until(t, hasWS("scene", `"s":"Look!"`))
+	c.until(t, hasWS("chime", `"kind":"intercom"`))
+	expectChatAndPCM(t, c, "Hello, fish!")
+	b.ws.mu.Lock()
+	spoke := d.agentSpoke
+	b.ws.mu.Unlock()
+	if !spoke {
+		t.Fatal("inline say did not suppress the turn's final text playback")
+	}
+	toolTest(t, base, "scene", object{"device_id": id, "preset": "face", "chime": "tap"}, false)
+	c.until(t, hasWS("scene", `"id":"cat-ring"`))
+	c.until(t, hasWS("chime", `"kind":"tap"`))
+}
+
 func TestMCPSpeakChimeAndIntercom(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.worker = fakeTTS(b.root, nil)

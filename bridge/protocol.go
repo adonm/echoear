@@ -90,6 +90,7 @@ var shapeFields = map[string][2][]string{
 	"circle": {{"x", "y", "r"}, {"w"}},
 	"rect":   {{"x", "y", "w", "h"}, {"r"}},
 	"line":   {{"x1", "y1", "x2", "y2"}, {"w"}},
+	"tri":    {{"x1", "y1", "x2", "y2", "x3", "y3"}, {"w"}},
 	"arc":    {{"x", "y", "r", "a1", "a2"}, {"w"}},
 	"text":   {{"x", "y"}, {}},
 	"btn":    {{"x", "y", "w", "h"}, {"r"}},
@@ -138,8 +139,10 @@ func sanitizeShape(v any) object {
 		}
 		out["s"] = s
 	}
-	if fill, ok := item["fill"].(bool); ok && (kind == "circle" || kind == "rect") {
+	if fill, ok := item["fill"].(bool); ok && (kind == "circle" || kind == "rect" || kind == "tri") {
 		out["fill"] = fill
+	} else if kind == "tri" {
+		out["fill"] = true
 	}
 	for _, key := range []string{"tap", "ask", "reply_to"} {
 		limit := 120
