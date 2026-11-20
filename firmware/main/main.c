@@ -1,8 +1,15 @@
 #include "audio.h"
 #include "bridge_client.h"
+#include "conversation.h"
+#include "head_touch.h"
 #include "ota_server.h"
+#include "power.h"
 #include "ui.h"
 #include "wifi.h"
+
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -12,6 +19,101 @@
 
 static QueueHandle_t actions;
 static TaskHandle_t worker;
+static bool audio_ready;
+
+typedef enum { WORK_IDLE, WORK_BUSY, WORK_SPEAKING, WORK_FOLLOWUP } work_mode_t;
+static _Atomic work_mode_t mode;
+
+typedef enum { JOB_RECORD, JOB_RESET, JOB_SPEAK, JOB_ASK, JOB_CHIME } job_kind_t;
+typedef struct {
+    job_kind_t kind;
+    void *data;
+    size_t samples;
+} job_t;
+
+static esp_err_t submit(job_t job, bool followup)
+{
+    work_mode_t prior = WORK_IDLE;
+    if (!atomic_compare_exchange_strong(&mode, &prior, WORK_BUSY)) {
+        if (!followup || prior != WORK_SPEAKING ||
+            !atomic_compare_exchange_strong(&mode, &prior, WORK_FOLLOWUP)) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        audio_stop_playback();
+    }
+    // Only the idle reservation or one follow-up can enqueue a job.
+    BaseType_t sent = xQueueSend(actions, &job, 0);
+    ESP_ERROR_CHECK(sent == pdPASS ? ESP_OK : ESP_ERR_INVALID_STATE);
+    return ESP_OK;
+}
+
+esp_err_t conversation_submit_speech(int16_t *pcm, size_t samples)
+{
+    if (!audio_ready) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    return submit((job_t){ JOB_SPEAK, pcm, samples }, false);
+}
+
+esp_err_t conversation_ask(const char *question)
+{
+    size_t len = strnlen(question, CONVERSATION_QUESTION_MAX + 1);
+    if (!len || len > CONVERSATION_QUESTION_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char *copy = strdup(question);
+    if (!copy) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t err = submit((job_t){ JOB_ASK, copy, 0 }, true);
+    if (err != ESP_OK) {
+        free(copy);
+    }
+    return err;
+}
+
+void conversation_chime(void)
+{
+    if (!audio_ready) {
+        return;
+    }
+    if (atomic_load(&mode) == WORK_SPEAKING) {
+        audio_request_chime();
+    } else {
+        submit((job_t){ .kind = JOB_CHIME }, false);
+    }
+}
+
+esp_err_t conversation_stream_begin(void)
+{
+    if (!audio_ready) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    audio_stream_begin();
+    atomic_store(&mode, WORK_SPEAKING);
+    ui_set_phase(UI_SPEAKING, NULL);
+    return ESP_OK;
+}
+
+esp_err_t conversation_stream_end(void)
+{
+    esp_err_t err = audio_stream_end();
+    work_mode_t speaking = WORK_SPEAKING;
+    atomic_compare_exchange_strong(&mode, &speaking, WORK_BUSY);
+    return err;
+}
+
+esp_err_t conversation_play(const int16_t *pcm, size_t samples)
+{
+    esp_err_t err = conversation_stream_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = audio_stream_write(pcm, samples);
+    bool cancelled = audio_playback_stopped();
+    esp_err_t end = conversation_stream_end();
+    return err == ESP_OK || cancelled ? end : err;
+}
 
 static bool handle_action(ui_action_t action)
 {
@@ -19,7 +121,12 @@ static bool handle_action(ui_action_t action)
         xTaskNotifyGive(worker);
         return true;
     }
-    return xQueueSend(actions, &action, 0) == pdPASS;
+    if (action == UI_STOP_SPEAKING) {
+        audio_stop_playback();
+        return true;
+    }
+    job_kind_t kind = action == UI_NEW_CHAT ? JOB_RESET : JOB_RECORD;
+    return submit((job_t){ .kind = kind }, false) == ESP_OK;
 }
 
 static bool stop_requested(void)
@@ -35,40 +142,80 @@ static void on_wifi(bool connected, const char *ip)
     }
 }
 
+static const char *record_and_ask(char error[128])
+{
+    audio_tone(AUDIO_START_TONE);
+    const int16_t *pcm;
+    size_t bytes;
+    esp_err_t err = audio_record(stop_requested, &pcm, &bytes);
+    if (err == ESP_ERR_NOT_FOUND) {
+        audio_tone(AUDIO_QUIET_TONE);
+        return "Didn't hear you";
+    }
+    if (err != ESP_OK) {
+        return "Mic error";
+    }
+    if (!bytes) {
+        audio_tone(AUDIO_QUIET_TONE);
+        return "Ready to try again!";
+    }
+    ui_set_phase(UI_BUSY, NULL);
+    // A stop tap can race the recording limit. Don't carry it into the next recording.
+    stop_requested();
+    audio_tone(AUDIO_THINK_TONE);
+    return bridge_voice(pcm, bytes, error, 128) == ESP_OK ? NULL : error;
+}
+
 static void conversation_task(void *arg)
 {
     for (;;) {
-        ui_action_t action;
-        xQueueReceive(actions, &action, portMAX_DELAY);
+        job_t job;
+        xQueueReceive(actions, &job, portMAX_DELAY);
+        atomic_store(&mode, WORK_BUSY);
         char error[128];
-        if (action == UI_NEW_CHAT) {
-            bool reset = bridge_reset(error, sizeof(error)) == ESP_OK;
-            ui_set_phase(UI_IDLE, reset ? "New chat ready" : error);
-            continue;
-        }
-
-        audio_tone(AUDIO_START_TONE);
-        const int16_t *pcm;
-        size_t bytes;
-        esp_err_t err = audio_record(stop_requested, &pcm, &bytes);
-        ui_set_phase(UI_BUSY, "Sending…");
-        // A stop tap can race the recording limit. Don't carry it into the next recording.
-        stop_requested();
-        audio_tone(AUDIO_STOP_TONE);
-        if (err != ESP_OK) {
-            ui_set_phase(UI_IDLE, "Microphone read failed");
-        } else if (bytes < AUDIO_RATE * sizeof(*pcm) / 5) {
-            ui_set_phase(UI_IDLE, "Recording was too short. Try again.");
-        } else {
-            ui_set_phase(UI_BUSY, "Thinking…");
-            bridge_reply_t result;
-            if (bridge_voice(pcm, bytes, &result, error, sizeof(error)) == ESP_OK) {
-                audio_tone(AUDIO_REPLY_TONE);
-                ui_show_reply(result.transcript, result.reply, result.screen);
-                cJSON_Delete(result.json);
+        const char *caption = NULL;
+        switch (job.kind) {
+        case JOB_RECORD:
+            caption = record_and_ask(error);
+            break;
+        case JOB_RESET:
+            if (bridge_reset(error, sizeof(error)) == ESP_OK) {
+                ui_clear_reply();
+                if (audio_ready) {
+                    audio_tone(AUDIO_HAPPY_TONE);
+                }
+                caption = "Fresh chat!";
             } else {
-                ui_set_phase(UI_IDLE, error);
+                caption = "Couldn't reset";
             }
+            break;
+        case JOB_SPEAK:
+            if (conversation_play(job.data, job.samples) != ESP_OK) {
+                caption = "Speaker error";
+            }
+            break;
+        case JOB_ASK:
+            ui_set_phase(UI_BUSY, "Asking...");
+            if (audio_ready) {
+                audio_tone(AUDIO_HAPPY_TONE);
+            }
+            if (bridge_client_ask_text(job.data) != ESP_OK) {
+                caption = "Couldn't ask";
+            }
+            break;
+        case JOB_CHIME:
+            audio_tone(AUDIO_HAPPY_TONE);
+            break;
+        }
+        if (job.kind == JOB_RECORD) {
+            stop_requested();
+        }
+        free(job.data);
+        work_mode_t busy = WORK_BUSY;
+        if (atomic_compare_exchange_strong(&mode, &busy, WORK_IDLE)) {
+            ui_set_phase(UI_IDLE, caption);
+        } else {
+            ui_set_phase(UI_BUSY, "Asking...");
         }
     }
 }
@@ -82,12 +229,19 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(nvs);
     ESP_ERROR_CHECK(wifi_init_identity());
-    actions = xQueueCreate(1, sizeof(ui_action_t));
+    actions = xQueueCreate(1, sizeof(job_t));
     ESP_ERROR_CHECK(actions ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(ui_init(device_id + sizeof("echoear-") - 1, device_mac_bytes, handle_action));
+    audio_ready = audio_init() == ESP_OK;
+    ui_set_audio_ready(audio_ready);
     ESP_ERROR_CHECK(xTaskCreate(conversation_task, "conversation", 8192, NULL, 5, &worker) == pdPASS
                     ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_ERROR_CHECK(ui_init(device_id + sizeof("echoear-") - 1, handle_action));
-    ui_set_audio_ready(audio_init() == ESP_OK);
+    if (head_touch_start() != ESP_OK) {
+        ESP_LOGW("echoear", "Head touch task unavailable");
+    }
+    if (power_start() != ESP_OK) {
+        ESP_LOGW("echoear", "Battery monitor unavailable");
+    }
     ESP_ERROR_CHECK(wifi_start(on_wifi));
     ESP_ERROR_CHECK(ota_server_start());
     ESP_LOGI("echoear", "Initialization complete for %s (%s)", device_id, device_mac);

@@ -3,12 +3,15 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cat_face.h"
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "mdns.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "wifi";
@@ -16,16 +19,17 @@ static esp_netif_t *sta;
 static esp_timer_handle_t retry_timer;
 static wifi_state_cb_t state_cb;
 static bool sntp_started;
+static bool mdns_started;
 
 char device_id[13];
 char device_mac[18];
+uint8_t device_mac_bytes[6];
 
 esp_err_t wifi_init_identity(void)
 {
-    uint8_t mac[6];
-    ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_STA), TAG, "Read STA MAC");
-    snprintf(device_id, sizeof(device_id), "echoear-%02x%02x", mac[4], mac[5]);
-    snprintf(device_mac, sizeof(device_mac), MACSTR, MAC2STR(mac));
+    ESP_RETURN_ON_ERROR(esp_read_mac(device_mac_bytes, ESP_MAC_WIFI_STA), TAG, "Read STA MAC");
+    snprintf(device_id, sizeof(device_id), "echoear-%02x%02x", device_mac_bytes[4], device_mac_bytes[5]);
+    snprintf(device_mac, sizeof(device_mac), MACSTR, MAC2STR(device_mac_bytes));
     return ESP_OK;
 }
 
@@ -55,6 +59,31 @@ static void connect(void *arg)
     }
 }
 
+static esp_err_t start_mdns(void)
+{
+    char instance[40];
+    snprintf(instance, sizeof(instance), "%s (%s)", cat_face_name(), device_id);
+    mdns_txt_item_t txt[] = {
+        { "character", cat_face_name() },
+        { "firmware", esp_app_get_description()->version },
+        { "mac", device_mac },
+    };
+    ESP_RETURN_ON_ERROR(mdns_init(), TAG, "Start mDNS");
+    esp_err_t err = mdns_hostname_set(device_id);
+    if (err == ESP_OK) {
+        err = mdns_instance_name_set(instance);
+    }
+    if (err == ESP_OK) {
+        err = mdns_service_add(instance, "_http", "_tcp", 80, txt, sizeof(txt) / sizeof(txt[0]));
+    }
+    if (err != ESP_OK) {
+        mdns_free();
+        return err;
+    }
+    ESP_LOGI(TAG, "mDNS %s.local: %s (_http._tcp:80)", device_id, instance);
+    return ESP_OK;
+}
+
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -77,6 +106,13 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             }
         }
         state_cb(true, ip);
+        if (!mdns_started) {
+            esp_err_t err = start_mdns();
+            mdns_started = err == ESP_OK;
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "mDNS unavailable: %s", esp_err_to_name(err));
+            }
+        }
     }
 }
 

@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "audio.h"
+#include "cat_face.h"
+#include "conversation.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -14,6 +17,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "power.h"
 #include "sdkconfig.h"
 #include "ui.h"
 #include "wifi.h"
@@ -50,13 +54,21 @@ static esp_err_t status_get(httpd_req_t *request)
     wifi_ap_record_t ap;
     int rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
     const esp_partition_t *running = esp_ota_get_running_partition();
-    char json[320];
+    battery_status_t battery = battery_status();
+    char pct[12] = "null", mv[16] = "null";
+    if (battery.pct >= 0) {
+        snprintf(pct, sizeof(pct), "%d", battery.pct);
+        snprintf(mv, sizeof(mv), "%u", battery.millivolts);
+    }
+    char json[400];
     snprintf(json, sizeof(json),
-             "{\"device\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
-             "\"free_heap\":%zu,\"free_psram\":%zu,\"firmware\":\"%s\",\"running_partition\":\"%s\"}",
-             device_id, device_mac, ip, rssi,
+             "{\"device\":\"%s\",\"character\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
+             "\"free_heap\":%zu,\"free_psram\":%zu,\"firmware\":\"%s\",\"running_partition\":\"%s\","
+             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s}",
+             device_id, cat_face_name(), device_mac, ip, rssi,
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label);
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label,
+             audio_get_volume(), pct, mv, battery.charging ? "true" : "false", ui_is_sleeping() ? "true" : "false");
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, json);
 }
@@ -83,6 +95,7 @@ static esp_err_t display_post(httpd_req_t *request)
     if (!authorized(request)) {
         return text_response(request, "401 Unauthorized", "Invalid device token\n");
     }
+    ui_wake();
     const size_t bytes = request->content_len;
     if (!bytes) {
         return text_response(request, "400 Bad Request", "Expected a screen JSON object\n");
@@ -121,6 +134,85 @@ static esp_err_t display_clear_post(httpd_req_t *request)
     }
     ui_hide_screen();
     return text_response(request, "200 OK", "Screen cleared\n");
+}
+
+static esp_err_t speak_post(httpd_req_t *request)
+{
+    if (!authorized(request)) {
+        return text_response(request, "401 Unauthorized", "Invalid device token\n");
+    }
+    size_t bytes = request->content_len;
+    if (!bytes || bytes % sizeof(int16_t)) {
+        return text_response(request, "400 Bad Request", "Expected 16-bit mono PCM\n");
+    }
+    if (bytes > 1536 * 1024) {
+        return text_response(request, "413 Content Too Large", "PCM exceeds 1.5 MiB\n");
+    }
+    ui_wake();
+    uint8_t *pcm = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!pcm) {
+        return text_response(request, "503 Service Unavailable", "Could not allocate speech buffer\n");
+    }
+    for (size_t offset = 0; offset < bytes;) {
+        int count = httpd_req_recv(request, (char *)pcm + offset, bytes - offset);
+        if (count <= 0) {
+            free(pcm);
+            text_response(request, "408 Request Timeout", "Incomplete PCM upload\n");
+            return ESP_FAIL;
+        }
+        offset += count;
+    }
+    size_t samples = bytes / sizeof(int16_t);
+    esp_err_t err = conversation_submit_speech((int16_t *)pcm, samples);
+    if (err != ESP_OK) {
+        free(pcm);
+        return err == ESP_ERR_NOT_SUPPORTED
+               ? text_response(request, "503 Service Unavailable", "Speaker unavailable\n")
+               : text_response(request, "409 Conflict", "EchoEar is busy\n");
+    }
+    char json[48];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"samples\":%zu}", samples);
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, json);
+}
+
+static esp_err_t volume_post(httpd_req_t *request)
+{
+    if (!authorized(request)) {
+        return text_response(request, "401 Unauthorized", "Invalid device token\n");
+    }
+    char body[64];
+    size_t bytes = request->content_len;
+    if (!bytes || bytes >= sizeof(body)) {
+        return text_response(request, "400 Bad Request", "Expected {\"level\":0..100}\n");
+    }
+    for (size_t offset = 0; offset < bytes;) {
+        int count = httpd_req_recv(request, body + offset, bytes - offset);
+        if (count <= 0) {
+            text_response(request, "408 Request Timeout", "Incomplete volume request\n");
+            return ESP_FAIL;
+        }
+        offset += count;
+    }
+    body[bytes] = '\0';
+    cJSON *json = cJSON_ParseWithLengthOpts(body, bytes + 1, NULL, true);
+    const cJSON *level = cJSON_GetObjectItemCaseSensitive(json, "level");
+    bool valid = cJSON_IsNumber(level) && level->valueint >= 0 && level->valueint <= 100 &&
+                 level->valuedouble == level->valueint;
+    int value = valid ? level->valueint : -1;
+    cJSON_Delete(json);
+    if (!valid) {
+        return text_response(request, "400 Bad Request", "Expected an integer level from 0 to 100\n");
+    }
+    if (audio_set_volume(value) != ESP_OK) {
+        return text_response(request, "503 Service Unavailable", "Could not save volume\n");
+    }
+    ui_show_volume(value);
+    conversation_chime();
+    char reply[32];
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"volume\":%d}", value);
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, reply);
 }
 
 static esp_err_t pull_headers(esp_http_client_handle_t client)
@@ -210,9 +302,12 @@ esp_err_t ota_server_start(void)
         { .uri = "/reboot", .method = HTTP_POST, .handler = reboot_post },
         { .uri = "/display", .method = HTTP_POST, .handler = display_post },
         { .uri = "/display/clear", .method = HTTP_POST, .handler = display_clear_post },
+        { .uri = "/speak", .method = HTTP_POST, .handler = speak_post },
+        { .uri = "/volume", .method = HTTP_POST, .handler = volume_post },
     };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
+    config.max_uri_handlers = sizeof(routes) / sizeof(routes[0]);
     config.recv_wait_timeout = 15;
     config.lru_purge_enable = true;
     httpd_handle_t server;
