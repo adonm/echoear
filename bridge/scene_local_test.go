@@ -278,7 +278,7 @@ func TestLocalSceneReactions(t *testing.T) {
 }
 
 func TestLocalSceneStopsTimers(t *testing.T) {
-	for _, end := range []string{"exit", "replace", "state", "disconnect", "cancel", "reset"} {
+	for _, end := range []string{"exit", "replace", "state", "disconnect", "reset"} {
 		t.Run(end, func(t *testing.T) {
 			b, base := wsHarness(t, nil)
 			const id = "echoear-delay"
@@ -309,10 +309,6 @@ func TestLocalSceneStopsTimers(t *testing.T) {
 				c.until(t, hasWS("scene", "Switched"))
 			case "disconnect":
 				c.conn.Close()
-			case "cancel":
-				b.ws.mu.Lock()
-				b.ws.cancelTurn(d)
-				b.ws.mu.Unlock()
 			case "reset":
 				b.ws.cancelSceneUI(id)
 			}

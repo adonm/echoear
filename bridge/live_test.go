@@ -481,8 +481,8 @@ func TestLive(t *testing.T) {
 		assertLiveActor(t, oc, ai.SessionID, settings)
 		prompt, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+ai.SessionID+"/message?order=desc&limit=1&type=user", nil)
 		if err != nil || len(prompt) != 1 || !strings.HasPrefix(prompt[0].Text,
-			"[EchoEar: you are Cake (device_id="+sender+"); other EchoEars: MockPeer ("+target+")]\n") {
-			t.Fatal("OpenCode peer prompt context lost")
+			"[EchoEar: Cake ("+sender+"), hardware, typed]\n") {
+			t.Fatal("OpenCode prompt identity or provenance is incorrect")
 		}
 		reg := liveJSON[struct {
 			Devices []struct {

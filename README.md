@@ -64,13 +64,12 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 
 ## Controls and intercom
 
-- Tap the cat or pet its head, then speak after the tone. Voice activity
-  detection stops recording after a 1.8 s pause, with a 25 s maximum. Tap or
-  pet again to stop early or interrupt speech.
-- Slide across the head pads to change volume, or hold a pad for one step.
-  The display dims after 120 seconds idle unless a diagram is open; tap or pet to wake.
+- Tap the cat face and speak after the tone. Pause about 2 seconds to send.
+  Tap again to stop recording early or interrupt speech.
+- Pet the head pad to wake or interrupt. Slide across the pads to change
+  volume, or hold a pad for one step. The display dims after 120 seconds idle.
 - **Text** opens the peer drawer, where **New** starts a fresh conversation and
-  **Voice** switches between Emma and Fable. **Cat** closes a diagram.
+  **Voice** switches between Heart and Fable. **Cat** closes a diagram.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
@@ -83,10 +82,11 @@ Open `http://<host-lan-ip>:8765/app` on a trusted LAN and enter the bridge
 token. Select a physical EchoEar to mirror and control it, or use
 **New Virtual Cat** to create a named client that persists across restarts.
 The Chat panel loads the cat's conversation history across sessions and
-updates live over `/ws`. Use **Voice** under the screen for one-click Emma or
-Fable, or select another UK voice. The choice is saved per device in `voices.json`.
-Mint defaults to Fable. Other cats default to Emma unless `ECHOEAR_TTS_VOICE`
-sets a different fallback (including `af_heart` for US English).
+updates live over `/ws`. Use **Voice** under the screen for one-click Heart or
+Fable, or choose among Heart and all eight UK voices in the dropdown. The
+choice is saved per device in `voices.json`. Mint defaults to Fable (`bm_fable`,
+UK English). Cake and other cats default to Heart (`af_heart`, US English)
+unless `ECHOEAR_TTS_VOICE` sets a different fallback.
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
 Microphone access requires HTTPS or localhost. On stop, the browser captures
@@ -113,14 +113,18 @@ OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
 reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
-Code Mode exposes `tools.echoear.devices`, `snapshot`, `scene`, `patch`,
-`speak`, `chime`, `intercom`, and `wait_event` under `tools.echoear`.
+Code Mode exposes nine tools under `tools.echoear`: `devices`, `snapshot`,
+`scene`, `patch`, `speak`, `chime`, `intercom`, `control`, and `wait_event`.
+Use `devices` to discover peers. `control` sets volume (0–100) and/or sleep
+state on a connected device.
 Scenes and patches support declarative `tap` and `cycle` reactions, named `states`,
 and delayed `after_ms`/`then` feedback. Give related nodes the same `group` and
 use relative `move: {target, dx, dy}` to shift a node or group in pixels.
 `revert_ms` undoes visual changes after the given delay. The bridge runs these
 reactions without holding an OpenCode turn open; only an explicit `ask` starts
-a new turn. A `scene` can also play a `chime` or `say` text inline. The agent
+a new turn. Drawings stay on screen across conversation turns until replaced,
+reset, or exited with **Cat** or `preset: "face"`. A `scene` can also play a
+`chime` or `say` text inline. The agent
 defaults to 1–2 short spoken sentences and answers at length when asked.
 
 ## API
@@ -139,7 +143,7 @@ OpenCode streams its reply over SSE.
 | `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
 | `GET /api/devices` | `devices` with `device_id`, `character`, `ip`, `online`, `voice` |
 | `GET /api/devices/{id}/messages` | Chronological chat across sessions and bridge events for a device |
-| `POST /api/devices/{id}/voice` | `{"voice":"bf_emma"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
+| `POST /api/devices/{id}/voice` | `{"voice":"af_heart"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
 | `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
 | `POST /api/intercom` | Audio and `X-Target` (device ID or name) → transcript and delivery result |
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |

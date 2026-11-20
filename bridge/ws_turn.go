@@ -26,8 +26,10 @@ func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, reques
 	waiting := target == "" && h.hasWaiter(d)
 	if !waiting {
 		h.cancelTurn(d)
-		h.clearLocalScene(d)
-		d.drawer, d.view, d.pending, d.customScene = false, nil, nil, false
+		d.drawer, d.card, d.pending = false, nil, nil
+		if !d.customScene {
+			d.view = nil
+		}
 	}
 	h.stopPlayback(d, true)
 	d.recAt, d.recOpen, d.recTarget, d.mic = now, !request, target, nil
@@ -96,7 +98,6 @@ func (h *wsHub) cancelTurn(d *wsDevice) {
 
 func (h *wsHub) cancelLocalTurn(d *wsDevice) {
 	h.cancelWaiters(d.key)
-	h.stopSceneTimers(d)
 	d.turn++
 	d.busy = false
 	d.agentSetScene, d.agentSpoke = false, false
@@ -122,10 +123,9 @@ func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, run func(co
 		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
 		h.clearRecording(d)
 	}
-	d.drawer, d.pending = false, nil
-	if !keepView {
-		h.clearLocalScene(d)
-		d.view, d.customScene = nil, false
+	d.drawer, d.card, d.pending = false, nil, nil
+	if !keepView && !d.customScene {
+		d.view = nil
 	}
 	ctx, cancel := context.WithTimeout(d.client.ctx, turnTimeout)
 	id := d.turn
@@ -145,8 +145,8 @@ func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView) {
 	}
 	d.busy = false
 	now := time.Now()
-	h.wake(d, now)
-	if view != nil && !d.agentSetScene {
+	d.last = now
+	if view != nil && !d.customScene && !d.agentSetScene {
 		if d.stopAudio != nil || d.awaitAck {
 			d.pending = view
 		} else {
@@ -226,18 +226,14 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		return
 	}
 	h.b.deviceEvent(d.who.DeviceID, "speech", object{"text": text, "source": "voice"})
-	h.runTurn(ctx, d, id, text, pcm)
+	h.runTurn(ctx, d, id, text, "voice", pcm)
 }
 
-func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string, pcm []byte) {
+func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, source string, pcm []byte) {
 	others, err := h.peerSnapshot(d.who.DeviceID)
 	if err != nil || ctx.Err() != nil {
 		h.turnError(d, id, "Could not find nearby cats.")
 		return
-	}
-	source := "text"
-	if pcm != nil {
-		source = "voice"
 	}
 	if direct := directMessage(others, text); direct != nil {
 		h.b.chat(d.who.DeviceID, newChat("user", "You", text, source), true)
@@ -248,7 +244,7 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string
 		h.turnError(d, id, "Chat is not ready yet.")
 		return
 	}
-	gen, err := h.b.generateReply(ctx, ctx, d.who, others, text, turnOptions{source: source,
+	gen, err := h.b.generateReply(ctx, ctx, d.who, text, turnOptions{source: source, web: d.virtual(),
 		publish: func(stream *AudioStream) { h.publish(d, id, ctx, stream) },
 		agentSpoke: func() bool {
 			h.mu.Lock()
@@ -419,7 +415,7 @@ func (h *wsHub) playbackDone(d *wsDevice, now time.Time) {
 	if d.pending != nil {
 		d.view, d.pending = d.pending, nil
 	}
-	h.wake(d, now)
+	d.last = now
 	h.render(d, now, false)
 }
 
@@ -465,13 +461,17 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 		view := intercomScene(sender, text)
 		if !h.hasWaiter(d) {
 			h.cancelTurn(d)
-			h.clearLocalScene(d)
 			h.stopPlayback(d, true)
 			if !d.recAt.IsZero() {
 				h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
 				h.clearRecording(d)
 			}
-			d.view, d.drawer, d.pending, d.customScene = &view, false, nil, false
+			d.drawer, d.pending = false, nil
+			if d.customScene {
+				d.card = &view
+			} else {
+				d.view = &view
+			}
 		}
 		now := time.Now()
 		h.wake(d, now)
@@ -519,9 +519,16 @@ func (h *wsHub) caption(receipts []wsReceipt, sender peer, text string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, r := range receipts {
-		if h.active(r.device) && r.device.view == r.view {
-			r.device.view = &view
-			h.render(r.device, time.Now(), false)
+		if d := r.device; h.active(d) {
+			switch {
+			case d.card == r.view:
+				d.card = &view
+			case d.view == r.view:
+				d.view = &view
+			default:
+				continue
+			}
+			h.render(d, time.Now(), false)
 		}
 	}
 }

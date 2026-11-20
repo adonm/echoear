@@ -71,7 +71,9 @@ type wsDevice struct {
 
 	scene       sceneView
 	view        *sceneView
+	viewRev     uint64 // Custom scene revision, excluding transient display changes.
 	pending     *sceneView
+	card        *sceneView
 	drawer      bool
 	rev         uint64
 	pose        catPose
@@ -103,8 +105,15 @@ type wsDevice struct {
 	audioUntil time.Time
 }
 
-func (d *wsDevice) virtual() bool {
-	return virtualID.MatchString(d.key) || phoneID.MatchString(d.key)
+func webDeviceID(id string) bool { return virtualID.MatchString(id) || phoneID.MatchString(id) }
+
+func (d *wsDevice) virtual() bool { return d.client.role == "web" || webDeviceID(d.key) }
+
+func (d *wsDevice) sceneState() (sceneView, uint64) {
+	if d.customScene {
+		return *d.view, d.viewRev
+	}
+	return d.scene, d.rev
 }
 
 // The hub lock orders state changes and outbound frames. Socket writes and
@@ -269,6 +278,7 @@ func (h *wsHub) detach(c *wsClient) {
 	if d := c.device; d != nil && h.devices[d.key] == d {
 		delete(h.devices, d.key)
 		h.cancelTurn(d)
+		h.stopSceneTimers(d)
 		h.stopPlayback(d, false)
 		h.broadcastPeers()
 	}
@@ -281,6 +291,7 @@ func (h *wsHub) disconnectDevice(id string) {
 		d.client.cancel()
 		delete(h.devices, id)
 		h.cancelTurn(d)
+		h.stopSceneTimers(d)
 		h.stopPlayback(d, false)
 		h.broadcastPeers()
 	}
@@ -431,6 +442,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
 		h.cancelTurn(old)
+		h.stopSceneTimers(old)
 		h.stopPlayback(old, true)
 		old.client.cancel()
 		d.rev = old.rev
@@ -485,14 +497,14 @@ func (d *wsDevice) voiceTheme() string {
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	mood := "idle"
 	switch {
+	case d.asleep:
+		mood = "sleepy"
 	case d.recOpen || !d.recAt.IsZero():
 		mood = "listening"
 	case d.ttsStarted || d.awaitAck:
 		mood = "speaking"
 	case d.busy:
 		mood = "thinking"
-	case d.asleep:
-		mood = "sleepy"
 	}
 	changed := mood != d.pose.mood
 	if changed {
@@ -509,7 +521,11 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		peers, _ := h.combinedPeers(d.who.DeviceID)
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
 		view = drawerScene(d.who.Character, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
-	case d.view != nil && (d.customScene || mood != "sleepy" && mood != "listening"):
+	case d.card != nil && (mood == "idle" || mood == "speaking"):
+		view = *d.card
+	case d.customScene && mood != "sleepy":
+		view = d.view.withActivity(mood)
+	case d.view != nil && mood != "sleepy" && mood != "listening":
 		view = *d.view
 	default:
 		theme := d.theme
@@ -534,9 +550,17 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 
 func (h *wsHub) wake(d *wsDevice, now time.Time) {
 	d.last = now
-	if d.asleep {
-		d.asleep = false
-		h.push(d, object{"op": "power", "brightness": 85}, true)
+	h.setSleeping(d, false)
+}
+
+func (h *wsHub) setSleeping(d *wsDevice, asleep bool) {
+	if d.asleep != asleep {
+		d.asleep = asleep
+		brightness := 85
+		if asleep {
+			brightness = 12
+		}
+		h.push(d, object{"op": "power", "brightness": brightness}, true)
 	}
 }
 
@@ -564,8 +588,7 @@ func (h *wsHub) animate(ctx context.Context) {
 				case d.awaitAck && now.After(d.audioUntil.Add(4*time.Second)):
 					h.playbackDone(d, now)
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
-					d.asleep = true
-					h.push(d, object{"op": "power", "brightness": 12}, true)
+					h.setSleeping(d, true)
 					h.render(d, now, false)
 				case !d.drawer && (d.view == nil || d.asleep || !d.recAt.IsZero()):
 					p := poseFrame(now, d.moodAt, d.last, d.pose.mood, d.pct, d.vol, d.charging, now.Before(d.meter))
@@ -683,7 +706,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 				return
 			}
 			h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
-				h.runTurn(ctx, d, id, text, nil)
+				h.runTurn(ctx, d, id, text, "typed", nil)
 			})
 		}
 	case "intercom":
@@ -750,8 +773,10 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 	switch a.kind {
 	case "drawer":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
-		h.clearLocalScene(d)
-		d.drawer, d.view, d.pending, d.customScene = true, nil, nil, false
+		d.drawer, d.card, d.pending = true, nil, nil
+		if !d.customScene {
+			d.view = nil
+		}
 		h.render(d, now, false)
 	case "cat":
 		h.leaveScene(d, waiting && d.customScene, now)
@@ -764,6 +789,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		}
 	case "new":
 		h.cancelLocalTurn(d)
+		h.clearView(d)
 		var reset func(context.Context) error
 		if h.b.oc != nil {
 			reset = h.b.oc.prepareReset(d.who.DeviceID)
@@ -777,7 +803,9 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		}
 	case "tap":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
-		d.view = d.scene.hint(a.value)
+		if !d.customScene {
+			d.view = d.scene.hint(a.value)
+		}
 		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.sayTurn(ctx, d, id, a.value, nil) })
 	case "ask":
 		h.push(d, object{"op": "chime", "kind": "think"}, false)
@@ -785,8 +813,10 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		if hint == "" {
 			hint = "Asking…"
 		}
-		d.view = d.scene.hint(hint)
-		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, a.value, nil) })
+		if !d.customScene {
+			d.view = d.scene.hint(hint)
+		}
+		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, a.value, "tap", nil) })
 	case "event":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
 	}
@@ -801,9 +831,14 @@ func (h *wsHub) leaveScene(d *wsDevice, waiting bool, now time.Time) {
 		}
 		h.stopPlayback(d, true)
 	}
-	h.clearLocalScene(d)
-	d.drawer, d.view, d.pending, d.customScene, d.agentSetScene = false, nil, nil, false, d.busy
+	h.clearView(d)
+	d.agentSetScene = d.busy
 	h.render(d, now, true)
+}
+
+func (h *wsHub) clearView(d *wsDevice) {
+	h.clearLocalScene(d)
+	d.drawer, d.view, d.pending, d.card, d.customScene = false, nil, nil, nil, false
 }
 
 func (h *wsHub) volume(d *wsDevice, level int, now time.Time) {

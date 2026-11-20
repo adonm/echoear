@@ -590,6 +590,11 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 			case "/api/session":
 				_, _ = io.WriteString(w, `{"data":{"id":"ses-ws"}}`)
 			case "/api/session/ses-ws/prompt":
+				var prompt struct{ Text string }
+				if err := json.NewDecoder(r.Body).Decode(&prompt); err != nil ||
+					prompt.Text != "[EchoEar: Cake (echoear-a), hardware, voice]\nWhat are stars?" {
+					t.Errorf("unexpected voice prompt: %q (%v)", prompt.Text, err)
+				}
 				close(kick)
 				_, _ = io.WriteString(w, `{"data":{"id":"msg1"}}`)
 			case "/api/session/ses-ws/message":

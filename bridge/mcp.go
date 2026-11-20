@@ -239,6 +239,8 @@ var mcpTools = func() []object {
 		tool("chime", "Play a short sound on the device.", withID(object{"kind": chime}, "kind")),
 		tool("intercom", "Send a spoken message and screen card to an explicit online peer. Use all only if asked.",
 			schema(object{"from_device_id": str("Sender ID"), "to_device_id": str("Recipient ID or all"), "text": str("Message to speak")}, "from_device_id", "to_device_id", "text")),
+		tool("control", "Set a connected device's volume, put it to sleep, or wake it. Supply volume, sleep, or both.",
+			withID(object{"volume": integer("Speaker volume", 0, 100), "sleep": object{"type": "boolean", "description": "True dims and sleeps; false wakes"}})),
 		tool("wait_event", "Wait for input needed by the current turn; use local reactions for regular controls. On timeout or cancellation, event is null.",
 			withID(object{"after_cursor": integer("Last cursor seen; defaults to current cursor", 0, 1<<53-1),
 				"timeout_ms": integer("Defaults to 15000; clamped to 60000", 0, 60000)})),
@@ -422,7 +424,8 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 	}
 	if d := h.devices[key]; d != nil && h.active(d) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
-		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, d.rev, d.firmware
+		_, rev := d.sceneState()
+		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, rev, d.firmware
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct
 		}
@@ -480,7 +483,8 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 				var rev uint64
 				custom := false
 				if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
-					view, rev, custom = d.scene, d.rev, d.customScene
+					view, rev = d.sceneState()
+					custom = d.customScene
 				}
 				return object{"device": mcpDevice(entry), "scene": object{"rev": rev, "bg": view.bg, "nodes": view.snapshotNodes(), "custom_scene": custom},
 					"event_cursor": events.cursor, "events": events.last(20)}, nil
@@ -545,8 +549,41 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 		return b.mcpSpeak(ctx, who, str(args["text"]))
 	case "chime":
 		return b.mcpChime(ctx, who, str(args["kind"]))
+	case "control":
+		return b.ws.mcpControl(id, args)
 	}
 	return nil, problem(400, "Unknown tool")
+}
+
+func (h *wsHub) mcpControl(id string, args object) (object, error) {
+	volume, err := mcpUint(args, "volume")
+	if err != nil || volume != nil && *volume > 100 {
+		return nil, problem(400, "Volume must be an integer from 0 to 100")
+	}
+	sleep, setSleep := args["sleep"]
+	asleep, isBool := sleep.(bool)
+	if setSleep && !isBool {
+		return nil, problem(400, "Sleep must be a boolean")
+	}
+	if volume == nil && !setSleep {
+		return nil, problem(400, "Expected volume or sleep")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := h.devices[strings.ToLower(id)]
+	if d == nil || !h.active(d) {
+		return nil, problem(409, "Device is not connected")
+	}
+	now := time.Now()
+	if volume != nil {
+		h.volume(d, int(*volume), now)
+	}
+	if setSleep {
+		d.last = now
+		h.setSleeping(d, asleep)
+		h.render(d, now, false)
+	}
+	return object{"ok": true, "device_id": d.who.DeviceID, "volume": d.vol, "sleeping": d.asleep}, nil
 }
 
 type sceneConflict struct{ rev uint64 }
@@ -651,22 +688,23 @@ func (h *wsHub) mcpScene(id, method string, args object, chime string) (object, 
 	if err != nil {
 		return nil, err
 	}
-	if rev != nil && *rev != d.rev {
-		return nil, &sceneConflict{d.rev}
+	if _, current := d.sceneState(); rev != nil && *rev != current {
+		return nil, &sceneConflict{current}
 	}
 	status := func() object {
 		if chime != "" {
 			h.chime(d, chime)
 		}
-		return object{"ok": true, "device_id": id, "rev": d.rev, "event_cursor": h.ring(d.key).cursor}
+		_, rev := d.sceneState()
+		return object{"ok": true, "device_id": id, "rev": rev, "event_cursor": h.ring(d.key).cursor}
 	}
 	now := time.Now()
 	if preset, ok := args["preset"]; ok && method == "scene" {
 		if preset != "face" {
 			return nil, problem(400, "Unknown preset")
 		}
-		h.clearLocalScene(d)
-		d.view, d.pending, d.drawer, d.customScene, d.agentSetScene = nil, nil, false, false, d.busy
+		h.clearView(d)
+		d.agentSetScene = d.busy
 		h.wake(d, now)
 		h.render(d, now, true)
 		return status(), nil

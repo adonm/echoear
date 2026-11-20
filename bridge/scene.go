@@ -56,6 +56,27 @@ func (s sceneView) snapshotNodes() []object {
 	return nodes
 }
 
+func (s sceneView) withActivity(mood string) sceneView {
+	text := ""
+	switch mood {
+	case "listening":
+		text = "Cat / Mic"
+	case "thinking":
+		text = "Cat / ..."
+	}
+	if text != "" {
+		for i, n := range s.nodes {
+			if n["id"] == exitNode {
+				s.nodes = slices.Clone(s.nodes)
+				s.nodes[i] = maps.Clone(n)
+				s.nodes[i]["s"] = text
+				break
+			}
+		}
+	}
+	return s
+}
+
 // A patch retains the order of surviving nodes and can only append new ones.
 func sceneDiff(old, next sceneView, rev uint64) object {
 	before := make(map[string]object, len(old.nodes))

@@ -367,21 +367,3 @@ func directMessage(others []peer, text string) *intercomMessage {
 	}
 	return nil
 }
-
-func turnPrompt(sender peer, others []peer, text string) string {
-	now := time.Now().Unix()
-	names := make([]string, 0, min(16, len(others)))
-	for _, who := range others {
-		if now-who.LastSeen <= 180 {
-			names = append(names, who.Character+" ("+who.DeviceID+")")
-			if len(names) == 16 {
-				break
-			}
-		}
-	}
-	peers := ""
-	if len(names) != 0 {
-		peers = "; other EchoEars: " + strings.Join(names, ", ")
-	}
-	return fmt.Sprintf("[EchoEar: you are %s (device_id=%s)%s]\n%s", sender.Character, sender.DeviceID, peers, text)
-}

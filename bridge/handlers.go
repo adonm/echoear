@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -459,7 +460,7 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 	if err != nil {
 		return answer{}, err
 	}
-	source := "text"
+	source := "typed"
 	if body != nil {
 		source = "voice"
 	}
@@ -490,7 +491,7 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 			}
 		}
 	}
-	gen, err := b.generateReply(ctx, b.root, sender, others, text, options)
+	gen, err := b.generateReply(ctx, b.root, sender, text, options)
 	if err != nil {
 		return answer{}, err
 	}
@@ -518,14 +519,23 @@ type generatedReply struct {
 
 type turnOptions struct {
 	source     string
+	web        bool
 	publish    func(*AudioStream)
 	agentSpoke func() bool
 	begin      func() func()
 }
 
+func turnPrompt(sender peer, web bool, source, text string) string {
+	kind := "hardware"
+	if web || webDeviceID(strings.ToLower(sender.DeviceID)) {
+		kind = "web"
+	}
+	return fmt.Sprintf("[EchoEar: %s (%s), %s, %s]\n%s", sender.Character, sender.DeviceID, kind, source, text)
+}
+
 // HTTP verifies the final text before publishing an audio URL. A WebSocket can
 // play the speculative stream; nil tells it to interrupt a superseded stream.
-func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, others []peer, text string, options turnOptions) (generatedReply, error) {
+func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text string, options turnOptions) (generatedReply, error) {
 	publish := options.publish
 	agentSpoke := func() bool { return options.agentSpoke != nil && options.agentSpoke() }
 	voice := b.voiceFor(sender)
@@ -557,7 +567,7 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 		eager.send(s)
 	}
 	start := time.Now()
-	prompt := turnPrompt(sender, others, text)
+	prompt := turnPrompt(sender, options.web, options.source, text)
 	raw, sid, err := b.oc.ask(ctx, sender, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
 		if entry.Role == "assistant" {
 			entry.Sender = sender.Character

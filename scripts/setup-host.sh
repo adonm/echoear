@@ -160,4 +160,6 @@ if [[ ! -e "$config/opencode/opencode.json" && ! -e "$config/opencode/opencode.j
 fi
 opencode mcp add echoear --global -- "$bridge_bin" mcp
 opencode api get /api/info >/dev/null
+printf '%s\n' 'Default voices: Heart (af_heart); Mint uses Fable (bm_fable).'
+printf '%s\n' 'EchoEar MCP includes control for volume and sleep on connected devices.'
 printf 'Configure firmware/sdkconfig.local as shown in README.md. The bridge token is in %s.\n' "$env_file"

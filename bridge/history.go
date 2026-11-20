@@ -175,8 +175,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 			if d := b.ws.devices[strings.ToLower(id)]; d != nil {
 				b.ws.cancelLocalTurn(d)
 				b.ws.stopPlayback(d, true)
-				b.ws.clearLocalScene(d)
-				d.drawer, d.view, d.pending, d.customScene = false, nil, nil, false
+				b.ws.clearView(d)
 				b.ws.render(d, time.Now(), false)
 			}
 			b.ws.mu.Unlock()
@@ -197,7 +196,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		if d != nil && b.ws.active(d) {
 			if !b.ws.emit(sender.DeviceID, "speech", object{"text": text, "source": "text"}) {
 				b.ws.startTurn(d, time.Now(), false, func(ctx context.Context, turn uint64) {
-					b.ws.runTurn(ctx, d, turn, text, nil)
+					b.ws.runTurn(ctx, d, turn, text, "typed", nil)
 				})
 			}
 			b.ws.mu.Unlock()

@@ -592,7 +592,7 @@ func (m ocMessage) chat(source string) chatEntry {
 		if action, ok := strings.CutPrefix(name, "echoear_"); p.Type == "tool" && ok {
 			label := map[string]string{"devices": "Listed cats", "snapshot": "Checked the screen", "scene": "Showed a scene",
 				"patch": "Updated the screen", "speak": "Spoke aloud", "chime": "Played a chime", "intercom": "Sent an intercom message",
-				"wait_event": "Waited for an interaction"}[action]
+				"control": "Changed device controls", "wait_event": "Waited for an interaction"}[action]
 			if label != "" && !slices.Contains(notes, label) {
 				notes = append(notes, label)
 			}
@@ -641,9 +641,11 @@ func (o *openCode) GetSessionMessages(ctx context.Context, sid string) ([]chatEn
 		for _, message := range result.Data[:min(len(result.Data), messageLimit-count)] {
 			count++
 			if message.Type == "user" {
-				source = "text"
-				if message.Metadata.EchoEarSource == "voice" {
-					source = "voice"
+				switch message.Metadata.EchoEarSource {
+				case "typed", "voice", "tap":
+					source = message.Metadata.EchoEarSource
+				default:
+					source = "text"
 				}
 			}
 			if entry := message.chat(source); entry.ID != "" && (entry.Text != "" || entry.ToolSummary != "") {

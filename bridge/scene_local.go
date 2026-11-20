@@ -567,21 +567,24 @@ func (h *wsHub) scheduleSceneTimer(d *wsDevice, delay time.Duration, run func(ti
 }
 
 func (h *wsHub) showCustomScene(d *wsDevice, view sceneView, now time.Time, full bool) {
-	d.view, d.pending, d.drawer, d.customScene, d.agentSetScene = &view, nil, false, true, d.busy
+	d.pending, d.card, d.drawer, d.agentSetScene = nil, nil, false, d.busy
 	h.wake(d, now)
+	h.updateCustomScene(d, view, now, full)
+}
+
+func (h *wsHub) updateCustomScene(d *wsDevice, view sceneView, now time.Time, full bool) {
+	d.view, d.customScene = &view, true
 	before := d.rev
 	h.render(d, now, full)
 	if d.rev == before {
 		d.rev++
 		h.push(d, object{"op": "patch", "rev": d.rev, "set": object{}, "add": []object{}, "del": []string{}}, true)
 	}
+	d.viewRev = d.rev
 }
 
 func (h *wsHub) patchScene(d *wsDevice, patch *scenePatch, move *nodeMove, now time.Time) error {
-	view := d.scene
-	if d.customScene && d.view != nil {
-		view = *d.view
-	}
+	view, _ := d.sceneState()
 	next := view
 	if patch != nil {
 		var err error
@@ -598,7 +601,11 @@ func (h *wsHub) patchScene(d *wsDevice, patch *scenePatch, move *nodeMove, now t
 			delete(d.cycles, id)
 		}
 	}
-	h.showCustomScene(d, next, now, false)
+	if d.customScene {
+		h.updateCustomScene(d, next, now, false)
+	} else {
+		h.showCustomScene(d, next, now, false)
+	}
 	return nil
 }
 
@@ -640,30 +647,26 @@ func (h *wsHub) react(d *wsDevice, r tapReaction, waiting bool, now time.Time) b
 	}
 	var undo sceneRevert
 	if r.patch != nil || r.move != nil {
-		before := d.scene
+		before, _ := d.sceneState()
 		if err := h.patchScene(d, r.patch, r.move, now); err != nil {
 			h.push(d, object{"op": "error", "status": 400, "error": err.Error()}, true)
 		} else if r.revert != 0 && !r.exit {
-			undo = captureSceneRevert(before, d.scene)
+			after, _ := d.sceneState()
+			undo = captureSceneRevert(before, after)
 		}
 	}
 	if r.exit {
 		h.leaveScene(d, waiting, now)
 	}
 	if r.ask != "" && !waiting {
-		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, r.ask, nil) })
-		if d.customScene {
-			d.agentSetScene = true
-		}
+		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, r.ask, "tap", nil) })
 	}
 	if r.speak != "" {
 		h.speakLocal(d, r.speak)
 	}
 	if undo.bg != "" || len(undo.set) != 0 {
 		h.scheduleSceneTimer(d, r.revert, func(now time.Time) {
-			view := undo.apply(d.scene)
-			d.view = &view
-			h.render(d, now, false)
+			h.updateCustomScene(d, undo.apply(*d.view), now, false)
 		})
 	}
 	if r.then != nil && !r.exit {

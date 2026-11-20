@@ -219,13 +219,13 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	if chat["reply"] != "Hello!" || chat["device_id"] != id || chat["session_id"] != "ses_shared" || chat["audio_url"] != nil {
 		t.Fatal("tunneled chat did not return a scoped reply")
 	}
-	header := "[EchoEar: you are Plum (device_id=" + id + "); other EchoEars: Cake (echoear-private)]\n"
+	header := "[EchoEar: Plum (" + id + "), web, typed]\n"
 	assertPrompt := func(text string) {
 		t.Helper()
 		select {
 		case got := <-prompts:
 			if got != header+text {
-				t.Fatal("virtual cat prompt did not contain the clean peer header")
+				t.Fatal("virtual cat prompt identity or provenance is incorrect")
 			}
 		default:
 			t.Fatal("did not receive an OpenCode prompt")
@@ -372,12 +372,14 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 			return
 		case "/api/session/ses_active/message":
 			sendPage([]object{
-				{"id": "msg_active", "type": "user", "text": "Continuing.", "time": object{"created": 4000}},
+				{"id": "msg_active", "type": "user", "text": "[EchoEar: Cake (echoear-history), hardware, tap]\nContinuing.",
+					"metadata": object{"echoEarSource": "tap"}, "time": object{"created": 4000}},
 				{"id": "msg2", "type": "user", "text": "Duplicate.", "time": object{"created": 4100}},
 			}, nil)
 			return
 		case "/api/session/ses_latest/message":
-			sendPage([]object{{"id": "msg_latest", "type": "user", "text": "Latest.", "time": object{"created": 5000}}}, nil)
+			sendPage([]object{{"id": "msg_latest", "type": "user", "text": "[EchoEar: you are Cake (device_id=echoear-history)]\nLatest.",
+				"time": object{"created": 5000}}}, nil)
 			return
 		case "/api/session/ses_other/message":
 			t.Error("requested messages for a different device")
@@ -400,7 +402,7 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 			}
 			data = []object{{"id": "msg1", "type": "user", "time": object{"created": 1000},
 				"metadata": object{"echoEarSource": "voice"},
-				"text":     "[EchoEar: you are Cake (device_id=echoear-history)]\nWhy is the sky blue?"}}
+				"text":     "[EchoEar: Cake (echoear-history), hardware, voice]\nWhy is the sky blue?"}}
 			next = "opaque+next="
 		case "opaque+next=":
 			if q.Has("order") {
@@ -453,7 +455,9 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 	if messages[0].Text != "Why is the sky blue?" || messages[0].Source != "voice" ||
 		messages[1].Role != "intercom" || messages[1].Text != "Dinner is ready!" ||
 		messages[2].Sender != "Cake" || messages[2].Text != "Air scatters blue light." ||
-		messages[2].SceneTitle != "Blue sky" || messages[2].ToolSummary != "Showed a scene" {
+		messages[2].SceneTitle != "Blue sky" || messages[2].ToolSummary != "Showed a scene" ||
+		messages[4].Text != "Continuing." || messages[4].Source != "tap" ||
+		messages[6].Text != "Latest." || messages[6].Source != "text" {
 		t.Fatal(string(raw))
 	}
 	for _, i := range []int{3, 5} {

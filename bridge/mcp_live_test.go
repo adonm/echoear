@@ -37,7 +37,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	for _, tool := range catalog.Result.Tools {
 		names = append(names, tool.Name)
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "wait_event"}) {
+	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "wait_event"}) {
 		t.Fatal("unexpected live MCP catalog", names)
 	}
 	t.Logf("MCP catalog: %v", names)
@@ -81,9 +81,9 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := newOpenCode(root, api, filepath.Join(t.TempDir(), "sessions.json"), project, settings)
-	prompt := turnPrompt(peer{DeviceID: id, Character: character}, nil,
+	prompt := turnPrompt(peer{DeviceID: id, Character: character}, false, "typed",
 		"Run a read-only screen check. Use Code Mode execute to call both tools.echoear.devices({}) and tools.echoear.snapshot({device_id: '"+id+"'}). Return both tool results from execute, then say one short sentence. Do not call any other tool.")
-	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "text", nil, nil)
+	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

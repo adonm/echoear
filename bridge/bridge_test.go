@@ -20,17 +20,20 @@ import (
 	"time"
 )
 
-func TestTurnPromptListsOnlyOnlinePeers(t *testing.T) {
-	sender := peer{DeviceID: "cake", Character: "Cake"}
-	offline := peer{DeviceID: "mint", Character: "Mint", LastSeen: time.Now().Add(-5 * time.Minute).Unix()}
-	online := peer{DeviceID: "plum", Character: "Plum", LastSeen: time.Now().Unix()}
-	for _, peers := range [][]peer{nil, {offline}} {
-		if got := turnPrompt(sender, peers, "Hi"); got != "[EchoEar: you are Cake (device_id=cake)]\nHi" {
+func TestTurnPromptIdentifiesDeviceAndInput(t *testing.T) {
+	for _, tc := range []struct {
+		id, source, kind string
+		web              bool
+	}{
+		{"echoear-33d8", "voice", "hardware", false},
+		{"virt-1234abcd", "typed", "web", false},
+		{"phone-1234", "tap", "web", false},
+		{"other-id", "tap", "web", true},
+	} {
+		if got := turnPrompt(peer{DeviceID: tc.id, Character: "Cake"}, tc.web, tc.source, "Hi"); got !=
+			"[EchoEar: Cake ("+tc.id+"), "+tc.kind+", "+tc.source+"]\nHi" {
 			t.Fatal(got)
 		}
-	}
-	if got := turnPrompt(sender, []peer{offline, online}, "Hi"); got != "[EchoEar: you are Cake (device_id=cake); other EchoEars: Plum (plum)]\nHi" {
-		t.Fatal(got)
 	}
 }
 

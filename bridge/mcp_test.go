@@ -127,7 +127,7 @@ func TestMCPProtocolAndScene(t *testing.T) {
 			t.Fatal(tool)
 		}
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "wait_event"}) {
+	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "wait_event"}) {
 		t.Fatal(names)
 	}
 	list := toolTest(t, base, "devices", object{}, false)
@@ -252,6 +252,110 @@ func TestMCPWaiterDoesNotCancelCustomTap(t *testing.T) {
 		}
 		cancel()
 	}
+}
+
+func TestCustomSceneSurvivesRecordingAndPlainTurn(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "echoear-drawing"
+	c := testConnectWS(t, base, "unit", false)
+	c.hello(t, id, "Mint")
+	args := object{"device_id": id}
+	created := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
+		{"id": "face", "t": "text", "x": 180, "y": 100, "s": "Tiramisu"},
+	}}, false)
+	c.until(t, hasWS("scene", "Tiramisu"))
+	rev := created["rev"]
+	assertScene := func(label string) {
+		t.Helper()
+		scene := toolTest(t, base, "snapshot", args, false)["scene"].(object)
+		var nodes sceneView
+		for _, n := range scene["nodes"].([]any) {
+			nodes.nodes = append(nodes.nodes, n.(object))
+		}
+		if scene["custom_scene"] != true || scene["rev"] != rev ||
+			nodeIn(nodes, "face")["s"] != label || nodeIn(nodes, exitNode)["s"] != "Cat" {
+			t.Fatal(scene)
+		}
+	}
+	c.json(t, object{"ev": "rec_start"})
+	c.until(t, hasWS("patch", `"s":"Cat / Mic"`))
+	assertScene("Tiramisu")
+	c.json(t, object{"ev": "rec_end", "cancelled": true})
+	c.until(t, hasWS("patch", `"s":"Cat"`))
+	assertScene("Tiramisu")
+
+	started := make(chan uint64, 1)
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	b.ws.startTurn(d, time.Now(), false, func(_ context.Context, id uint64) { started <- id })
+	b.ws.mu.Unlock()
+	turn := <-started
+	c.until(t, hasWS("patch", `"s":"Cat / ..."`))
+	assertScene("Tiramisu")
+	patch := func(label string) {
+		t.Helper()
+		rev = toolTest(t, base, "patch", object{"device_id": id, "expected_rev": rev,
+			"set": object{"face": object{"s": label}}}, false)["rev"]
+		c.until(t, hasWS("patch", label))
+		assertScene(label)
+	}
+	patch("Tiramisu, edited")
+	// A plain reply without TTS may have a fallback card; it must not replace art.
+	answer := noticeScene("Answer", "Hello!")
+	b.ws.finishTurn(d, turn, &answer)
+	c.until(t, hasWS("patch", `"s":"Cat"`))
+	assertScene("Tiramisu, edited")
+	patch("Still here")
+}
+
+func TestMCPControl(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "echoear-control"
+	c := testConnectWS(t, base, "unit", false)
+	c.hello(t, id, "Cake")
+	watcher := testConnectWS(t, base, "unit", false)
+	watcher.json(t, object{"ev": "hello", "role": "web"})
+	watcher.until(t, hasWS("peers", id))
+	watcher.json(t, object{"ev": "watch", "device_id": id})
+	watcher.until(t, hasWS("power", `"brightness":85`))
+
+	for _, invalid := range []object{
+		{"device_id": id}, {"device_id": id, "volume": -1}, {"device_id": id, "volume": 101},
+		{"device_id": id, "volume": 1.5}, {"device_id": id, "sleep": "true"},
+	} {
+		toolTest(t, base, "control", invalid, true)
+	}
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
+	turn := d.turn
+	b.ws.mu.Unlock()
+	out := toolTest(t, base, "control", object{"device_id": id, "volume": 0, "sleep": true}, false)
+	if out["ok"] != true || out["device_id"] != id || out["volume"] != json.Number("0") || out["sleeping"] != true {
+		t.Fatal(out)
+	}
+	for _, client := range []*testWS{c, watcher} {
+		client.until(t, hasWS("volume", `"level":0`))
+		client.until(t, hasWS("power", `"brightness":12`))
+	}
+	b.ws.finishTurn(d, turn, nil)
+	checkStatus := func(mode, volume string) {
+		t.Helper()
+		device := toolTest(t, base, "snapshot", object{"device_id": id}, false)["device"].(object)
+		if device["mode"] != mode || device["volume"] != json.Number(volume) {
+			t.Fatal(device)
+		}
+	}
+	checkStatus("sleepy", "0")
+	if wake := toolTest(t, base, "control", object{"device_id": id, "sleep": false}, false); wake["sleeping"] != false || wake["volume"] != json.Number("0") {
+		t.Fatal(wake)
+	}
+	c.until(t, hasWS("power", `"brightness":85`))
+	if vol := toolTest(t, base, "control", object{"device_id": id, "volume": 42}, false); vol["sleeping"] != false || vol["volume"] != json.Number("42") {
+		t.Fatal(vol)
+	}
+	c.until(t, hasWS("volume", `"level":42`))
+	checkStatus("idle", "42")
 }
 
 func eventually(t *testing.T, f func() bool) {

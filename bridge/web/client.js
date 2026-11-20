@@ -650,7 +650,7 @@ function bubble(entry) {
   const header = node("div", "row wrap bubble-head");
   header.append(node("strong", "", label));
   if (role === "intercom") header.append(node("span", "pill", "Intercom"));
-  else if (role === "user") header.append(node("span", "pill", entry.source === "voice" ? "Voice" : "Text"));
+  else if (role === "user") header.append(node("span", "pill", {voice:"Voice", tap:"Tap"}[entry.source] || "Text"));
   const when = new Date(entry.timestamp);
   if (Number.isFinite(when.valueOf())) {
     const time = node("time", "", timeFormat.format(when));
