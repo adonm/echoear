@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "display.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
@@ -13,34 +14,36 @@
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
+#include "frame.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "media.h"
 #include "power.h"
-#include "scene.h"
 #include "sdkconfig.h"
 #include "wifi.h"
 
 enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 30000 };
-_Static_assert((int)SCENE_ID_CAP <= MEDIA_TARGET_CAP, "Touch event must fit a scene key");
-typedef enum { INPUT_TOUCH, INPUT_HEAD, REJECT_TTS, REJECT_RECORD } input_kind_t;
+_Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
+               (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
+               "Receive buffer must fit full raw frames and text");
+typedef enum { INPUT_TAP, INPUT_HEAD, REJECT_TTS, REJECT_RECORD } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
     int action, x, y;
-    char id[MEDIA_TARGET_CAP];
+    char target[MEDIA_TARGET_CAP];
 } input_t;
 typedef struct {
-    uint8_t opcode, carry;
+    uint8_t opcode, type, carry;
     size_t used;
-    bool drop, tagged, odd;
+    bool drop, odd;
 } fragment_t;
 
 static const char *TAG = "ws";
 static esp_websocket_client_handle_t client;
 static TaskHandle_t service;
 static QueueHandle_t inputs;
-static char *text_buffer;
+static uint8_t *rx_buffer;
 static fragment_t rx;
 static bool tts_accepted;
 static atomic_bool wifi_online, finished;
@@ -94,11 +97,9 @@ static void enqueue(input_t input)
     if (input.session && inputs && xQueueSend(inputs, &input, 0) == pdPASS) xTaskNotifyGive(service);
 }
 
-void ws_client_touch(ws_touch_event_t event, const char *id, int x, int y)
+void ws_client_tap(int x, int y)
 {
-    input_t input = { .kind = INPUT_TOUCH, .action = event, .x = x, .y = y };
-    snprintf(input.id, sizeof(input.id), "%s", id);
-    enqueue(input);
+    enqueue((input_t){ .kind = INPUT_TAP, .x = x, .y = y });
 }
 
 void ws_client_head(ws_head_action_t action, int volume)
@@ -152,17 +153,15 @@ static void send_input(const input_t *input)
         return;
     }
     if (input->kind == REJECT_RECORD) {
-        ws_client_rec_end(session, input->id, true);
+        ws_client_rec_end(session, input->target, true);
         return;
     }
-    static const char *const touch_names[] = { "tap", "drag", "up" };
     static const char *const head_names[] = { "pet", "vol_up", "vol_down" };
     bool head = input->kind == INPUT_HEAD;
-    cJSON *json = event_json(head ? "head" : touch_names[input->action]);
+    cJSON *json = event_json(head ? "head" : "tap");
     bool ok = head ? cJSON_AddStringToObject(json, "action", head_names[input->action]) &&
                      cJSON_AddNumberToObject(json, "volume", input->x)
-                   : cJSON_AddStringToObject(json, "id", input->id) &&
-                     cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
+                   : cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
     if (ok) send_json(session, json);
     else cJSON_Delete(json);
 }
@@ -180,7 +179,8 @@ static bool telemetry(uint32_t session, bool hello)
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
         snprintf(extra, sizeof(extra), "\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
-                 "\"ip\":\"%s\",\"firmware\":\"%s\"", device_id, wifi_character(), ip, esp_app_get_description()->version);
+                 "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2",
+                 device_id, wifi_character(), ip, esp_app_get_description()->version);
     } else {
         wifi_ap_record_t ap;
         snprintf(extra, sizeof(extra), "\"rssi\":%d", esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0);
@@ -208,15 +208,13 @@ static int integer(const cJSON *msg, const char *key, int lo, int hi)
 static void dispatch(const cJSON *msg)
 {
     const char *op = field(msg, "op");
-    if (!strcmp(op, "scene") || !strcmp(op, "patch")) {
-        if (!display_apply_scene(msg)) ESP_LOGD(TAG, "Ignored scene update");
-    } else if (!strcmp(op, "rec")) {
+    if (!strcmp(op, "rec")) {
         const char *action = field(msg, "action"), *target = field(msg, "target");
         if (!strcmp(action, "stop")) {
             media_record_stop();
         } else if (!strcmp(action, "start") && strlen(target) < MEDIA_TARGET_CAP && !media_record_start(target)) {
             input_t reject = { .kind = REJECT_RECORD };
-            snprintf(reject.id, sizeof(reject.id), "%s", target);
+            snprintf(reject.target, sizeof(reject.target), "%s", target);
             enqueue(reject);
         }
     } else if (!strcmp(op, "tts")) {
@@ -244,12 +242,7 @@ static void dispatch(const cJSON *msg)
 
 static void receive_pcm(const uint8_t *bytes, size_t len)
 {
-    if (!rx.tagged && len) {
-        rx.tagged = true;
-        rx.drop = *bytes++ != SPEAKER_PCM || !tts_accepted;
-        --len;
-    }
-    if (rx.drop || !len) return;
+    if (!len) return;
     if (rx.odd) {
         uint8_t sample[] = { rx.carry, *bytes++ };
         --len;
@@ -270,31 +263,61 @@ static void receive_pcm(const uint8_t *bytes, size_t len)
     }
 }
 
+static void buffer_bytes(const uint8_t *bytes, size_t len, size_t cap)
+{
+    if (len > cap - rx.used) {
+        rx.drop = true;
+        return;
+    }
+    if (len) memcpy(rx_buffer + rx.used, bytes, len);
+    rx.used += len;
+}
+
+static void receive_binary(const uint8_t *bytes, size_t len)
+{
+    if (!rx.type && len) {
+        rx.type = *bytes;
+        if (rx.type == SPEAKER_PCM && tts_accepted) {
+            ++bytes;
+            --len;
+        } else if (rx.type != FRAME_TAG) {
+            rx.drop = true;
+            return;
+        }
+    }
+    if (rx.type == SPEAKER_PCM) receive_pcm(bytes, len);
+    else if (rx.type == FRAME_TAG) buffer_bytes(bytes, len, FRAME_PACKET_CAP);
+}
+
 static void receive_frame(const esp_websocket_event_data_t *event)
 {
     uint8_t op = event->op_code;
     if (op > 2) return; // interleaved ping/pong/close don't change message state
+    if (event->data_len < 0 || event->payload_offset < 0 || event->payload_offset > event->payload_len ||
+        event->data_len > event->payload_len - event->payload_offset) {
+        rx = (fragment_t){ 0 };
+        return;
+    }
+    // Offset resets for each WS fragment; the message continues on opcode 0.
     if (event->payload_offset == 0 && op) rx = (fragment_t){ .opcode = op };
-    if (!rx.opcode || rx.drop) return;
-    size_t len = event->data_len;
-    if (rx.opcode == 1) {
-        if (len >= TEXT_CAP - rx.used) {
-            rx.drop = true;
-            return;
-        }
-        if (len) memcpy(text_buffer + rx.used, event->data_ptr, len);
-        rx.used += len;
-    } else {
-        receive_pcm((const uint8_t *)event->data_ptr, len);
+    if (!rx.opcode) return;
+    if (!rx.drop) {
+        const uint8_t *bytes = (const uint8_t *)event->data_ptr;
+        if (rx.opcode == 1) buffer_bytes(bytes, event->data_len, TEXT_CAP - 1);
+        else receive_binary(bytes, event->data_len);
     }
     if (!event->fin || event->payload_offset + event->data_len != event->payload_len) return;
-    if (rx.opcode == 1) {
-        text_buffer[rx.used] = '\0';
-        cJSON *msg = cJSON_ParseWithLengthOpts(text_buffer, rx.used + 1, NULL, true);
-        if (cJSON_IsObject(msg)) dispatch(msg);
-        cJSON_Delete(msg);
-    } else if (rx.odd && !rx.drop) {
-        media_interrupt();
+    if (!rx.drop) {
+        if (rx.opcode == 1) {
+            rx_buffer[rx.used] = '\0';
+            cJSON *msg = cJSON_ParseWithLengthOpts((const char *)rx_buffer, rx.used + 1, NULL, true);
+            if (cJSON_IsObject(msg)) dispatch(msg);
+            cJSON_Delete(msg);
+        } else if (rx.type == FRAME_TAG) {
+            if (!display_apply_frame(rx_buffer, rx.used)) ESP_LOGD(TAG, "Ignored display frame");
+        } else if (rx.odd) {
+            media_interrupt();
+        }
     }
     rx = (fragment_t){ 0 };
 }
@@ -397,10 +420,10 @@ esp_err_t ws_client_init(void)
         .crt_bundle_attach = esp_crt_bundle_attach, .enable_close_reconnect = true,
         .reconnect_timeout_ms = 1000, .network_timeout_ms = 5000, .buffer_size = 4096, .task_stack = 6144,
     };
-    text_buffer = heap_caps_malloc(TEXT_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    rx_buffer = heap_caps_malloc(FRAME_PACKET_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     inputs = xQueueCreate(24, sizeof(input_t));
     client = esp_websocket_client_init(&config);
-    if (!text_buffer || !inputs || !client) goto fail;
+    if (!rx_buffer || !inputs || !client) goto fail;
     if (esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, on_event, NULL) != ESP_OK ||
         xTaskCreate(service_task, "ws_service", 5120, NULL, 4, &service) != pdPASS) goto fail;
     return ESP_OK;
@@ -408,9 +431,9 @@ esp_err_t ws_client_init(void)
 fail:
     if (client) esp_websocket_client_destroy(client);
     if (inputs) vQueueDelete(inputs);
-    free(text_buffer);
+    free(rx_buffer);
     client = NULL;
     inputs = NULL;
-    text_buffer = NULL;
+    rx_buffer = NULL;
     return ESP_ERR_NO_MEM;
 }

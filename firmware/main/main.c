@@ -15,7 +15,6 @@ static const char *TAG = "echoear";
 static void on_wifi(bool online, const char *ip)
 {
     ws_client_network_changed(online);
-    display_refresh();
     if (online) ota_confirm_boot();
 }
 

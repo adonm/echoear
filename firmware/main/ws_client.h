@@ -6,14 +6,13 @@
 
 #include "esp_err.h"
 
-typedef enum { WS_TOUCH_TAP, WS_TOUCH_DRAG, WS_TOUCH_UP } ws_touch_event_t;
 typedef enum { WS_HEAD_PET, WS_HEAD_VOL_UP, WS_HEAD_VOL_DOWN } ws_head_action_t;
 
 esp_err_t ws_client_init(void);
 void ws_client_network_changed(bool online);
 bool ws_client_connected(void);
 uint32_t ws_client_session(void);
-void ws_client_touch(ws_touch_event_t event, const char *id, int x, int y);
+void ws_client_tap(int x, int y);
 void ws_client_head(ws_head_action_t action, int volume);
 bool ws_client_rec_start(uint32_t session, const char *target);
 bool ws_client_rec_pcm(uint32_t session, const int16_t *pcm, size_t samples);
