@@ -21,13 +21,13 @@ int main(void)
     assert(voice.threshold == 390625);
     blocks(&voice, 50, 1000);
     uint32_t keep_alive = voice.threshold / 4;
-    for (unsigned i = 0; i < 299; ++i) {
+    for (unsigned i = 0; i < 149; ++i) {
         assert(vad_update(&voice, keep_alive - 1) == VAD_CONTINUE);
     }
-    assert(voice.silence == 299);
+    assert(voice.silence == 149);
     assert(vad_update(&voice, keep_alive) == VAD_CONTINUE);
-    assert(voice.silence == 0);
-    blocks(&voice, 299, 250);
+    assert(voice.silence == 0 && voice.voiced == 51);
+    blocks(&voice, 149, 250);
     assert(vad_update(&voice, 250 * 250) == VAD_SEND);
 
     vad_t short_noise = { 0 };
@@ -40,15 +40,22 @@ int main(void)
     vad_t word = { 0 };
     blocks(&word, 20, 150);
     blocks(&word, 3, 900);
-    blocks(&word, 299, 150);
+    assert(word.voiced == 3);
+    blocks(&word, 149, 150);
     assert(vad_update(&word, 150 * 150) == VAD_SEND);
 
-    vad_t intermittent = { 0 };
-    blocks(&intermittent, 20, 100);
-    blocks(&intermittent, 30, 900);
-    blocks(&intermittent, 295, 100);
-    blocks(&intermittent, 20, 900);
-    blocks(&intermittent, 299, 100);
-    assert(vad_update(&intermittent, 100 * 100) == VAD_SEND);
-    puts("PASS VAD calibration, 3-frame speech, 300-frame silence, /4 energy keep-alive, and 700-frame quiet send");
+    vad_t boundary = { 0 };
+    blocks(&boundary, 20, 100);
+    blocks(&boundary, 399, 900);
+    assert(boundary.voiced == 399);
+    blocks(&boundary, 149, 100);
+    vad_t short_utterance = boundary;
+    assert(vad_update(&short_utterance, 100 * 100) == VAD_SEND);
+
+    // A resumed frame crosses the boundary without counting the pause as voiced.
+    blocks(&boundary, 1, 900);
+    assert(boundary.voiced == 400 && boundary.silence == 0);
+    blocks(&boundary, 299, 100);
+    assert(vad_update(&boundary, 100 * 100) == VAD_SEND);
+    puts("PASS VAD: 150/300-frame silence at 399/400 voiced frames, 3-frame word, /4 hysteresis, 700-frame quiet send");
 }

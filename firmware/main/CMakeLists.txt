@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "wifi.c" "display.c" "gfx.c" "frame.c" "audio.c" "vad.c"
+    SRCS "main.c" "wifi.c" "display.c" "gfx.c" "frame.c" "audio.c" "vad.c" "touch_gesture.c"
          "head_touch.c" "power.c" "telemetry.c" "media.c" "ws_client.c" "ota_server.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES app_update board_bsp esp_app_format esp_driver_touch_sens esp_event esp_http_client esp_http_server

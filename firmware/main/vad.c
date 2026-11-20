@@ -2,7 +2,8 @@
 
 enum {
     CALIBRATION = 20, MIN_RMS = 320, MAX_RMS = 2400, MIN_WORD_FRAMES = 3,
-    INITIAL_WAIT_FRAMES = 700, SILENCE_FRAMES = 300,
+    INITIAL_WAIT_FRAMES = 700, LONG_UTTERANCE_FRAMES = 400,
+    SHORT_SILENCE_FRAMES = 150, LONG_SILENCE_FRAMES = 300,
 };
 
 vad_result_t vad_update(vad_t *v, uint32_t energy)
@@ -30,7 +31,7 @@ vad_result_t vad_update(vad_t *v, uint32_t energy)
 
     if (!v->voiced) {
         v->streak = energy >= v->threshold ? v->streak + 1 : 0;
-        if (v->streak >= 3) {
+        if (v->streak >= MIN_WORD_FRAMES) {
             v->voiced = v->streak;
         } else if (v->frames >= INITIAL_WAIT_FRAMES) {
             return VAD_SEND;
@@ -38,7 +39,7 @@ vad_result_t vad_update(vad_t *v, uint32_t energy)
     } else if (energy >= v->threshold / 4) {
         ++v->voiced;
         v->silence = 0;
-    } else if (++v->silence >= SILENCE_FRAMES) {
+    } else if (++v->silence >= (v->voiced < LONG_UTTERANCE_FRAMES ? SHORT_SILENCE_FRAMES : LONG_SILENCE_FRAMES)) {
         return v->voiced >= MIN_WORD_FRAMES ? VAD_SEND : VAD_NO_SPEECH;
     }
     return VAD_CONTINUE;

@@ -31,7 +31,7 @@ enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000 }
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
-typedef enum { INPUT_TAP, INPUT_HEAD, TTS_ACK, REJECT_RECORD } input_kind_t;
+typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, INPUT_HEAD, TTS_ACK, REJECT_RECORD } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
@@ -65,10 +65,15 @@ uint32_t ws_client_session(void)
     return atomic_load(&socket_session);
 }
 
-bool ws_client_connected(void)
+static uint32_t ready_socket_session(void)
 {
     uint32_t session = ws_client_session();
-    return atomic_load(&wifi_online) && session && atomic_load(&ready_session) == session;
+    return atomic_load(&wifi_online) && atomic_load(&ready_session) == session ? session : 0;
+}
+
+bool ws_client_connected(void)
+{
+    return ready_socket_session() != 0;
 }
 
 static bool send_wire(uint32_t session, const void *data, int len, bool binary, bool hello, TickType_t timeout)
@@ -115,9 +120,16 @@ static void enqueue(input_t input)
     enqueue_session(input);
 }
 
-void ws_client_tap(int x, int y)
+void ws_client_pointer(const char *event, int x, int y)
 {
-    enqueue((input_t){ .kind = INPUT_TAP, .x = x, .y = y });
+    uint32_t session = ready_socket_session();
+    if (!session) return;
+    input_kind_t kind;
+    if (!strcmp(event, "tap")) kind = INPUT_TAP;
+    else if (!strcmp(event, "drag")) kind = INPUT_DRAG;
+    else if (!strcmp(event, "up")) kind = INPUT_UP;
+    else return;
+    enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y });
 }
 
 void ws_client_head_pet(int volume)
@@ -177,7 +189,8 @@ static void send_input(const input_t *input)
         return;
     }
     bool head = input->kind == INPUT_HEAD;
-    cJSON *json = event_json(head ? "head" : "tap");
+    const char *event = head ? "head" : input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
+    cJSON *json = event_json(event);
     bool ok = head ? cJSON_AddStringToObject(json, "action", "pet") &&
                      cJSON_AddNumberToObject(json, "volume", input->x)
                    : cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);

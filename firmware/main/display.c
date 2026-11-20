@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "gfx.h"
 #include "media.h"
+#include "touch_gesture.h"
 #include "wifi.h"
 #include "ws_client.h"
 
@@ -134,25 +135,25 @@ bool display_is_sleeping(void)
 
 static void touch_task(void *arg)
 {
-    unsigned released = 0;
-    bool down = false;
+    touch_gesture_t gesture = { 0 };
     TickType_t tick = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&tick, pdMS_TO_TICKS(30));
-        esp_lcd_touch_point_data_t p;
+        esp_lcd_touch_point_data_t p = { 0 };
         uint8_t count = 0;
         if (esp_lcd_touch_read_data(touch) != ESP_OK ||
             esp_lcd_touch_get_data(touch, &p, &count, 1) != ESP_OK) continue;
-        if (!count || p.x >= FRAME_WIDTH || p.y >= FRAME_HEIGHT) {
-            if (down && ++released == 2) down = false;
-            continue;
-        }
-        released = 0;
-        if (!down) {
-            down = true;
+        bool pressed = count && p.x < FRAME_WIDTH && p.y < FRAME_HEIGHT;
+        touch_event_t event = touch_gesture_update(&gesture, pressed, p.x, p.y, now_ms());
+        switch (event.kind) {
+        case TOUCH_PRESS:
             display_wake();
             media_interrupt();
-            ws_client_tap(p.x, p.y);
+            break;
+        case TOUCH_TAP: ws_client_pointer("tap", event.x, event.y); break;
+        case TOUCH_DRAG: ws_client_pointer("drag", event.x, event.y); break;
+        case TOUCH_UP: ws_client_pointer("up", event.x, event.y); break;
+        case TOUCH_NONE: break;
         }
     }
 }

@@ -2,7 +2,8 @@
 
 #include <stdint.h>
 
-// One update per 10 ms; input is the mean squared amplitude of the mono block.
+// One update per 10 ms with the mean squared amplitude of the mono block.
+// After speech, send after 150 silent blocks, or 300 once voiced reaches 400.
 typedef struct {
     uint32_t quiet[4];
     uint32_t threshold;
