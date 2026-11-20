@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
@@ -161,7 +162,16 @@ func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, run func(co
 	go run(ctx, id)
 }
 
-func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView) {
+// Protected by the hub lock. Eager playback can fail before the final reply is
+// known, or after the turn has handed it off to playback.
+type turnAudio struct {
+	stream *AudioStream
+	turn   uint64
+	answer *sceneView
+	failed bool
+}
+
+func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView, audio *AudioStream) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.active(d) || d.turn != id {
@@ -170,6 +180,16 @@ func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView) {
 	d.busy = false
 	now := time.Now()
 	d.last = now
+	if audio != nil {
+		switch a := d.replyAudio; {
+		case a == nil || a.stream != audio:
+			view = nil // Playback completed, was interrupted, or was replaced.
+		case !a.failed:
+			a.answer, view = view, nil
+		default:
+			d.replyAudio = nil
+		}
+	}
 	if view != nil && d.app == nil && !d.agentSetScene {
 		if d.stopAudio != nil || d.awaitAck {
 			d.pending = view
@@ -186,7 +206,7 @@ func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView) {
 
 func (h *wsHub) turnError(d *wsDevice, id uint64, message string) {
 	view := noticeScene("Try again", message)
-	h.finishTurn(d, id, &view)
+	h.finishTurn(d, id, &view, nil)
 }
 
 func (h *wsHub) stopCatTurn(d *wsDevice) {
@@ -245,7 +265,7 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		return
 	}
 	if text == "" {
-		h.finishTurn(d, id, nil)
+		h.finishTurn(d, id, nil, nil)
 		return
 	}
 	h.runTurn(ctx, d, id, text, "voice", pcm)
@@ -276,11 +296,11 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		return
 	}
 	var view *sceneView
-	if gen.audio == nil && gen.reply != "" {
+	if gen.reply != "" && ctx.Err() == nil {
 		v := noticeScene("Answer", shortText(gen.reply, maxMessage, true))
 		view = &v
 	}
-	h.finishTurn(d, id, view)
+	h.finishTurn(d, id, view, gen.audio)
 }
 
 func (h *wsHub) sendIntercom(ctx context.Context, d *wsDevice, id uint64, others []peer, target, text string, pcm []byte) {
@@ -333,7 +353,7 @@ func (h *wsHub) sayTurn(ctx context.Context, d *wsDevice, id uint64, text string
 			stream.finish(nil)
 		}
 	}
-	h.finishTurn(d, id, view)
+	h.finishTurn(d, id, view, nil)
 }
 
 func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *AudioStream, start time.Time) {
@@ -350,6 +370,7 @@ func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *Aud
 	// The turn deadline bounds synthesis; it must not cut off paced playback
 	// of PCM that is already available. An interrupt still calls stopPlayback.
 	h.playTraced(d, stream, traceFrom(ctx), start)
+	d.replyAudio = &turnAudio{stream: stream, turn: id}
 }
 
 func (h *wsHub) play(d *wsDevice, stream *AudioStream) context.Context {
@@ -363,17 +384,27 @@ func (h *wsHub) playTraced(d *wsDevice, stream *AudioStream, trace *turnTrace, t
 	id := d.audio
 	go func() {
 		defer cancel()
-		sent := h.streamPlayback(ctx, d, id, stream, trace, ttsStart)
+		err := h.streamPlayback(ctx, d, id, stream, trace, ttsStart)
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.active(d) || d.audio != id {
 			return
 		}
 		d.stopAudio = nil
-		if !sent {
+		if err != nil {
+			a := d.replyAudio
 			h.stopPlayback(d, true)
+			if a != nil && d.turn == a.turn && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+				if a.answer == nil && d.busy {
+					a.failed = true
+					d.replyAudio = a
+				} else if a.answer != nil && d.app == nil && !d.agentSetScene {
+					d.pending = a.answer
+				}
+			}
 			h.playbackDone(d, time.Now())
 		} else {
+			d.replyAudio = nil
 			d.ttsStarted = false
 		}
 		if !d.busy && d.cancel != nil {
@@ -384,15 +415,18 @@ func (h *wsHub) playTraced(d *wsDevice, stream *AudioStream, trace *turnTrace, t
 	return ctx
 }
 
-func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stream *AudioStream, trace *turnTrace, ttsStart time.Time) bool {
+func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stream *AudioStream, trace *turnTrace, ttsStart time.Time) error {
 	control := func(state string) bool {
 		return d.client.enqueueWait(ctx, textFrame(object{"op": "tts", "state": state, "audio": id}))
 	}
 	var until time.Time
 	for i := 0; ; i++ {
 		pcm, err := stream.chunk(ctx, i)
-		if err != nil || ctx.Err() != nil {
-			return false
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		if len(pcm) == 0 {
 			break
@@ -402,13 +436,13 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 			h.mu.Lock()
 			if !h.active(d) || d.audio != id || ctx.Err() != nil {
 				h.mu.Unlock()
-				return false
+				return context.Canceled
 			}
 			d.ttsStarted = true
 			h.applyAmbientVolume(d)
 			h.mu.Unlock()
 			if !control("start") {
-				return false
+				return context.Canceled
 			}
 			h.mu.Lock()
 			if h.active(d) && d.audio == id {
@@ -425,14 +459,14 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 				case <-timer.C:
 				case <-ctx.Done():
 					timer.Stop()
-					return false
+					return ctx.Err()
 				}
 			}
 			packet := make([]byte, n+1)
 			packet[0] = pcmPrefix
 			copy(packet[1:], pcm[:n])
 			if !d.client.enqueueWait(ctx, wsFrame{wsBinary, packet}) {
-				return false
+				return context.Canceled
 			}
 			now := time.Now()
 			if until.IsZero() {
@@ -446,14 +480,21 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 		}
 	}
 	h.mu.Lock()
-	if until.IsZero() || !h.active(d) || d.audio != id || ctx.Err() != nil {
+	if !h.active(d) || d.audio != id || ctx.Err() != nil {
 		h.mu.Unlock()
-		return false
+		return context.Canceled
+	}
+	if until.IsZero() {
+		h.mu.Unlock()
+		return errTTS
 	}
 	// A fast client can acknowledge as soon as the end frame is queued.
 	d.audioUntil, d.awaitAck = until, true
 	h.mu.Unlock()
-	return control("end")
+	if !control("end") {
+		return context.Canceled
+	}
+	return nil
 }
 
 func (d *wsDevice) measureAmbient(pcm []byte) {
@@ -486,6 +527,7 @@ func (h *wsHub) stopPlayback(d *wsDevice, notify bool) {
 		h.push(d, object{"op": "tts", "state": "abort", "audio": d.audio}, false)
 	}
 	d.ttsStarted, d.awaitAck = false, false
+	d.replyAudio = nil
 	d.audio++
 }
 

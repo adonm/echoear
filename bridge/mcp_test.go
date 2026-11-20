@@ -267,7 +267,7 @@ func TestMCPControl(t *testing.T) {
 		client.until(t, hasWS("volume", `"level":0`))
 		client.until(t, hasWS("power", `"brightness":12`))
 	}
-	b.ws.finishTurn(d, turn, nil)
+	b.ws.finishTurn(d, turn, nil, nil)
 	checkStatus := func(mode, volume string) {
 		t.Helper()
 		device := stateMe(t, base, id)["device"].(object)

@@ -570,20 +570,21 @@ func (m ocMessage) chat(source string) chatEntry {
 	return entry
 }
 
+type ocMessagePage struct {
+	Data   []ocMessage
+	Cursor struct{ Next string }
+}
+
 func (o *openCode) GetSessionMessages(ctx context.Context, sid string) ([]chatEntry, error) {
 	if !sessionIDRE.MatchString(sid) {
 		return nil, problem(400, "Invalid session ID")
-	}
-	type page struct {
-		Data   []ocMessage
-		Cursor struct{ Next string }
 	}
 	params := url.Values{"order": {"asc"}, "limit": {"50"}}
 	entries := []chatEntry{}
 	source := "text"
 	seen := make(map[string]bool)
 	for {
-		var result page
+		var result ocMessagePage
 		if err := o.jsonCall(ctx, http.MethodGet, "/api/session/"+sid+"/message?"+params.Encode(), nil, &result); err != nil {
 			return nil, err
 		}

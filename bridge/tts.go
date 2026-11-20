@@ -491,7 +491,7 @@ func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorke
 		for s := range t.queue {
 			pcm, err := w.synthesize(ctx, voice, s)
 			if err != nil {
-				t.stream.finish(errTTS)
+				t.stream.finish(err)
 				return
 			}
 			if !first {

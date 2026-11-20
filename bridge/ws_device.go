@@ -91,6 +91,7 @@ type wsDevice struct {
 	agentSetScene  bool
 
 	audio      uint64
+	replyAudio *turnAudio
 	stopAudio  context.CancelFunc
 	ttsStarted bool
 	awaitAck   bool

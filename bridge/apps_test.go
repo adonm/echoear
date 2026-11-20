@@ -195,6 +195,77 @@ func TestBrowserAppDragAndUp(t *testing.T) {
 	}
 }
 
+func TestNativeAppDragAndUp(t *testing.T) {
+	for _, tc := range []struct {
+		board string
+		screenGeometry
+		drag, up image.Point
+	}{
+		{"esp-vocat", roundScreen, image.Pt(150, 168), image.Pt(210, 192)},
+		{"esp-box-3", screenGeometry{320, 240, "rect"}, image.Pt(140, 112), image.Pt(180, 128)},
+	} {
+		t.Run(tc.board, func(t *testing.T) {
+			b, base := wsHarness(t, nil)
+			const id = "echoear-gesture"
+			board, web := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
+			board.json(t, object{"ev": "hello", "role": "device", "device_id": id, "proto": 2,
+				"board": tc.board, "width": tc.width, "height": tc.height, "shape": tc.shape})
+			board.until(t, isDisplay)
+			web.json(t, object{"ev": "hello", "role": "web"})
+			web.watch(t, id)
+			const code = `
+			function init(){ return {text:"Ready"}; }
+			function render(s){ return '<svg><rect x="100" y="120" width="140" height="120" data-id="track"/>'+
+				'<text x="70" y="100">'+s.text+'</text></svg>'; }
+			function onDrag(s,p,id,x,y){ s.text="Drag "+id+" "+x+","+y; }
+			function onUp(s,p,id,x,y){ s.text+=" Up "+id+" "+x+","+y; }
+			function onTap(s){ s.text="Tapped"; }`
+			toolTest(t, base, "app", object{"devices": id, "code": code}, false)
+			web.until(t, hasWS("svg", "Ready"))
+
+			send := func(kind string, p image.Point) {
+				board.json(t, object{"ev": kind, "id": "not-the-track", "x": p.X, "y": p.Y})
+			}
+			b.ws.mu.Lock()
+			d := b.ws.devices[id]
+			before := d.last
+			b.ws.mu.Unlock()
+			send("drag", tc.drag)
+			web.until(t, hasWS("svg", "Drag track 150,168"))
+			b.ws.mu.Lock()
+			dragged := d.last
+			b.ws.mu.Unlock()
+			send("up", tc.up)
+			web.until(t, hasWS("svg", "Drag track 150,168 Up track 210,192"))
+			b.ws.mu.Lock()
+			released := d.last
+			b.ws.setSleeping(d, true)
+			b.ws.render(d, time.Now(), false)
+			b.ws.mu.Unlock()
+			if !dragged.After(before) || !released.After(dragged) {
+				t.Fatal("pointer gestures did not refresh activity")
+			}
+
+			send("drag", tc.drag)
+			send("up", tc.up)
+			board.until(t, hasWS("power", `"brightness":12`))
+			board.barrier(t)
+			b.ws.mu.Lock()
+			asleep, last := d.asleep, d.last
+			b.ws.mu.Unlock()
+			if !asleep || last != released {
+				t.Fatal("trailing gestures woke a sleeping device")
+			}
+			web.until(t, hasWS("svg", "cat-ring"))
+			send("tap", tc.up)
+			board.until(t, hasWS("power", `"brightness":85`))
+			web.until(t, hasWS("svg", "Drag track 150,168 Up track 210,192"))
+			send("tap", tc.up)
+			web.until(t, hasWS("svg", "Tapped"))
+		})
+	}
+}
+
 func TestAppStatePatchAcrossPlayers(t *testing.T) {
 	_, base := wsHarness(t, nil)
 	const boardID, webID = "echoear-player", "phone-cafe"

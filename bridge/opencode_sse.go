@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -381,9 +382,26 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, str
 		usedTool = true
 	}
 	readFinal := func() (string, error) {
-		msgs, err := ocData[[]ocMessage](ctx, o.upstream, http.MethodGet, path+"/message?order=desc&limit=32", nil)
-		if err != nil {
-			return "", err
+		params := url.Values{"order": {"desc"}, "limit": {"32"}}
+		var msgs []ocMessage
+		seen := make(map[string]bool)
+		for range 8 {
+			var page ocMessagePage
+			if err := o.jsonCall(ctx, http.MethodGet, path+"/message?"+params.Encode(), nil, &page); err != nil {
+				return "", err
+			}
+			if page.Data == nil {
+				return "", o.invalid()
+			}
+			msgs = append(msgs, page.Data...)
+			next := page.Cursor.Next
+			if len(page.Data) == 0 || next == "" || seen[next] ||
+				slices.ContainsFunc(page.Data, func(m ocMessage) bool { return m.ID == result.ID }) {
+				break
+			}
+			seen[next] = true
+			params.Del("order")
+			params.Set("cursor", next)
 		}
 		reply, final, err := finalReply(msgs, result.ID)
 		if err == nil && !usedTool && stream.tool != nil {

@@ -64,6 +64,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 		return
 	}
+	native := c.role == "device"
 	switch ev.Event {
 	case "status":
 		d.status(ev.wsStatus)
@@ -71,10 +72,10 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.render(d, now, false)
 		}
 	case "tap":
-		h.pointer(d, ev, now, c == d.client && c.role == "device")
+		h.pointer(d, ev, now, native)
 	case "drag", "up":
-		if c.role == "web" && d.displayApp != nil && d.app == d.displayApp && !d.asleep {
-			h.pointer(d, ev, now, false)
+		if (native || c.role == "web") && d.displayApp != nil && d.app == d.displayApp && !d.asleep {
+			h.pointer(d, ev, now, native)
 		}
 	case "head":
 		switch ev.Action {

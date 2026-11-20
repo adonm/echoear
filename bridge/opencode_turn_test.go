@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,6 +142,156 @@ func TestEagerReplyPublishesPCMBeforeSSEFinishes(t *testing.T) {
 				t.Fatalf("unexpected completion: continued=%t, start=%v, end=%v", continued, start, end)
 			}
 		})
+	}
+}
+
+func TestWSEagerTTSFailureShowsAnswerUnlessInterrupted(t *testing.T) {
+	for _, mode := range []string{"before-final", "after-final", "interrupted"} {
+		t.Run(mode, func(t *testing.T) {
+			const id, sid = "echoear-eager", "ses-eager"
+			const first, second = "This is the first sentence.", "Here is the answer."
+			prompted, finish := make(chan struct{}), make(chan struct{})
+			b, base := wsHarness(t, func(b *bridge, dir string) {
+				b.worker = &synthWorker{requests: make(chan ttsRequest), done: make(chan struct{})}
+				b.worker.ready.Store(true)
+				b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/api/event":
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, ": connected\n\n")
+						f := w.(http.Flusher)
+						f.Flush()
+						select {
+						case <-prompted:
+							fmt.Fprintf(w, "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":%q,\"delta\":%q}}\n\n", sid, first+" "+second+" ")
+							f.Flush()
+						case <-r.Context().Done():
+							return
+						}
+						select {
+						case <-finish:
+							fmt.Fprintf(w, "data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":%q}}\n\n", sid)
+							f.Flush()
+							<-r.Context().Done()
+						case <-r.Context().Done():
+						}
+					case "/api/session":
+						fmt.Fprintf(w, `{"data":{"id":%q}}`, sid)
+					case "/api/session/" + sid + "/prompt":
+						_, _ = io.WriteString(w, `{"data":{"id":"prompt"}}`)
+						close(prompted)
+					case "/api/session/" + sid + "/message":
+						fmt.Fprintf(w, `{"data":[{"id":"answer","type":"assistant","finish":"stop","content":[{"type":"text","text":%q}]},{"id":"prompt","type":"user"}]}`, first+" "+second)
+					default:
+						http.NotFound(w, r)
+					}
+				})
+			})
+			nextSpeech := func(want string) ttsRequest {
+				t.Helper()
+				select {
+				case req := <-b.worker.requests:
+					if req.text != want {
+						t.Fatalf("requested speech %q, want %q", req.text, want)
+					}
+					return req
+				case <-time.After(2 * time.Second):
+					t.Fatalf("did not synthesize %q", want)
+					return ttsRequest{}
+				}
+			}
+			idle := func() bool {
+				b.ws.mu.Lock()
+				defer b.ws.mu.Unlock()
+				d := b.ws.devices[id]
+				return !d.busy && d.stopAudio == nil && !d.awaitAck
+			}
+			board := testConnectWS(t, base, "unit", false)
+			board.helloV2(t, id, "Cake")
+			nextSpeech("From Cake!").done <- ttsResult{err: errTTS} // Stop the unrelated intercom warmup.
+			board.json(t, object{"ev": "text", "text": "Speak two sentences."})
+			nextSpeech(first).done <- ttsResult{pcm: make([]byte, 640)}
+			start := testObject(t, board.until(t, hasWS("tts", `"state":"start"`)).data)
+			board.until(t, isPlayback)
+			tail := nextSpeech(second)
+			switch mode {
+			case "before-final":
+				tail.done <- ttsResult{err: errTTS}
+				board.until(t, hasWS("tts", `"state":"abort"`))
+				close(finish)
+			case "after-final":
+				close(finish)
+				eventually(t, func() bool {
+					b.ws.mu.Lock()
+					defer b.ws.mu.Unlock()
+					return !b.ws.devices[id].busy
+				})
+				tail.done <- ttsResult{err: errTTS}
+				board.until(t, hasWS("tts", `"state":"abort"`))
+			case "interrupted":
+				board.json(t, object{"ev": "tts_ack", "state": "interrupted", "audio": start["audio"]})
+				board.barrier(t)
+				tail.done <- ttsResult{err: errTTS}
+				close(finish)
+				eventually(t, idle)
+				b.ws.mu.Lock()
+				view, pending := b.ws.devices[id].view, b.ws.devices[id].pending
+				b.ws.mu.Unlock()
+				if view != nil || pending != nil {
+					t.Fatal("interrupted speech displayed a failure card")
+				}
+				return
+			}
+			eventually(t, func() bool {
+				b.ws.mu.Lock()
+				defer b.ws.mu.Unlock()
+				d := b.ws.devices[id]
+				return d.scene.title == "Answer" && strings.Contains(d.svg.source, first) && strings.Contains(d.svg.source, second)
+			})
+		})
+	}
+}
+
+func TestOpenCodeFinalReplyPaginatesToAdmittedPrompt(t *testing.T) {
+	const sid = "ses-long-turn"
+	const reply = "The authoritative reply."
+	first := []object{{"id": "answer", "type": "assistant", "finish": "stop",
+		"content": []object{{"type": "text", "text": reply}}}}
+	for i := range 31 {
+		first = append(first, object{"id": fmt.Sprintf("step-%d", i), "type": "assistant", "finish": "other"})
+	}
+	second := []object{
+		{"id": "tool", "type": "assistant", "finish": "tool-calls"},
+		{"id": "another-step", "type": "assistant", "finish": "other"},
+		{"id": "prompt", "type": "user"},
+		{"id": "previous-idle", "type": "idle", "outcome": "failed"},
+	}
+	const next = "older+/="
+	o := testOpenCode(t, t.Context(), t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/session/" + sid + "/prompt":
+			_, _ = io.WriteString(w, `{"data":{"id":"prompt"}}`)
+		case "/api/experimental/session/" + sid + "/wait":
+			w.WriteHeader(204)
+		case "/api/session/" + sid + "/message":
+			q := r.URL.Query()
+			switch {
+			case q.Get("limit") == "32" && q.Get("order") == "desc" && q.Get("cursor") == "":
+				_ = json.NewEncoder(w).Encode(object{"data": first, "cursor": object{"next": next}})
+			case q.Get("limit") == "32" && q.Get("order") == "" && q.Get("cursor") == next:
+				_ = json.NewEncoder(w).Encode(object{"data": second, "cursor": object{"next": "ignore-earlier-turns"}})
+			default:
+				t.Errorf("unexpected page query %q", r.URL.RawQuery)
+				http.NotFound(w, r)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	tools := 0
+	got, err := o.runTurnStreaming(t.Context(), sid, "Long turn", turnStream{tool: func() { tools++ }}, "", nil)
+	if err != nil || got != reply || tools != 1 {
+		t.Fatalf("reply %q, err %v, tool callbacks %d", got, err, tools)
 	}
 }
 
