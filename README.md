@@ -9,10 +9,10 @@ EchoEar <-- /ws: RGB565 frames, taps, PCM --> Go bridge :8765 <-- /app: SVG --> 
                                               `-- Kokoro   (persistent FP32 worker)
 ```
 
-**Target:** EchoEar / ESP-VoCat v1.2 (ESP32-S3, 16 MB flash and 16 MB PSRAM).
-Firmware `v0.8.3` is a 1.28 MB thin client. It displays 360×360 RGB565
-updates from the bridge, reports raw touch coordinates, and draws a fallback
-face offline. The bridge runs app logic and renders the display; `/app` uses native SVG.
+**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Firmware `v0.8.4` displays
+RGB565 updates from the bridge, reports touch coordinates and hardware telemetry,
+and draws a fallback face offline. The bridge runs app logic and renders the
+display; `/app` uses native SVG.
 
 ## Quickstart
 
@@ -75,19 +75,20 @@ face offline. The bridge runs app logic and renders the display; `/app` uses nat
 
 ## Controls and intercom
 
-- Tap the cat face and speak after the tone. Pause about 2 seconds to send.
-  Tap again to stop recording early or interrupt speech.
+- Tap the cat face and speak after the tone. Pause about 2 seconds to send
+  automatically, tap **Send** to finish early, or tap **Cancel** to discard the
+  recording. Tap the **Stop** pill to interrupt a reply.
 - Head touch only pets, wakes, or interrupts the cat; it never changes volume.
   The display dims after 120 seconds idle.
-- Use **Text → Vol** on the device or the volume controls in `/app` to choose
-  a level or switch back to **Auto**. Auto-volume estimates ambient noise from
-  microphone recordings and adjusts the DAC in RAM (`persist: false`), with
-  no flash wear and no ceiling below 100%.
-- **Text** opens the peer drawer, where **Voice** switches between Heart and
-  Fable. **Cat** closes a diagram. Start a new chat from the LAN web console.
+- The on-device **Menu** has large, high-contrast buttons with icons and labels:
+  **Talk to…** opens intercom, **Volume** sets the level or enables **Auto**,
+  **Voice** chooses a speaking voice, and **Stats** opens the diagnostics HUD.
+  Auto-volume estimates ambient noise from recordings and adjusts the DAC in RAM
+  without writing to flash. **Cat** closes a diagram.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
-- Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
+- Tap **Reply to \<Sender\>** on a message card or choose a peer in
+  **Menu → Talk to…** to record directly to that cat.
 - Ask for a composed message (“Send Mint a knock-knock joke”). The agent uses
   `act` to deliver a card and synthesized speech to the recipient.
 
@@ -124,6 +125,14 @@ its route, then **Copy Share Link**. The HTTPS link opens the same cat and
 conversation as the LAN dashboard, with mic, screen, and intercom to online
 EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
 other cats' chats. Treat the link as a password and use **Close Tunnel** to revoke it.
+
+### Geeky diagnostics
+
+Open **Menu → Stats** for a compact on-device HUD, or **Diagnostics** in the
+LAN `/app` dashboard for device status, pipeline timings, and CPU and memory
+usage for the bridge, Kokoro, and host. Firmware `0.8.4` reports ESP32-S3 CPU
+usage, free and minimum free heap, free PSRAM, Wi-Fi RSSI, and uptime every five
+seconds over WebSocket. The dashboard also shows WebSocket round-trip time.
 
 ## Dedicated OpenCode
 
@@ -220,6 +229,7 @@ OpenCode streams its reply over SSE.
 | --- | --- |
 | `GET /health` | Hex, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
+| `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, and bridge, Kokoro, and host resource usage |
 | `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
 | `GET /api/devices` | `devices` with `device_id`, `character`, `cat`, `ip`, `online`, `voice` |
 | `POST /api/virtual-clients` | `{}` creates a blank cat; optional legacy `character` and `theme` seed a designed cat |
@@ -246,7 +256,7 @@ Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body
 
 | Device · port 80 | Request → response |
 | --- | --- |
-| `GET /status` | Identity, board, display size, firmware, partition, memory, battery, volume, sleeping, and `ws_connected` |
+| `GET /status` | Identity, board, display size, firmware, partition, CPU, memory, RSSI, uptime, battery, volume, sleeping, and `ws_connected` |
 | `POST /speak` | Raw PCM (1.5 MiB max) → queued sample count or 409 if busy |
 | `POST /volume` | `{"level":65}` → saved volume (0–100) |
 | `POST /ota`, `POST /ota/upload` | Pull or upload the board's firmware (`application/octet-stream`); reboot on success |
