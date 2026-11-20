@@ -330,6 +330,16 @@ func TestFaceSVGPoseFilterAndChrome(t *testing.T) {
 	}
 }
 
+func TestUpdateCatLegacyFaceFields(t *testing.T) {
+	const guidance = "svg_extras was replaced by face_svg; call inspect({device_id}) to read the current face_svg and pass the edited <svg> in cat.face_svg"
+	for _, field := range []string{"svg_extras", "extras"} {
+		_, _, err := updateCat(blankCat(), object{field: "<svg/>"}, deviceVoices{})
+		if e, ok := err.(*apiError); !ok || e.status != 400 || e.Error() != guidance {
+			t.Errorf("updateCat with %s: want 400 and %q, got %#v", field, guidance, err)
+		}
+	}
+}
+
 func TestFaceSVGPaletteChanges(t *testing.T) {
 	blank := blankCat()
 	designed, _, err := updateCat(blank, object{"face_bg": "#123456"}, deviceVoices{})

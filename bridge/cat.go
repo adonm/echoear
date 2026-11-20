@@ -250,6 +250,8 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 			c.Voice = str(val)
 		case "face_svg":
 			editLook = true
+		case "svg_extras", "extras":
+			return c, false, problem(400, "svg_extras was replaced by face_svg; call inspect({device_id}) to read the current face_svg and pass the edited <svg> in cat.face_svg")
 		case "configured", "save_profile", "device_id", "op":
 		default:
 			return c, false, problem(400, "Unknown cat field "+key)
