@@ -8,9 +8,11 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import shlex
+import subprocess
 import sys
 import tempfile
 import threading
@@ -19,9 +21,11 @@ import urllib.error
 import urllib.request
 import wave
 from pathlib import Path
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from server import Bridge, SESSION_ID, Sessions, json_bytes, split_screen, upstream
-from tts import split_sentences
+from server import DATA, Bridge, SESSION_ID, Sessions, json_bytes, split_screen, upstream
+from tts import make_intercom_chime_pcm, normalize_voice_pcm, split_sentences
 
 DEVICE = f"bridge-selftest-{secrets.token_hex(8)}"
 SPEECH = b"What is the capital city of France? Answer with only the city name."
@@ -56,8 +60,8 @@ def generated_wav(path):
     assert flite.flite_text_to_speech(SPEECH, voice.register_cmu_us_kal16(None), os.fsencode(path)) > 0
 
 
-def send(url, path, *, body=None, content_type=None, token=None, device=None):
-    headers = {}
+def send(url, path, *, body=None, content_type=None, token=None, device=None, headers=None):
+    headers = dict(headers or {})
     if token:
         headers["X-EchoEar-Token"] = token
     if device:
@@ -121,7 +125,7 @@ def test_screen_parser():
              "tap": "**Fun fact!**\nTap again.\0", "ask": 42},
             {"t": "line", "x1": 1, "y1": 2, "x2": 3, "y2": 4, "c": "bad"},
             {"t": "btn", "x": 120, "y": 230, "w": 110, "h": 50, "s": "Explore",
-             "c": "#C084FC", "r": 22, "ask": "Why? " + "a" * 130},
+             "c": "#C084FC", "r": 22, "ask": "Why? " + "a" * 130, "reply_to": "**Mint**\0"},
         ] + [{"t": "text", "x": 1, "y": 2, "s": "🔥" * 80, "c": "#FFFFFF"}] * 40,
     })
     reply, screen = split_screen(f"Short answer.\r\n\r\n```echoear-screen\r\n{raw}\r\n```\r\n")
@@ -133,6 +137,7 @@ def test_screen_parser():
     button = screen["shapes"][1]
     assert button["t"] == "btn" and button["s"] == "Explore" and button["r"] == 22
     assert button["ask"] == "Why? " + "a" * 115
+    assert button["reply_to"] == "Mint"
     assert all(shape["t"] == "text" for shape in screen["shapes"][2:])
     assert 2 < len(screen["shapes"]) <= 24 and len(json_bytes(screen)) < 6000
     for block in ("```echoear-screen\n{bad}\n```", '```echoear-screen\n{"title":"Unclosed"}'):
@@ -245,16 +250,21 @@ def test_visual(url, token, sid):
     print(f"Sample: {reply}", flush=True)
 
 
-def test_live(url, token, pcm):
+def check_health(url):
     health, _ = send(url, "/health")
     assert all(health.get(key) is True for key in ("ok", "hex", "opencode", "tts")), health
     assert health["tts_engine"] == "kokoro-onnx"
+
+
+def test_live(url, token, pcm):
+    check_health(url)
     print("PASS LAN health, Hex, OpenCode and Kokoro TTS ready", flush=True)
-    for path in ("/api/voice", "/api/text", "/api/reset", "/api/tts"):
+    for path in ("/api/voice", "/api/text", "/api/reset", "/api/tts", "/api/register", "/api/intercom"):
         rejects(401, url, path, body=b"")
     for path in ("/ota/version.json", "/ota/latest.bin"):
         rejects(401, url, path)
     rejects(401, url, "/api/audio/unknown")
+    rejects(401, url, "/api/devices")
     rejects(404, url, "/api/audio/unknown", token=token)
     print("PASS API and OTA reject requests without a token", flush=True)
     pcm_direct, headers = send(url, "/api/tts", token=token, body={
@@ -300,15 +310,166 @@ def test_live(url, token, pcm):
     print("PASS reset and silent PCM skip OpenCode", flush=True)
 
 
+@contextmanager
+def isolated_bridge(root, token):
+    """Use real Hex, OpenCode and Kokoro without touching the deployed peer registry."""
+    data = root / "data"
+    echoear = data / "echoear"
+    echoear.mkdir(parents=True)
+    (data / "hex").symlink_to(DATA / "hex", target_is_directory=True)
+    (echoear / "tts-models").symlink_to(DATA / "echoear/tts-models", target_is_directory=True)
+    env = dict(os.environ, XDG_DATA_HOME=str(data), ECHOEAR_BRIDGE_HOST="127.0.0.1",
+               ECHOEAR_BRIDGE_PORT="0", ECHOEAR_BRIDGE_TOKEN=token, ECHOEAR_OTA_DIR=str(root / "ota"),
+               ECHOEAR_OPENCODE_AGENT="echoear", ECHOEAR_OPENCODE_MODEL="opencode/gemini-4-neon#high")
+    python = DATA / "echoear/tts-venv/bin/python"
+    with subprocess.Popen([str(python), "-B", str(Path(__file__).with_name("server.py"))],
+                          env=env, stdout=subprocess.PIPE, text=True) as service:
+        try:
+            for line in service.stdout:
+                if line.startswith("EchoEar bridge listening on 127.0.0.1:"):
+                    yield f"http://127.0.0.1:{int(line.rsplit(':', 1)[1])}", echoear / "devices.json"
+                    break
+            else:
+                raise AssertionError("Isolated bridge did not start")
+        finally:
+            service.terminate()
+            try:
+                service.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                service.kill()
+
+
+def test_intercom(url, token, pcm, registry):
+    deliveries = queue.Queue()
+
+    class Peer(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            valid = self.headers.get("X-EchoEar-Token") == token
+            deliveries.put((self.path, self.headers.get_content_type(), body))
+            self.send_response(204 if valid else 401)
+            self.end_headers()
+
+    def received():
+        display, audio = deliveries.get(timeout=2), deliveries.get(timeout=2)
+        assert display[:2] == ("/display", "application/json") and audio[:2] == ("/speak", "audio/pcm")
+        card = json.loads(display[2])
+        assert card["bg"] == "#1E1B3A" and card["title"] == "From Cake!"
+        button = next(s for s in card["shapes"] if s["t"] == "btn")
+        assert button["s"] == "Reply to Cake" and button["reply_to"] == "Cake"
+        lines = [s["s"] for s in card["shapes"] if s["t"] == "text"]
+        assert 1 <= len(lines) <= 3 and all(len(line) <= 27 for line in lines)
+        assert audio[2].startswith(make_intercom_chime_pcm()) and len(audio[2]) % 2 == 0
+        return " ".join(lines), audio[2]
+
+    sender, mock = "peer-selftest-cake", "peer-selftest-mock"
+    auth = {"token": token}
+    sid = None
+    with ThreadingHTTPServer(("127.0.0.1", 0), Peer) as peer:
+        worker = threading.Thread(target=peer.serve_forever)
+        worker.start()
+        try:
+            registered, _ = send(url, "/api/register", **auth, body={
+                "device_id": mock, "character": "MockPeer", "port": peer.server_port, "ip": "127.0.0.1",
+            })
+            assert registered == {"ok": True, "peers": []}
+            sender_endpoint = {"ip": "127.0.0.2", "port": 8080}
+            registered, _ = send(url, "/api/register", **auth, body={
+                "device_id": sender, "character": "Placeholder", **sender_endpoint,
+            })
+            mock_listing = {"device_id": mock, "character": "MockPeer", "ip": "127.0.0.1", "online": True}
+            assert registered == {"ok": True, "peers": [mock_listing]}
+            devices, _ = send(url, "/api/devices", **auth)
+            assert mock_listing in devices["devices"] and len(devices["devices"]) == 2
+            saved = json.loads(registry.read_text())
+            assert all(saved[sender][k] == v for k, v in sender_endpoint.items())
+            assert saved[mock]["port"] == peer.server_port
+            assert all(int(time.time()) - p["last_seen"] < 180 for p in saved.values())
+            print("PASS authenticated peer registration, discovery, and persistence", flush=True)
+
+            silent = {"body": bytes(2 * 16000 * 2), "content_type": "audio/pcm"}
+            send(url, "/api/voice", **auth, **silent, device="unregistered-local")
+            assert "unregistered-local" not in json.loads(registry.read_text())
+            send(url, "/api/voice", **auth, **silent, device=sender)
+            current = json.loads(registry.read_text())[sender]
+            assert all(current[k] == v for k, v in sender_endpoint.items()), "/api/voice replaced registration"
+            assert current["character"] == "Placeholder"
+
+            result, _ = send(url, "/api/intercom", **auth, device=sender, body=pcm, content_type="audio/pcm",
+                             headers={"X-Character": "Cake", "X-Target": "mOcKpEeR"})
+            current = json.loads(registry.read_text())[sender]
+            assert all(current[k] == v for k, v in sender_endpoint.items()), "/api/intercom replaced registration"
+            assert current["character"] == "Cake"
+            assert result["ok"] and result["delivered_to"] == ["MockPeer"] and result["sent_to"] == [mock]
+            assert result["reply"] == "Sent to MockPeer!"
+            assert result["opencode_ms"] == 0 and "capital" in result["transcript"].lower()
+            check_audio(url, token, result)
+            shown, audio = received()
+            normalized = normalize_voice_pcm(pcm)
+            assert "capital" in shown.lower() and audio.endswith(normalized)
+            assert normalized != pcm and len(audio) > len(normalized) + len(make_intercom_chime_pcm())
+            assert normalize_voice_pcm(bytes(3200)) == bytes(3200)
+            print("PASS intercom delivers transcribed card, reply button, chime and normalized original voice", flush=True)
+
+            started = time.monotonic_ns()
+            result, _ = send(url, "/api/text", **auth, body={
+                "device_id": sender, "text": "Tell MockPeer dinner is ready!",
+            })
+            current = json.loads(registry.read_text())[sender]
+            assert all(current[k] == v for k, v in sender_endpoint.items()), "/api/text replaced registration"
+            assert result["ok"] and result["delivered_to"] == ["MockPeer"] and result["sent_to"] == [mock]
+            assert result["opencode_ms"] == 0
+            assert result["session_id"] == ""
+            shown, audio = received()
+            assert shown == "dinner is ready!" and len(audio) > 8000
+            print(f"PASS direct text relay bypasses OpenCode ({(time.monotonic_ns()-started)//1_000_000} ms)", flush=True)
+
+            result, _ = send(url, "/api/text", **auth, body={
+                "device_id": sender, "text": "Send MockPeer a short dinosaur joke!",
+            })
+            sid = result["session_id"]
+            assert SESSION_ID.fullmatch(sid) and result["opencode_ms"] > 0 and result["sent_to"] == [mock]
+            assert result["delivered_to"] == ["MockPeer"]
+            assert "```" not in result["reply"] and "echoear-message" not in result["reply"]
+            shown, audio = received()
+            samples = array("h", audio)
+            assert "?" in shown and len(audio) > 32_000 and max(map(abs, samples)) > 1000
+            path = f"/api/session/{sid}/message?order=desc&limit=1&type="
+            user = upstream("OpenCode", "GET", path + "user")["data"][0]
+            assert user["text"].startswith(f"[EchoEar: you are Cake ({sender}); other EchoEars: MockPeer ({mock})]")
+            assistant = upstream("OpenCode", "GET", path + "assistant")["data"][0]
+            assert assistant["agent"] == "echoear" and assistant["model"] == {
+                "providerID": "opencode", "id": "gemini-4-neon", "variant": "high",
+            }
+            print("PASS OpenCode composes dinosaur joke and delivers it as card and Kokoro PCM", flush=True)
+
+            changed_endpoint = {"ip": "127.0.0.3", "port": 8081}
+            send(url, "/api/register", **auth, body={
+                "device_id": sender, "character": "Cake", **changed_endpoint,
+            })
+            current = json.loads(registry.read_text())[sender]
+            assert all(current[k] == v for k, v in changed_endpoint.items())
+            print("PASS traffic preserves the registered address and port; re-registration updates them", flush=True)
+        finally:
+            peer.shutdown()
+            worker.join()
+            if sid and SESSION_ID.fullmatch(sid):
+                path = f"/api/session/{sid}"
+                if upstream("OpenCode", "GET", path)["data"].get("title") == f"EchoEar: {sender}":
+                    upstream("OpenCode", "DELETE", path)
+
+
 def main():
     config = settings()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default=f"http://127.0.0.1:{config.get('ECHOEAR_BRIDGE_PORT', '8765')}")
     parser.add_argument("--wav", type=Path, help=f"16 kHz signed 16-bit mono WAV saying: {SPEECH.decode()}")
     args = parser.parse_args()
-    token = config.get("ECHOEAR_BRIDGE_TOKEN")
-    if not token:
-        parser.error("Missing ECHOEAR_BRIDGE_TOKEN")
+    token = secrets.token_hex(32)
+    check_health(args.url.rstrip("/"))
     test_sentence_split()
     test_screen_parser()
     with tempfile.TemporaryDirectory(prefix="echoear-bridge-test-") as temp:
@@ -320,7 +481,9 @@ def main():
         with wave.open(str(wav_path), "rb") as wav:
             assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
             pcm = wav.readframes(wav.getnframes())
-        test_live(args.url.rstrip("/"), token, pcm)
+        with isolated_bridge(root, token) as (url, registry):
+            test_intercom(url, token, pcm, registry)
+            test_live(url, token, pcm)
 
 
 if __name__ == "__main__":

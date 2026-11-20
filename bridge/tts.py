@@ -3,7 +3,10 @@
 import math
 import os
 import re
+import sys
 import threading
+from array import array
+from functools import lru_cache
 
 SAMPLE_RATE = 16000
 MAX_PCM = 2 * 1024 * 1024
@@ -37,6 +40,47 @@ def split_sentences(text: str) -> list[str]:
     if tail := text[clip_start:].strip():
         sentences.append(tail)
     return sentences
+
+
+def pcm_bytes(samples):
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tobytes()
+
+
+@lru_cache(maxsize=1)
+def make_intercom_chime_pcm() -> bytes:
+    samples = array("h")
+    length = SAMPLE_RATE // 10
+    fade = SAMPLE_RATE // 80
+    for tone in (660, 880):
+        if samples:
+            samples.extend([0] * (SAMPLE_RATE // 50))
+        for i in range(length):
+            envelope = min(1, i / fade, (length - 1 - i) / fade)
+            samples.append(round(4600 * envelope * math.sin(math.tau * tone * i / SAMPLE_RATE)))
+    return pcm_bytes(samples)
+
+
+def normalize_voice_pcm(raw_pcm: bytes) -> bytes:
+    if not raw_pcm:
+        return raw_pcm
+    if len(raw_pcm) % 2:
+        raise ValueError("PCM requires whole 16-bit samples")
+    samples = array("h", raw_pcm)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    peak = max(map(abs, samples))
+    rms = math.sqrt(sum(value * value for value in samples) / len(samples))
+    if peak < 1100 or rms < 400:
+        return raw_pcm
+    gain = min(3.0, 32767 * 10 ** (-2 / 20) / peak)
+    return pcm_bytes(array("h", (round(value * gain) for value in samples)))
+
+
+@lru_cache(maxsize=32)
+def short_speech(speech, text: str) -> bytes:
+    return speech.synthesize_pcm(text)
 
 
 class Speech:

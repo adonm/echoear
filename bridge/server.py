@@ -2,41 +2,67 @@
 """Bridge EchoEar devices to the local Hex and OpenCode services."""
 
 import base64
+import errno
 import hashlib
 import hmac
 import http.client
 import io
+import ipaddress
 import json
 import math
 import os
 import re
 import secrets
+import socket
 import stat
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import wave
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-from tts import MAX_PCM, MAX_TEXT, SAMPLE_RATE, Speech, plain_text
+from tts import (
+    MAX_PCM, MAX_TEXT, SAMPLE_RATE, Speech, make_intercom_chime_pcm,
+    normalize_voice_pcm, plain_text, short_speech,
+)
 
 DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
 PROJECT = Path(__file__).resolve().parent
 DEVICE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+CHARACTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._'’-]{0,39}")
 SESSION_ID = re.compile(r"ses[A-Za-z0-9_-]{1,128}")
 MAX_AUDIO = 2 * 1024 * 1024
 MAX_JSON = 16 * 1024
 MAX_SCREEN_BYTES = 6000
-COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
-SCREEN_FENCE = re.compile(
-    r"^[ \t]*```echoear-screen[ \t]*(?:\r?\n|\Z)(.*?)(^[ \t]*```[ \t]*\r?$|\Z)",
-    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+MAX_MESSAGE = 400
+MAX_PEER_PCM = 1536 * 1024
+PEER_TTL = 180
+BROADCAST = ("all", "everyone", "everybody")
+LAN_NETWORKS = tuple(map(ipaddress.ip_network, (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "fc00::/7",
+)))
+DIRECT_PREFIX = re.compile(r"^(?:hey\s+[\w-]+,?\s+)?(?:tell|message|intercom|walkie|say\s+to|send)\s+", re.I)
+COMPOSE_REQUEST = re.compile(
+    r"^(?:about\b|(?:(?:an?|the|some)\s+(?:[\w'-]+\s+){0,5})?(?:joke|story|fact|riddle|quiz)\b)",
+    re.I,
 )
+COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
+def payload_fence(tag):
+    return re.compile(
+        rf"^[ \t]*```{tag}[ \t]*(?:\r?\n|\Z)(.*?)(^[ \t]*```[ \t]*\r?$|\Z)",
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+
+
+SCREEN_FENCE = payload_fence("echoear-screen")
+MESSAGE_FENCE = payload_fence("echoear-message")
 SHAPE_FIELDS = {
     "circle": (("x", "y", "r"), ("w",)),
     "rect": (("x", "y", "w", "h"), ("r",)),
@@ -124,6 +150,18 @@ def pcm_wav(pcm):
     return output.getvalue()
 
 
+def wav_pcm(wav):
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as file:
+            if (file.getframerate(), file.getnchannels(), file.getsampwidth()) == (SAMPLE_RATE, 1, 2):
+                pcm = file.readframes(file.getnframes())
+                if pcm and len(pcm) == file.getnframes() * 2:
+                    return pcm
+    except (wave.Error, EOFError):
+        pass
+    raise Error(400, "Intercom requires 16 kHz mono 16-bit PCM")
+
+
 def transcribe(wav):
     try:
         settings = json.loads((DATA / "hex/settings.json").read_text())
@@ -160,6 +198,17 @@ def final_reply(messages, prompt_id):
 
 def json_bytes(value):
     return json.dumps(value, separators=(",", ":")).encode()
+
+
+def persist_json(path, value):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as tmp:
+        try:
+            json.dump(value, tmp)
+            tmp.close()
+            os.replace(tmp.name, path)
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
 
 
 def screen_text(value, limit):
@@ -203,6 +252,8 @@ def screen_shape(value):
     for key in ("tap", "ask"):
         if action := screen_text(plain_text(value.get(key)), 120):
             result[key] = action
+    if kind == "btn" and (reply_to := screen_text(plain_text(value.get("reply_to")), 40)):
+        result["reply_to"] = reply_to
     return result
 
 
@@ -231,17 +282,145 @@ def sanitize_screen(raw):
     return screen
 
 
-def split_screen(reply):
-    screen = None
+def strip_payload(reply, fence, parse):
+    payload = None
 
     def strip_block(match):
-        nonlocal screen
-        if screen is None and match[2]:
-            screen = sanitize_screen(match[1])
+        nonlocal payload
+        if payload is None and match[2]:
+            payload = parse(match[1])
         return ""
 
-    reply = SCREEN_FENCE.sub(strip_block, reply).strip()
-    return reply, screen
+    return fence.sub(strip_block, reply).strip(), payload
+
+
+def split_screen(reply):
+    return strip_payload(reply, SCREEN_FENCE, sanitize_screen)
+
+
+def parse_message(raw):
+    if len(raw) > MAX_JSON:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if isinstance(data, dict):
+        target = data.get("to")
+        text = screen_text(plain_text(data.get("text")), MAX_MESSAGE)
+        if isinstance(target, str) and re.fullmatch(r"[\w .'’-]{1,64}", target.strip()) and text:
+            return target.strip(), text
+
+
+def local_ip(value, allow_loopback):
+    if not isinstance(value, str):
+        raise Error(400, "Expected a numeric LAN IP address")
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        raise Error(400, "Expected a numeric LAN IP address") from None
+    if (ip.is_loopback and allow_loopback) or any(ip in network for network in LAN_NETWORKS):
+        return str(ip)
+    raise Error(400, "Peer address must be on the LAN")
+
+
+def is_host_ip(ip):
+    address = ipaddress.ip_address(ip)
+    if address.is_loopback:
+        return True
+    family = socket.AF_INET if address.version == 4 else socket.AF_INET6
+    # A bind checks all local interfaces, even when the bridge listens on a wildcard.
+    with socket.socket(family, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.bind((ip, 0))
+        except OSError as error:
+            if error.errno == errno.EADDRNOTAVAIL:
+                return False
+            raise
+    return True
+
+
+class Peers:
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        try:
+            self.entries = json.loads(path.read_text())
+        except FileNotFoundError:
+            self.entries = {}
+        if not isinstance(self.entries, dict):
+            raise ValueError("devices.json must contain a device map")
+
+    def _save(self, device, peer):
+        if self.entries.get(device) != peer:
+            entries = {**self.entries, device: peer}
+            persist_json(self.path, entries)
+            self.entries = entries
+
+    def register(self, device, ip, character, port):
+        with self.lock:
+            self._save(device, dict(device_id=device, character=character, ip=ip, port=port,
+                                    last_seen=int(time.time())))
+
+    def touch(self, device, client_ip, character=None):
+        with self.lock:
+            old = self.entries.get(device, {})
+            peer = dict(old, device_id=device, character=character or old.get("character", device[:40]),
+                        last_seen=int(time.time()))
+            if not peer.get("ip") and not is_host_ip(client_ip):
+                peer.update(ip=client_ip, port=old.get("port", 80))
+            if old or peer.get("ip"):
+                self._save(device, peer)
+            return peer
+
+    def others(self, sender=None):
+        with self.lock:
+            return [p for key, p in sorted(self.entries.items())
+                    if p.get("ip") and key.casefold() != (sender or "").casefold()]
+
+    def public(self, sender=None):
+        now = time.time()
+        return [dict(device_id=p["device_id"], character=p["character"], ip=p["ip"],
+                     online=now - p["last_seen"] <= PEER_TTL) for p in self.others(sender)]
+
+    def targets(self, sender, target):
+        target = target.casefold()
+        peers = self.others(sender)
+        if target in BROADCAST:
+            return peers
+        return ([p for p in peers if p["device_id"].casefold() == target]
+                or [p for p in peers if p["character"].casefold() == target])
+
+    def direct(self, sender, text):
+        prefix = DIRECT_PREFIX.match(text.strip())
+        if not prefix:
+            return None
+        names = {*BROADCAST}
+        for peer in self.others(sender):
+            names.update((peer["character"], peer["device_id"]))
+        # Match longer names first and keep a literal boundary after the addressee.
+        choices = "|".join(map(re.escape, sorted(names, key=len, reverse=True)))
+        match = re.fullmatch(rf"({choices})(?:[\s,:]+|[-–—]\s+)(.*\S)\s*",
+                             prefix.string[prefix.end():], re.I | re.S)
+        if match:
+            target, message = match.groups()
+            message = message.lstrip(" \t\r\n,:-–—")
+            if message and not COMPOSE_REQUEST.match(message):
+                return target, message
+
+    def prompt(self, sender, text):
+        peers = self.others(sender["device_id"])
+        names = [f"{p['character']} ({p['device_id']})" for p in peers[:16]]
+        others = ", ".join(names) or "none"
+        return f"[EchoEar: you are {sender['character']} ({sender['device_id']}); other EchoEars: {others}]\n{text}"
+
+
+def message_card(character, text):
+    lines = textwrap.wrap(text or "Voice message", width=27, max_lines=3, placeholder="…")
+    shapes = [dict(t="text", x=180, y=124 + i * 25, c="#FFF1C8", s=line) for i, line in enumerate(lines)]
+    shapes.append(dict(t="btn", x=85, y=218, w=190, h=46, r=23, c="#34D399",
+                       s=f"Reply to {character}"[:32], reply_to=character))
+    return dict(bg="#1E1B3A", title=f"From {character}!", shapes=shapes)
 
 
 class Sessions:
@@ -276,14 +455,7 @@ class Sessions:
                 del new[device]
             else:
                 return
-            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, delete=False) as tmp:
-                try:
-                    json.dump(new, tmp)
-                    tmp.close()
-                    os.replace(tmp.name, self.path)
-                finally:
-                    Path(tmp.name).unlink(missing_ok=True)
+            persist_json(self.path, new)
             self.ids = new
 
     def reset(self, device):
@@ -328,12 +500,12 @@ class Sessions:
 
 
 class AudioStream:
-    def __init__(self):
-        self.chunks: list[bytes] = []
-        self.done = False
+    def __init__(self, pcm=b""):
+        self.chunks: list[bytes] = [pcm] if pcm else []
+        self.done = bool(pcm)
         self.error: str | None = None
         self.cond = threading.Condition()
-        self.total_bytes = 0
+        self.total_bytes = len(pcm)
 
     def produce(self, speech, text):
         error = None
@@ -360,6 +532,7 @@ class Bridge(ThreadingHTTPServer):
         self.token = token.encode()
         self.firmware = ota_dir / "echoear.bin"
         self.sessions = sessions
+        self.peers = Peers(sessions.path.with_name("devices.json"))
         self.speech = None
         self.audio = OrderedDict()
         self.audio_lock = threading.Lock()
@@ -379,6 +552,60 @@ class Bridge(ThreadingHTTPServer):
             if stream is not None:
                 self.audio.move_to_end(audio_id)
             return stream
+
+    def post_peer(self, peer, path, content_type, body):
+        connection = None
+        try:
+            address = local_ip(peer["ip"], allow_loopback=True)
+            connection = http.client.HTTPConnection(address, peer["port"], timeout=5)
+            connection.request("POST", path, body, {
+                "Content-Type": content_type, "X-EchoEar-Token": self.token.decode("ascii"),
+            })
+            return 200 <= connection.getresponse().status < 300
+        except (Error, OSError, http.client.HTTPException, KeyError, ValueError, TypeError):
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def deliver_intercom(self, sender_char, sender_id, target_name, message_text, raw_pcm=None):
+        peers = self.peers.targets(sender_id, target_name)
+        result = dict(delivered_to=[], sent_to=[], failed_to=[])
+        if not peers:
+            return dict(result, error="peer_not_found")
+        text = screen_text(plain_text(message_text), MAX_MESSAGE)
+        display = json_bytes(message_card(sender_char, text))
+        try:
+            if self.speech is None:
+                raise RuntimeError("TTS unavailable")
+            if raw_pcm:
+                intro = short_speech(self.speech, f"From {sender_char}!")
+                message = normalize_voice_pcm(raw_pcm)
+            else:
+                intro = short_speech(self.speech, f"Message from {sender_char}!")
+                message = self.speech.synthesize_pcm(text)
+            audio = make_intercom_chime_pcm() + intro + message
+        except Exception as exc:
+            print(f"EchoEar intercom audio failed: {type(exc).__name__}", file=sys.stderr, flush=True)
+            return dict(result, error="audio_unavailable", failed_to=[p["device_id"] for p in peers])
+        if len(audio) > MAX_PEER_PCM:
+            return dict(result, error="message_too_long", failed_to=[p["device_id"] for p in peers])
+
+        def send(peer):
+            display_ok = self.post_peer(peer, "/display", "application/json", display)
+            audio_ok = self.post_peer(peer, "/speak", "audio/pcm", audio)
+            return peer, display_ok and audio_ok
+
+        with ThreadPoolExecutor(max_workers=min(len(peers), 8)) as workers:
+            for peer, ok in workers.map(send, peers):
+                if ok:
+                    result["delivered_to"].append(peer["character"])
+                    result["sent_to"].append(peer["device_id"])
+                else:
+                    result["failed_to"].append(peer["device_id"])
+        if not result["delivered_to"]:
+            result["error"] = "delivery_failed"
+        return result
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -469,36 +696,104 @@ class Handler(BaseHTTPRequestHandler):
             raise Error(400, "Invalid device ID")
         return value
 
-    def voice(self):
-        device = self.device(self.headers.get("X-Device-Id", "echoear"))
-        # X-Session-Id is advisory; only the persisted device mapping can select a session.
+    @staticmethod
+    def character(value):
+        if not isinstance(value, str) or not CHARACTER.fullmatch(value.strip()):
+            raise Error(400, "Invalid character name")
+        return value.strip()
+
+    def peer_ip(self, value):
+        return local_ip(value, ipaddress.ip_address(self.client_address[0]).is_loopback)
+
+    def sender(self, device):
+        character = self.headers.get("X-Character")
+        return self.server.peers.touch(
+            device, self.peer_ip(self.client_address[0]), self.character(character) if character is not None else None,
+        )
+
+    def register(self):
+        body = self.json_body()
+        device = self.device(body.get("device_id"))
+        character = self.character(body.get("character"))
+        ip = self.peer_ip(body.get("ip", self.client_address[0]))
+        port = body.get("port", 80)
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise Error(400, "Invalid peer port")
+        self.server.peers.register(device, ip, character, port)
+        return dict(ok=True, peers=self.server.peers.public(device))
+
+    def recording(self):
         kind = self.headers.get_content_type()
         if kind not in ("audio/pcm", "audio/wav"):
             raise Error(415, "Expected audio/pcm or audio/wav")
         audio = self.read_body(MAX_AUDIO)
         if kind == "audio/pcm":
-            audio = pcm_wav(audio)
-        elif len(audio) < 12 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+            return pcm_wav(audio)
+        if len(audio) < 12 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
             raise Error(400, "Expected RIFF/WAVE audio")
+        return audio
+
+    def voice(self):
+        wav = self.recording()
+        device = self.device(self.headers.get("X-Device-Id", "echoear"))
+        # X-Session-Id is advisory; only the persisted device mapping can select a session.
+        sender = self.sender(device)
         start = time.monotonic_ns()
-        transcript = transcribe(audio)
+        transcript = transcribe(wav)
         result = {"transcript": transcript, "hex_ms": elapsed_ms(start)}
         if not transcript:
             return dict(result, reply="", screen=None, session_id=self.server.sessions.get(device),
                         opencode_ms=0, **self.audio_fields(""))
-        return dict(result, **self.text(device, transcript))
+        return dict(result, **self.text(sender, transcript, wav=wav))
 
-    def text(self, device, text):
+    def relay(self, sender, target, message, pcm=None):
+        device = sender["device_id"]
+        delivery = self.server.deliver_intercom(sender["character"], device, target, message, pcm)
+        peers = self.server.peers.targets(device, target)
+        recipient = "everyone" if target.casefold() in BROADCAST else peers[0]["character"] if peers else target
+        delivered = delivery["delivered_to"]
+        if not delivered:
+            reply = f"I couldn't reach {recipient} right now."
+        elif delivery["failed_to"]:
+            reply = "I sent your message, but couldn't reach everyone."
+        else:
+            reply = f"Sent to {recipient}!"
+        return dict(ok=bool(delivered), reply=reply, screen=None,
+                    session_id=self.server.sessions.get(device), opencode_ms=0,
+                    **delivery, **self.audio_fields(reply, cached=True))
+
+    def intercom(self):
+        target = self.headers.get("X-Target", "").strip()
+        if not target or len(target) > 64:
+            raise Error(400, "Expected X-Target peer name")
+        wav = self.recording()
+        pcm = wav_pcm(wav)
+        sender = self.sender(self.device(self.headers.get("X-Device-Id", "echoear")))
+        start = time.monotonic_ns()
+        transcript = transcribe(wav)
+        result = dict(transcript=transcript, hex_ms=elapsed_ms(start))
+        return dict(result, **self.relay(sender, target, transcript, pcm))
+
+    def text(self, sender, text, wav=None):
         if not isinstance(text, str) or not text.strip():
             raise Error(400, "Expected nonempty text")
+        device = sender["device_id"]
+        if direct := self.server.peers.direct(device, text):
+            return self.relay(sender, *direct, pcm=wav_pcm(wav) if wav is not None else None)
         start = time.monotonic_ns()
         try:
-            reply, sid = self.server.sessions.ask(device, text.strip())
+            reply, sid = self.server.sessions.ask(device, self.server.peers.prompt(sender, text.strip()))
         except (KeyError, TypeError, ValueError):
             raise Error(502, "OpenCode returned an invalid response") from None
+        opencode_ms = elapsed_ms(start)
         reply, screen = split_screen(reply)
-        return dict(reply=reply, screen=screen, session_id=sid, opencode_ms=elapsed_ms(start),
-                    **self.audio_fields(reply))
+        reply, message = strip_payload(reply, MESSAGE_FENCE, parse_message)
+        delivery = {"sent_to": []}
+        if message:
+            target, text = message
+            delivery = self.server.deliver_intercom(sender["character"], device, target, text)
+        return dict(reply=reply, screen=screen, session_id=sid, opencode_ms=opencode_ms,
+                    **delivery, **self.audio_fields(reply))
 
     def speech_input(self, text):
         try:
@@ -517,7 +812,7 @@ class Handler(BaseHTTPRequestHandler):
             print(f"EchoEar TTS synthesis failed: {type(error).__name__}", file=sys.stderr, flush=True)
             raise Error(502, "TTS synthesis failed") from None
 
-    def audio_fields(self, reply):
+    def audio_fields(self, reply, cached=False):
         result = dict(audio_url=None, audio_bytes=0, sample_rate=SAMPLE_RATE,
                       audio_streaming=False, tts_first_ms=0, tts_ms=0)
         if not reply:
@@ -525,11 +820,12 @@ class Handler(BaseHTTPRequestHandler):
         start = time.monotonic_ns()
         try:
             speech, clean = self.speech_input(reply)
-        except Error as error:
-            print(f"EchoEar could not attach TTS audio: {error}", file=sys.stderr, flush=True)
+            stream = AudioStream(short_speech(speech, clean) if cached else b"")
+        except Exception as error:
+            print(f"EchoEar could not attach TTS audio: {type(error).__name__}", file=sys.stderr, flush=True)
         else:
-            stream = AudioStream()
-            threading.Thread(target=stream.produce, args=(speech, clean), daemon=True).start()
+            if not cached:
+                threading.Thread(target=stream.produce, args=(speech, clean), daemon=True).start()
             with stream.cond:
                 stream.cond.wait_for(lambda: stream.chunks or stream.done)
                 if stream.chunks:
@@ -578,6 +874,8 @@ class Handler(BaseHTTPRequestHandler):
                         ok=True, hex=reachable("Hex", "/health"), opencode=reachable("OpenCode", "/api/info"),
                         tts=speech is not None, tts_engine=speech.engine if speech else "unavailable",
                     ))
+                if path == "/api/devices":
+                    return self.send_json(200, dict(devices=self.server.peers.public()))
                 if path in ("/ota/version.json", "/ota/latest.bin"):
                     return self.ota(path.endswith(".json"))
                 if path.startswith("/api/audio/"):
@@ -588,6 +886,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "POST":
                 if path == "/api/voice":
                     return self.send_json(200, self.voice())
+                if path == "/api/register":
+                    return self.send_json(200, self.register())
+                if path == "/api/intercom":
+                    return self.send_json(200, self.intercom())
                 if path == "/api/tts":
                     pcm = self.speech_pcm(self.json_body().get("text"))
                     return self.send_bytes(200, pcm, "audio/pcm")
@@ -595,7 +897,7 @@ class Handler(BaseHTTPRequestHandler):
                     body = self.json_body()
                     device = self.device(body.get("device_id", self.headers.get("X-Device-Id", "echoear")))
                     if path == "/api/text":
-                        return self.send_json(200, self.text(device, body.get("text")))
+                        return self.send_json(200, self.text(self.sender(device), body.get("text")))
                     self.server.sessions.reset(device)
                     return self.send_json(200, {"ok": True})
             raise Error(404, "Not found")
