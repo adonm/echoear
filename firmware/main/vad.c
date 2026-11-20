@@ -1,6 +1,6 @@
 #include "vad.h"
 
-enum { CALIBRATION = 20, MIN_RMS = 320, MAX_RMS = 2400, MIN_WORD_FRAMES = 10 };
+enum { CALIBRATION = 20, MIN_RMS = 320, MAX_RMS = 2400, MIN_WORD_FRAMES = 3 };
 
 vad_result_t vad_update(vad_t *v, uint32_t energy)
 {
@@ -30,7 +30,7 @@ vad_result_t vad_update(vad_t *v, uint32_t energy)
         if (v->streak >= 3) {
             v->voiced = v->streak;
         } else if (v->frames >= 550) {
-            return VAD_NO_SPEECH;
+            return VAD_SEND;
         }
     } else if (energy >= v->threshold / 4) {
         ++v->voiced;
