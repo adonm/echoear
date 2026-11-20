@@ -9,10 +9,16 @@ EchoEar <-- /ws: RGB565 frames, taps, PCM --> Go bridge :8765 <-- /app: SVG --> 
                                               `-- Kokoro   (persistent FP32 worker)
 ```
 
-**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Firmware `v0.8.4` displays
+**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Firmware `v0.9.0` displays
 RGB565 updates from the bridge, reports touch coordinates and hardware telemetry,
 and draws a fallback face offline. The bridge runs app logic and renders the
 display; `/app` uses native SVG.
+
+**New in 0.9.0:** The bridge drops legacy scene, asset, and HTTP compatibility in
+favor of SVG and WebSocket. It caches face rasters by pose, sends the final
+recording audio on **Send**, and uses generation-tagged acknowledgments to stop
+interrupted speech without affecting the next reply. Micro-apps can resume saved
+state, handle browser drags, play named sounds, and launch from local timers.
 
 ## Quickstart
 
@@ -130,7 +136,7 @@ other cats' chats. Treat the link as a password and use **Close Tunnel** to revo
 
 Open **Menu → Stats** for a compact on-device HUD, or **Diagnostics** in the
 LAN `/app` dashboard for device status, pipeline timings, and CPU and memory
-usage for the bridge, Kokoro, and host. Firmware `0.8.4` reports ESP32-S3 CPU
+usage for the bridge, Kokoro, and host. Firmware reports ESP32-S3 CPU
 usage, free and minimum free heap, free PSRAM, Wi-Fi RSSI, and uptime every five
 seconds over WebSocket. The dashboard also shows WebSocket round-trip time.
 
@@ -177,11 +183,17 @@ Code Mode exposes exactly four MCP tools under `tools.echoear`:
 | `store` | Read or write scoped JSON with optional version checks |
 
 The agent can also use OpenCode's `websearch`. There is no `wait_event` tool:
-taps and bounded ticks run in the bridge without keeping an OpenCode turn open.
+pointer events and bounded ticks run in the bridge without keeping an OpenCode turn open.
 The bridge uses the pure-Go `goja` sandbox to run JS that renders SVG. Apps can
 target one player or share state across multiple devices with a separate SVG
 view for each player. `save_as` writes apps and drawings to Turso's `apps`
-table; `load` reopens them. See the [agent guide](agents/echoear.md) for examples.
+table; `load` reopens them. `storeGet(key)` reads persisted state in `init(ctx)`
+and `render(state, player)`; `storeSet(key, value)` is available only in event
+hooks. On the web, use `onDrag` and `onUp` alongside `onTap` for sliders and
+drawing. `sfx(name)`, `sfxAll(name)`, and `act.chime` support `boing`, `pop`,
+`win`, `buzz`, `ding`, and `whoosh`. Set `timer.app` to a saved app name to
+launch it on the connected device when the reminder goes off. See the
+[agent guide](agents/echoear.md) for examples.
 
 **One Voice Rule:** Only final assistant prose is spoken as the reply, not
 tool output or intermediate text. The prompt starts with a short identity
@@ -223,7 +235,8 @@ their on-screen controls also work with Tab, Enter, and Space.
 `0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
 little-endian mono PCM. Voice capture and intercom use WebSocket. The bridge
 pads voiced PCM sent to Hex with 150 ms of silence on each side. Kokoro starts
-synthesizing sentences while OpenCode streams its reply over SSE.
+synthesizing sentences while OpenCode streams its reply over SSE. Firmware
+`0.9.0` removes the legacy `/speak` endpoint.
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
