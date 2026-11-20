@@ -1,0 +1,641 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"mime"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type bridge struct {
+	root     context.Context
+	token    string
+	peers    peers
+	hex      hexClient
+	oc       *openCode
+	worker   *synthWorker
+	clips    speechClips
+	audio    audioCache
+	chime    []byte
+	peerHTTP *http.Client
+	ota      otaFile
+}
+
+func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
+	w.Header().Set("Content-Type", kind)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
+func sendJSON(w http.ResponseWriter, status int, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		data, status = []byte(`{"error":"Cannot encode response"}`), 500
+	}
+	sendBytes(w, status, jsonType, data)
+}
+
+func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.EscapedPath()
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ota/") {
+		tokens := r.Header.Values("X-EchoEar-Token")
+		if len(tokens) != 1 || subtle.ConstantTimeCompare([]byte(tokens[0]), []byte(b.token)) != 1 {
+			sendJSON(w, 401, object{"error": "Unauthorized"})
+			return
+		}
+	}
+	value, err := b.route(w, r, path)
+	if err != nil {
+		status := 502
+		var api *apiError
+		var upstream *upstreamStatus
+		if errors.As(err, &api) {
+			status = api.status
+		} else if errors.As(err, &upstream) {
+			status = upstream.status
+		}
+		sendJSON(w, status, object{"error": err.Error()})
+	} else if value != nil {
+		sendJSON(w, 200, value)
+	}
+}
+
+func body(r *http.Request, audio bool) ([]byte, string, error) {
+	kind, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if audio && kind != pcmType && kind != wavType {
+		return nil, "", problem(415, "Expected audio/pcm or audio/wav")
+	}
+	if !audio && kind != jsonType {
+		return nil, "", problem(415, "Expected application/json")
+	}
+	lengths := r.Header.Values("Content-Length")
+	if len(r.TransferEncoding) != 0 || len(lengths) > 1 {
+		return nil, "", problem(400, "Request requires a single Content-Length")
+	}
+	if len(lengths) == 0 && r.ContentLength <= 0 {
+		return nil, "", problem(411, "Content-Length required")
+	}
+	if len(lengths) != 0 && len(lengths[0]) > 12 {
+		return nil, "", problem(400, "Invalid Content-Length")
+	}
+	limit := int64(maxJSON)
+	if audio {
+		limit = maxPCM
+	}
+	if r.ContentLength > limit {
+		return nil, "", problem(413, "Request body too large")
+	}
+	if r.ContentLength < 0 {
+		return nil, "", problem(400, "Invalid Content-Length")
+	}
+	buf := make([]byte, r.ContentLength)
+	if _, err := io.ReadFull(r.Body, buf); err != nil {
+		var timed net.Error
+		if errors.As(err, &timed) && timed.Timeout() {
+			return nil, "", problem(408, "Request body timed out")
+		}
+		return nil, "", problem(400, "Incomplete request body")
+	}
+	if kind == pcmType && (len(buf) == 0 || len(buf)%2 != 0) {
+		return nil, "", problem(400, "PCM must contain whole 16-bit samples")
+	}
+	if kind == wavType && (len(buf) < 12 || string(buf[:4]) != "RIFF" || string(buf[8:12]) != "WAVE") {
+		return nil, "", problem(400, "Expected RIFF/WAVE audio")
+	}
+	return buf, kind, nil
+}
+
+func jsonBody(r *http.Request) (object, error) {
+	raw, _, err := body(r, false)
+	if err != nil {
+		return nil, err
+	}
+	return decodeObject(raw)
+}
+
+func deviceID(r *http.Request, obj object, required bool) (string, error) {
+	v, provided := obj["device_id"]
+	if !provided && !required {
+		v = "echoear"
+		if values := r.Header.Values("X-Device-Id"); len(values) > 0 {
+			v = values[0]
+		}
+	}
+	id := str(v)
+	if !deviceIDRE.MatchString(id) {
+		return "", problem(400, "Invalid device ID")
+	}
+	return id, nil
+}
+
+func (b *bridge) warmCharacter(ctx context.Context, character string) {
+	for _, intro := range []string{"From ", "Message from ", "Sent to "} {
+		if _, err := b.clips.get(ctx, b.worker, intro+character+"!"); err != nil {
+			return
+		}
+	}
+}
+
+func (b *bridge) identity(r *http.Request, obj object, register bool) (peer, error) {
+	device, err := deviceID(r, obj, register)
+	if err != nil {
+		return peer{}, err
+	}
+	source, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if addr, err := netip.ParseAddr(source); err == nil {
+		source = addr.Unmap().String()
+	}
+	sourceIP, _ := netip.ParseAddr(source)
+	character := ""
+	if register {
+		character = strings.TrimSpace(str(obj["character"]))
+	} else if chars := r.Header.Values("X-Character"); len(chars) > 0 {
+		character = strings.TrimSpace(chars[0])
+	}
+	if (register || len(r.Header.Values("X-Character")) > 0) && !characterRE.MatchString(character) {
+		return peer{}, problem(400, "Invalid character name")
+	}
+	ip := source
+	if v, ok := obj["ip"]; ok && register {
+		ip = str(v)
+	}
+	ip, err = lanIP(ip, sourceIP.IsLoopback())
+	if err != nil {
+		return peer{}, err
+	}
+	if !register {
+		return b.peers.touch(device, ip, character)
+	}
+	port := int64(80)
+	if v, exists := obj["port"]; exists {
+		var ok bool
+		var n json.Number
+		n, ok = v.(json.Number)
+		if !ok {
+			return peer{}, problem(400, "Invalid peer port")
+		}
+		port, err = n.Int64()
+		if err != nil || port < 1 || port > 65535 {
+			return peer{}, problem(400, "Invalid peer port")
+		}
+	}
+	p := peer{device, character, ip, int(port), time.Now().Unix()}
+	if err := b.peers.register(p); err != nil {
+		return peer{}, err
+	}
+	if b.worker != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(b.root, ttsWait)
+			defer cancel()
+			b.warmCharacter(ctx, character)
+		}()
+	}
+	return p, nil
+}
+
+type answer struct {
+	Reply          string    `json:"reply"`
+	SessionID      string    `json:"session_id"`
+	Screen         object    `json:"screen"`
+	OpenCodeMS     int64     `json:"opencode_ms"`
+	AudioURL       *string   `json:"audio_url"`
+	AudioBytes     int       `json:"audio_bytes"`
+	SampleRate     int       `json:"sample_rate"`
+	AudioStreaming bool      `json:"audio_streaming"`
+	TTSFirstMS     int64     `json:"tts_first_ms"`
+	TTSMS          int64     `json:"tts_ms"`
+	OK             *bool     `json:"ok,omitempty"`
+	SentTo         *[]string `json:"sent_to,omitempty"`
+	DeliveredTo    *[]string `json:"delivered_to,omitempty"`
+	FailedTo       *[]string `json:"failed_to,omitempty"`
+	Error          string    `json:"error,omitempty"`
+}
+
+type voiceAnswer struct {
+	Transcript string `json:"transcript"`
+	HexMS      int64  `json:"hex_ms"`
+	answer
+}
+
+func (b *bridge) attachAudio(ctx context.Context, out *answer, stream *AudioStream, start time.Time) {
+	if stream != nil {
+		if pcm, err := stream.chunk(ctx, 0); err == nil && len(pcm) != 0 {
+			if id, size, ongoing := b.audio.add(stream); id != "" {
+				path := "/api/audio/" + id
+				out.AudioURL, out.AudioBytes, out.AudioStreaming = &path, size, ongoing
+			}
+		}
+	}
+	out.TTSFirstMS = time.Since(start).Milliseconds()
+	out.TTSMS = out.TTSFirstMS
+}
+
+type delivery struct {
+	sent, delivered, failed []string
+	err                     string
+}
+
+func (b *bridge) postPeer(ctx context.Context, who peer, path, kind string, body ...[]byte) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	readers := make([]io.Reader, len(body))
+	var size int64
+	for i, chunk := range body {
+		readers[i] = bytes.NewReader(chunk)
+		size += int64(len(chunk))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+net.JoinHostPort(who.IP, strconv.Itoa(who.Port))+path, io.MultiReader(readers...))
+	if err != nil {
+		return false
+	}
+	req.ContentLength = size
+	req.Header.Set("X-EchoEar-Token", b.token)
+	req.Header.Set("Content-Type", kind)
+	res, err := b.peerHTTP.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 16<<10))
+	return res.StatusCode >= 200 && res.StatusCode < 300
+}
+
+func (b *bridge) deliver(ctx context.Context, sender peer, recipients []peer, text string, raw []byte) delivery {
+	out := delivery{sent: []string{}, delivered: []string{}, failed: []string{}}
+	if len(recipients) == 0 {
+		out.err = "peer_not_found"
+		return out
+	}
+	fail := func(reason string) delivery {
+		out.err = reason
+		for _, p := range recipients {
+			out.failed = append(out.failed, p.DeviceID)
+		}
+		return out
+	}
+	if b.worker == nil || !b.worker.ready.Load() {
+		return fail("audio_unavailable")
+	}
+	text = shortText(text, maxMessage, true)
+	label := "Message from "
+	if raw != nil {
+		label = "From "
+	}
+	intro, err := b.clips.get(ctx, b.worker, label+sender.Character+"!")
+	if err != nil {
+		return fail("audio_unavailable")
+	}
+	var message []byte
+	if raw == nil {
+		clean, err := spokenText(text)
+		if err != nil {
+			return fail("audio_unavailable")
+		}
+		message, err = b.worker.synthesize(ctx, clean)
+		if err != nil {
+			return fail("audio_unavailable")
+		}
+	} else {
+		message = NormalizeVoicePCM(raw)
+	}
+	if len(b.chime)+len(intro)+len(message) > maxPeerPCM {
+		return fail("message_too_long")
+	}
+	display, _ := json.Marshal(messageCard(sender, text))
+	ok := make([]bool, len(recipients))
+	var wg sync.WaitGroup
+	bound := make(chan struct{}, 8)
+	for i, who := range recipients {
+		select {
+		case bound <- struct{}{}:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Go(func() {
+			defer func() { <-bound }()
+			displayOK := make(chan bool, 1)
+			go func() { displayOK <- b.postPeer(ctx, who, "/display", jsonType, display) }()
+			speakOK := b.postPeer(ctx, who, "/speak", pcmType, b.chime, intro, message)
+			ok[i] = <-displayOK && speakOK
+		})
+	}
+	wg.Wait()
+	for i, who := range recipients {
+		if ok[i] {
+			out.sent = append(out.sent, who.DeviceID)
+			out.delivered = append(out.delivered, who.Character)
+		} else {
+			out.failed = append(out.failed, who.DeviceID)
+		}
+	}
+	if len(out.sent) == 0 {
+		out.err = "delivery_failed"
+	}
+	return out
+}
+
+func (b *bridge) relay(ctx context.Context, sender peer, others []peer, target, text string, pcm []byte) (answer, error) {
+	recipients := targets(others, target)
+	d := b.deliver(ctx, sender, recipients, text, pcm)
+	recipient := target
+	if broadcast(target) {
+		recipient = "everyone"
+	} else if len(recipients) > 0 {
+		recipient = recipients[0].Character
+	}
+	ok := len(d.delivered) > 0
+	reply := "Sent to " + recipient + "!"
+	if !ok {
+		reply = "I couldn't reach " + recipient + " right now."
+	} else if len(d.failed) != 0 {
+		reply = "I sent your message, but couldn't reach everyone."
+	}
+	sid, err := b.oc.get(sender.DeviceID)
+	if err != nil {
+		return answer{}, err
+	}
+	out := answer{Reply: reply, SessionID: sid, SampleRate: sampleRate, OK: &ok,
+		SentTo: &d.sent, DeliveredTo: &d.delivered, FailedTo: &d.failed, Error: d.err}
+	start := time.Now()
+	if b.worker != nil && b.worker.ready.Load() {
+		if pcm, err := b.clips.get(ctx, b.worker, reply); err == nil {
+			s := newAudioStream()
+			s.append(pcm)
+			s.finish(nil)
+			b.attachAudio(ctx, &out, s, start)
+		}
+	}
+	out.TTSFirstMS = time.Since(start).Milliseconds()
+	out.TTSMS = out.TTSFirstMS
+	return out, nil
+}
+
+func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte, kind string) (answer, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return answer{}, problem(400, "Expected nonempty text")
+	}
+	others, err := b.peers.snapshot(sender.DeviceID)
+	if err != nil {
+		return answer{}, err
+	}
+	if direct := directMessage(others, text); direct != nil {
+		pcm := body
+		if kind == wavType {
+			pcm, err = wavPCM(body)
+			if err != nil {
+				return answer{}, err
+			}
+		}
+		return b.relay(ctx, sender, others, direct.target, direct.text, pcm)
+	}
+	makeSpeech := func() *speechTurn {
+		deadline, _ := ctx.Deadline()
+		audioCtx, cancel := context.WithDeadline(b.root, deadline)
+		return newSpeechTurn(audioCtx, cancel, b.worker)
+	}
+	var eager *speechTurn
+	onSentence := func(s string) {
+		if b.worker == nil || !b.worker.ready.Load() {
+			return
+		}
+		if eager == nil {
+			eager = makeSpeech()
+		}
+		eager.send(s)
+	}
+	start := time.Now()
+	raw, sid, err := b.oc.ask(ctx, sender.DeviceID, turnPrompt(sender, others, text), onSentence)
+	openMS := time.Since(start).Milliseconds()
+	if err != nil {
+		if eager != nil {
+			eager.discard()
+		}
+		return answer{}, err
+	}
+	reply, screen, message := extractPayloads(raw)
+	ttsStart := time.Now()
+	var stream *AudioStream
+	clean, speechErr := spokenText(fenced.ReplaceAllString(reply, ""))
+	if speechErr == nil && (eager != nil || b.worker != nil && b.worker.ready.Load()) {
+		final := SplitSentences(clean)
+		if eager == nil {
+			eager = makeSpeech()
+		}
+		if !eager.complete(final) {
+			eager.discard()
+			eager = makeSpeech()
+			eager.complete(final)
+		}
+		stream = eager.stream
+	} else if eager != nil {
+		eager.discard()
+	}
+	sent := []string{}
+	out := answer{Reply: reply, SessionID: sid, Screen: screen, OpenCodeMS: openMS, SampleRate: sampleRate, SentTo: &sent}
+	if reply != "" {
+		b.attachAudio(ctx, &out, stream, ttsStart)
+	}
+	if message != nil {
+		d := b.deliver(ctx, sender, targets(others, message.target), message.text, nil)
+		out.SentTo, out.DeliveredTo, out.FailedTo, out.Error = &d.sent, &d.delivered, &d.failed, d.err
+	}
+	return out, nil
+}
+
+func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any, error) {
+	target := strings.TrimSpace(r.Header.Get("X-Target"))
+	if intercom && (target == "" || runeLen(target) > 64) {
+		return nil, problem(400, "Expected X-Target peer name")
+	}
+	wire, kind, err := body(r, true)
+	if err != nil {
+		return nil, err
+	}
+	pcm := wire
+	if intercom && kind == wavType {
+		pcm, err = wavPCM(wire)
+		if err != nil {
+			return nil, err
+		}
+	}
+	sender, err := b.identity(r, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	transcript, err := b.hex.transcribe(ctx, wire, kind)
+	ms := time.Since(start).Milliseconds()
+	if err != nil {
+		return nil, err
+	}
+	out := answer{SampleRate: sampleRate}
+	switch {
+	case intercom:
+		others, err := b.peers.snapshot(sender.DeviceID)
+		if err != nil {
+			return nil, err
+		}
+		out, err = b.relay(ctx, sender, others, target, transcript, pcm)
+		if err != nil {
+			return nil, err
+		}
+	case transcript != "":
+		out, err = b.turn(ctx, sender, transcript, wire, kind)
+	default:
+		out.SessionID, err = b.oc.get(sender.DeviceID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return voiceAnswer{transcript, ms, out}, nil
+}
+
+func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any, error) {
+	ctx := r.Context()
+	switch r.Method {
+	case http.MethodGet:
+		switch {
+		case path == "/health":
+			h := make(chan bool, 1)
+			go func() { h <- b.hex.reachable(ctx, "/health") }()
+			o := b.oc.reachable(ctx, "/api/info")
+			ready := b.worker != nil && b.worker.ready.Load()
+			engine := "unavailable"
+			if ready {
+				engine = "kokoro-onnx"
+			}
+			return object{"ok": true, "hex": <-h, "opencode": o, "tts": ready, "tts_engine": engine}, nil
+		case path == "/api/devices":
+			others, err := b.peers.snapshot("")
+			return object{"devices": publicPeers(others)}, err
+		case strings.HasPrefix(path, "/api/audio/"):
+			return nil, b.audio.ServeAudio(w, r, strings.TrimPrefix(path, "/api/audio/"))
+		case path == "/ota/version.json" || path == "/ota/latest.bin":
+			return b.ota.serve(w, path == "/ota/version.json")
+		}
+	case http.MethodPost:
+		ctx, cancel := context.WithTimeout(ctx, turnTimeout)
+		defer cancel()
+		if path == "/api/voice" || path == "/api/intercom" {
+			return b.voice(ctx, r, path == "/api/intercom")
+		}
+		switch path {
+		case "/api/register", "/api/text", "/api/reset", "/api/tts":
+			obj, err := jsonBody(r)
+			if err != nil {
+				return nil, err
+			}
+			switch path {
+			case "/api/register":
+				sender, err := b.identity(r, obj, true)
+				if err != nil {
+					return nil, err
+				}
+				others, err := b.peers.snapshot(sender.DeviceID)
+				return object{"ok": true, "peers": publicPeers(others)}, err
+			case "/api/text":
+				sender, err := b.identity(r, obj, false)
+				if err != nil {
+					return nil, err
+				}
+				return b.turn(ctx, sender, str(obj["text"]), nil, "")
+			case "/api/reset":
+				device, err := deviceID(r, obj, false)
+				if err != nil {
+					return nil, err
+				}
+				return object{"ok": true}, b.oc.reset(ctx, device)
+			case "/api/tts":
+				text, err := spokenText(str(obj["text"]))
+				if err != nil {
+					return nil, err
+				}
+				if b.worker == nil || !b.worker.ready.Load() {
+					return nil, problem(503, "TTS unavailable")
+				}
+				ctx, cancel := context.WithTimeout(ctx, ttsWait)
+				defer cancel()
+				pcm, err := b.worker.synthesize(ctx, text)
+				if err != nil {
+					return nil, problem(502, "TTS synthesis failed")
+				}
+				sendBytes(w, 200, pcmType, pcm)
+				return nil, nil
+			}
+		}
+	}
+	return nil, problem(404, "Not found")
+}
+
+type otaFile struct {
+	path   string
+	mu     sync.Mutex
+	info   os.FileInfo
+	digest string
+}
+
+func (o *otaFile) sha(f *os.File, info os.FileInfo) (string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.info != nil && info.Size() == o.info.Size() && info.ModTime() == o.info.ModTime() && os.SameFile(info, o.info) {
+		return o.digest, nil
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, info.Size()))
+	if err != nil || n != info.Size() {
+		return "", problem(502, "Cannot read firmware")
+	}
+	o.info, o.digest = info, hex.EncodeToString(h.Sum(nil))
+	return o.digest, nil
+}
+
+func (o *otaFile) serve(w http.ResponseWriter, manifest bool) (any, error) {
+	f, err := os.Open(o.path)
+	if err != nil {
+		if os.IsNotExist(err) && manifest {
+			return object{"exists": false, "size": 0, "sha256": "", "mtime": 0}, nil
+		}
+		return nil, problem(404, "Firmware not found")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, problem(404, "Firmware not found")
+	}
+	digest, err := o.sha(f, info)
+	if err != nil {
+		return nil, err
+	}
+	if manifest {
+		return object{"exists": true, "size": info.Size(), "sha256": digest, "mtime": info.ModTime().Unix()}, nil
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, problem(502, "Cannot read firmware")
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.Header().Set("X-Firmware-Sha256", digest)
+	w.WriteHeader(200)
+	_, _ = io.CopyN(w, f, info.Size())
+	return nil, nil
+}

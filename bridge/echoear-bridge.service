@@ -5,8 +5,12 @@ After=network-online.target hex.service
 
 [Service]
 EnvironmentFile=%E/echoear/bridge.env
-ExecStart=/bin/sh -c 'python=$$1; test -x "$$python" || python=/usr/bin/python3; exec "$$python" "$$2"' -- "@TTS_PYTHON@" "@REPO_DIR@/bridge/server.py"
+Environment="XDG_DATA_HOME=@DATA_HOME@"
+Environment="ECHOEAR_TTS_PYTHON=@TTS_PYTHON@"
+Environment="ECHOEAR_TTS_WORKER=@REPO_DIR@/bridge/tts_worker.py"
+ExecStart="@BRIDGE_BIN@"
 Restart=on-failure
+KillMode=mixed
 UMask=0077
 NoNewPrivileges=true
 
