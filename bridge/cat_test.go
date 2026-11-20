@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,7 +49,8 @@ func TestCatMigration(t *testing.T) {
 	b := &bridge{db: db, peers: peers{deviceStore(db)}, virtual: virtualStore(db), voices: deviceVoiceStore(db, heartVoice)}
 	for _, c := range cats {
 		got, err := b.catTool(t.Context(), object{"op": "get", "device_id": c.id})
-		want := catState{catLook: catLook{Name: c.name, Configured: true, FaceBG: c.bg, MarkColor: c.mark, AccentColor: c.accent}, Voice: c.voice, Extras: []object{}}
+		want := catState{catLook: catLook{Name: c.name, Configured: true, FaceBG: c.bg, MarkColor: c.mark, AccentColor: c.accent}, Voice: c.voice}
+		want.FaceSVG = want.defaultFace()
 		active := want
 		if c.slug == "greg" {
 			active.Voice = fableVoice
@@ -63,6 +64,11 @@ func TestCatMigration(t *testing.T) {
 		}
 		if sid, ok, err := sessionStore(db).get(c.id); err != nil || !ok || sid != "ses_"+c.slug {
 			t.Fatalf("session changed for %s: %s: %v", c.name, sid, err)
+		}
+		var auto bool
+		var level int
+		if err := db.QueryRow("SELECT auto_volume,manual_volume FROM device_prefs WHERE device_id=?", c.id).Scan(&auto, &level); err != nil || !auto || level != 55 {
+			t.Fatalf("missing auto-volume defaults for %s: %t %d (%v)", c.name, auto, level, err)
 		}
 	}
 	if _, err := db.Exec("UPDATE cats SET name='Edited' WHERE device_id=?", cats[0].id); err != nil {
@@ -80,6 +86,56 @@ func TestCatMigration(t *testing.T) {
 	err := db.QueryRow("SELECT name,(SELECT count(*) FROM saved_cats) FROM cats WHERE device_id=?", cats[0].id).Scan(&name, &count)
 	if err != nil || name != "Edited" || count != 2 {
 		t.Fatalf("migration re-ran: %q %d %v", name, count, err)
+	}
+}
+
+func TestFaceSVGMigratesOldCakeAndKeepsEdits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "echoear.db")
+	legacy, err := sql.Open("turso", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	for _, q := range schema {
+		if _, err := legacy.Exec(strings.Replace(q, ", face_svg TEXT NOT NULL DEFAULT ''", "", 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := (&bridgeDB{DB: legacy}).addV2Columns(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	const stuck = `<svg><path d="M95 142H129 M231 142H265"/></svg>`
+	for _, q := range []string{
+		`INSERT INTO cats (device_id,name,configured,face_bg,mark_color,accent_color,updated_at,svg_extras,extras_json)
+		 VALUES ('echoear-33d8','Cake',1,'#FFF3D1','#F59E0B','#FACC15',1,?,'[{}]')`,
+		`INSERT INTO saved_cats (slug,name,face_bg,mark_color,accent_color,updated_at,svg_extras,extras_json)
+		 VALUES ('cake','Cake','#FFF3D1','#F59E0B','#FACC15',1,?,'[{}]')`,
+	} {
+		if _, err := legacy.Exec(q, stuck); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := testDB(t, path, "")
+	for _, table := range []string{"cats", "saved_cats"} {
+		var face, overlay, extras string
+		err := db.QueryRow("SELECT face_svg,svg_extras,extras_json FROM "+table).Scan(&face, &overlay, &extras)
+		if err != nil || face != legacyCat("Cake", "cake").FaceSVG || overlay != "" || extras != "[]" {
+			t.Fatalf("%s: face=%t legacy overlay=%q extras=%q err=%v", table, face != "", overlay, extras, err)
+		}
+	}
+	const custom = `<svg><circle r="20"/></svg>`
+	if _, err := db.Exec("UPDATE cats SET face_svg=?", custom); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrateFaceSVG(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var face string
+	if err := db.QueryRow("SELECT face_svg FROM cats").Scan(&face); err != nil || face != custom {
+		t.Fatalf("migration overwrote an edited face: %q (%v)", face, err)
 	}
 }
 
@@ -116,7 +172,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	}
 	blank := call(false, "get", object{})["cat"].(object)
 	if blank["name"] != "New Cat" || blank["face_bg"] != "#F3F4F6" || blank["mark_color"] != "#CBD5E1" ||
-		blank["accent_color"] != "#60A5FA" || blank["voice"] != heartVoice || len(blank["extras"].([]any)) != 0 {
+		blank["accent_color"] != "#60A5FA" || blank["voice"] != heartVoice || blank["face_svg"] != blankCat().FaceSVG {
 		t.Fatal("invalid blank starter", blank)
 	}
 	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat(), turnContext{}); got != "[New Cat ("+id+") · web · voice · setup]\nHi" {
@@ -136,24 +192,23 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	for _, fields := range []object{
 		{"face_bg": "navy"}, {"voice": "unknown"}, {"name": strings.Repeat("x", 41)},
 		{"personality": strings.Repeat("x", 161)}, {"configured": "false"},
-		{"extras": make([]object, maxCatExtras+1)}, {"extras": []object{{"t": "btn"}}},
-		{"extras": []object{{"t": "text", "x": 30, "c": "#123456"}}},
+		{"face_svg": "<svg><g></svg>"},
+		{"face_svg": `<svg viewBox="0 0 10 10"/>`},
 	} {
 		call(true, "update", fields)
 	}
+	toolTest(t, base, "act", object{"to": id, "cat": object{"op": "update", "face_svg": strings.Repeat(" ", 16<<10+1)}}, true)
 	if got := call(false, "get", object{})["cat"]; !reflect.DeepEqual(got, blank) {
 		t.Fatal("invalid update changed the stored starter", got)
 	}
-	extras := []object{
-		{"id": "eye-l", "t": "text", "x": -50, "y": 500, "s": "Space 🚀\ncat", "c": "#abcdef", "on": "tap", "tap": "Don't"},
-		{"t": "tri", "x1": 140, "y1": 70, "x2": 220, "y2": 70, "x3": 180, "y3": 42, "c": "#c0ffee"},
-	}
+	face := `<svg><rect width="360" height="360" fill="#172344"/><polygon points="140,70 220,70 180,42" fill="#C0FFEE" onclick="nope()"/>
+		<script>nope()</script><foreignObject/><g data-pose="idle"><circle cx="112" cy="142" r="16" fill="#1A1926" data-id="text"/></g></svg>`
 	cosmo := call(false, "update", object{"name": "Cosmo", "face_bg": "#172344", "mark_color": "#abcdef",
-		"accent_color": "#aefc36", "personality": "curious space explorer", "voice": fableVoice, "extras": extras})["cat"].(object)
-	firstExtra := cosmo["extras"].([]any)[0].(object)
+		"accent_color": "#aefc36", "personality": "curious space explorer", "voice": fableVoice, "face_svg": face})["cat"].(object)
+	clean := str(cosmo["face_svg"])
 	if cosmo["configured"] != true || cosmo["mark_color"] != "#ABCDEF" || cosmo["voice"] != fableVoice ||
-		firstExtra["id"] != "extra-0" || firstExtra["x"] != json.Number("0") || firstExtra["y"] != json.Number("359") ||
-		firstExtra["s"] != "Space cat" || firstExtra["on"] != nil || firstExtra["tap"] != nil {
+		strings.Contains(clean, "nope") || strings.Contains(clean, "foreignObject") || strings.Contains(clean, "data-id") ||
+		!strings.Contains(clean, `data-pose="idle"`) {
 		t.Fatal("unexpected configured cat", cosmo)
 	}
 	expectValue(t, title, "EchoEar: Cosmo ("+id+")")
@@ -176,7 +231,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored, turnContext{}); got != "[Cosmo ("+id+") · web · voice · vibe: curious space explorer]\nHi" {
 		t.Fatal(got)
 	}
-	if c := call(false, "reset_blank", object{})["cat"].(object); c["configured"] != false || c["personality"] != "" || len(c["extras"].([]any)) != 0 {
+	if c := call(false, "reset_blank", object{})["cat"].(object); c["configured"] != false || c["personality"] != "" || c["face_svg"] != blankCat().FaceSVG {
 		t.Fatal("reset_blank left configured state", c)
 	}
 	expectValue(t, title, "EchoEar: New Cat ("+id+")")
@@ -236,31 +291,99 @@ func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	}
 }
 
-func TestCatExtrasStayOnAllPosesWithinFirmwareBudget(t *testing.T) {
-	hat := object{"t": "rect", "x": 135, "y": 35, "w": 90, "h": 20, "c": "#AA7744", "fill": true}
-	extras, err := sanitizeCatExtras(slices.Repeat([]any{hat}, maxCatExtras))
+func TestFaceSVGPoseFilterAndChrome(t *testing.T) {
+	cat := legacyCat("Cake", "cake")
+	cat.FaceSVG = `<svg>
+		<rect width="360" height="360" fill="#AAAAAA" data-id="fake" data-hit="0,0,360,360"/>
+		<g><circle data-pose="idle" r="15" fill="#111111"/><circle data-pose="blink" r="15" fill="#222222"/></g>
+		<g data-pose="talk"><circle r="15" fill="#333333"/></g>
+		<g data-pose="sleep"><circle r="15" fill="#444444"/></g>
+	</svg>`
+	marks := []string{"#111111", "#222222", "#333333", "#444444"}
+	for _, tc := range []struct {
+		pose catPose
+		mark int
+	}{
+		{catPose{mood: "idle"}, 0},
+		{catPose{mood: "idle", blink: true}, 1},
+		{catPose{mood: "speaking"}, 2},
+		{catPose{mood: "sleepy"}, 3},
+		{catPose{mood: "thinking"}, 0},
+		{catPose{mood: "listening"}, 0},
+	} {
+		svg := catSVG(cat, tc.pose)
+		for i, mark := range marks {
+			if strings.Contains(svg, mark) != (i == tc.mark) {
+				t.Fatalf("%+v selected the wrong pose: %s", tc.pose, svg)
+			}
+		}
+		if !strings.Contains(svg, "#AAAAAA") || strings.Contains(svg, `data-id="fake"`) {
+			t.Fatal("shared art lost or gained a hit target", svg)
+		}
+		if tc.pose.mood == "listening" && !strings.Contains(svg, "#FF5964") {
+			t.Fatal("listening halo missing")
+		}
+	}
+	screen, err := buildScreen(catSVG(cat, catPose{mood: "idle"}), false, roundScreen)
+	if err != nil || hitID(screen.hits, 180, 300) != "text" {
+		t.Fatalf("art blocked Text: %v, %v", screen.hits, err)
+	}
+}
+
+func TestFaceSVGPaletteChanges(t *testing.T) {
+	blank := blankCat()
+	designed, _, err := updateCat(blank, object{"face_bg": "#123456"}, deviceVoices{})
+	if err != nil || designed.FaceSVG != designed.defaultFace() || !designed.Configured ||
+		!strings.Contains(designed.FaceSVG, "#123456") || strings.Contains(designed.FaceSVG, blank.FaceBG) {
+		t.Fatal("palette did not regenerate the blank/default face", err)
+	}
+	face := `<svg><rect width="360" height="360" fill="#123456"/><circle r="25" fill="#CBD5E1"/>
+		<g data-pose="idle"><circle cx="95" cy="110" r="15" fill="#AA00FF"/></g></svg>`
+	custom, _, err := updateCat(designed, object{"face_svg": face}, deviceVoices{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, pose := range []catPose{
-		{mood: "idle", battery: 100, charge: true},
-		{mood: "idle", blink: true},
-		{mood: "listening"},
-		{mood: "thinking", dot: 2},
-		{mood: "speaking", mouth: true, meter: true, battery: 20, charge: true},
-		{mood: "sleepy"},
-	} {
-		cat := legacyCat("Test", "cake")
-		cat.Extras = extras
-		s := catScene(cat, pose)
-		if len(s.nodes) > maxNodes {
-			t.Fatal("scene exceeds firmware budget", pose)
-		}
-		for i := range extras {
-			if nodeIn(s, fmt.Sprintf("extra-%d", i)) == nil {
-				t.Fatal("pose removed an extra", pose, i)
-			}
-		}
+	recolored, _, err := updateCat(custom, object{"face_bg": "#223344", "mark_color": "#ABCDEF"}, deviceVoices{})
+	if err != nil || !strings.Contains(recolored.FaceSVG, "#223344") || !strings.Contains(recolored.FaceSVG, "#ABCDEF") ||
+		!strings.Contains(recolored.FaceSVG, "#AA00FF") || strings.Contains(recolored.FaceSVG, "#123456") {
+		t.Fatal("palette edit lost its custom eye or failed to recolor", err)
+	}
+}
+
+func TestCakeFaceSVGEditAndSleep(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-33d8"
+	dev := testConnectWS(t, base, "unit", false)
+	dev.json(t, object{"ev": "hello", "role": "device", "device_id": id, "character": "Cake", "proto": 2})
+	dev.until(t, hasWS("volume", `"level":55`))
+	me := func() object { return toolTest(t, base, "inspect", object{"device_id": id}, false)["me"].(object) }
+	before := me()
+	old := `<rect x="95" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
+    <rect x="231" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
+    <circle cx="107" cy="134" r="5" fill="#FFFAEE"/>
+    <circle cx="243" cy="134" r="5" fill="#FFFAEE"/>`
+	face := str(before["face_svg"])
+	edit := strings.Replace(face, old, `<circle cx="112" cy="142" r="17" fill="#123ABC"/><circle cx="248" cy="142" r="17" fill="#123ABC"/>`, 1)
+	if face == edit || before["auto_volume"] != true || before["sleeping"] != false || before["configured"] != true {
+		t.Fatal("inspect didn't return the editable starter face and device state")
+	}
+	update := object{"op": "update", "face_svg": edit}
+	result := toolTest(t, base, "act", object{"to": id, "sleep": true, "cat": update}, false)
+	if result["sleeping"] != true {
+		t.Fatal("combined act did not set sleep", result)
+	}
+	dev.until(t, hasWS("power", `"brightness":12`))
+	toolTest(t, base, "act", object{"to": id, "cat": update}, false)
+	after := me()
+	if after["sleeping"] != true || after["mode"] != "sleepy" || after["face_svg"] == face {
+		t.Fatal("appearance edit woke the cat or failed to save")
+	}
+	cat := legacyCat("Cake", "cake")
+	cat.FaceSVG = str(after["face_svg"])
+	awake := catSVG(cat, catPose{mood: "idle"})
+	if strings.Count(awake, "#123ABC") != 2 || strings.Contains(awake, `x="95" y="123"`) ||
+		strings.Contains(awake, "M95 142H129") || strings.Contains(awake, `<circle cx="107"`) {
+		t.Fatal("original awake eyes still render under the edit", awake)
 	}
 }
 

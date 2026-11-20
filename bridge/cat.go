@@ -3,19 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
 )
-
-const maxCatExtras = 16
 
 type catLook struct {
 	Name        string `json:"name"`
@@ -28,9 +24,8 @@ type catLook struct {
 
 type catState struct {
 	catLook
-	Voice     string   `json:"voice"`
-	Extras    []object `json:"extras"`
-	SVGExtras string   `json:"svg_extras"`
+	Voice   string `json:"voice"`
+	FaceSVG string `json:"face_svg"`
 }
 
 type savedCat struct {
@@ -40,7 +35,13 @@ type savedCat struct {
 }
 
 func blankCat() catState {
-	return catState{catLook: catLook{Name: "New Cat", FaceBG: "#F3F4F6", MarkColor: "#CBD5E1", AccentColor: "#60A5FA"}, Extras: []object{}}
+	c := catState{catLook: catLook{Name: "New Cat", FaceBG: "#F3F4F6", MarkColor: "#CBD5E1", AccentColor: "#60A5FA"}}
+	c.FaceSVG = c.defaultFace()
+	return c
+}
+
+func (c catState) defaultFace() string {
+	return defaultFaceSVG(c.FaceBG, c.MarkColor, c.AccentColor, c.Configured)
 }
 
 // Only legacy identities and old API callers use these initial colors. The
@@ -57,6 +58,7 @@ func legacyCat(name, theme string) catState {
 	c.Name, c.Configured = name, true
 	p := legacyCatColors[deviceTheme(theme)]
 	c.FaceBG, c.MarkColor, c.AccentColor = p[0], p[1], p[2]
+	c.FaceSVG = c.defaultFace()
 	return c
 }
 
@@ -69,53 +71,37 @@ func catSlug(name string) string {
 	return strings.Trim(catSlugSpace.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-const activeCatColumns = `name,configured,face_bg,mark_color,accent_color,personality,extras_json,svg_extras,updated_at`
-const savedCatColumns = `slug,name,face_bg,mark_color,accent_color,personality,voice,extras_json,svg_extras,updated_at`
+const activeCatColumns = `name,configured,face_bg,mark_color,accent_color,personality,face_svg`
+const savedCatColumns = `slug,name,face_bg,mark_color,accent_color,personality,voice,face_svg,updated_at`
 const catVoiceSQL = `COALESCE((SELECT voice FROM voices WHERE device_id=?),(SELECT voice FROM virtual_clients WHERE id=?),'')`
 
 func readCat(row rowScanner) (catState, error) {
-	c := blankCat()
+	var c catState
 	var configured int
-	var raw string
-	err := row.Scan(&c.Name, &configured, &c.FaceBG, &c.MarkColor, &c.AccentColor, &c.Personality, &raw, &c.SVGExtras, &c.Voice)
+	err := row.Scan(&c.Name, &configured, &c.FaceBG, &c.MarkColor, &c.AccentColor, &c.Personality, &c.FaceSVG, &c.Voice)
 	c.Configured = configured != 0
-	if err == nil {
-		c.Extras, err = readExtras(raw)
+	if err == nil && c.FaceSVG == "" {
+		c.FaceSVG = c.defaultFace()
 	}
 	return c, err
 }
 
 func readSavedCat(row rowScanner) (savedCat, error) {
-	p := savedCat{catState: blankCat()}
+	var p savedCat
 	p.Configured = true
-	var raw string
-	err := row.Scan(&p.Slug, &p.Name, &p.FaceBG, &p.MarkColor, &p.AccentColor, &p.Personality, &p.Voice, &raw, &p.SVGExtras, &p.UpdatedAt)
-	if err == nil {
-		p.Extras, err = readExtras(raw)
+	err := row.Scan(&p.Slug, &p.Name, &p.FaceBG, &p.MarkColor, &p.AccentColor, &p.Personality, &p.Voice, &p.FaceSVG, &p.UpdatedAt)
+	if err == nil && p.FaceSVG == "" {
+		p.FaceSVG = p.defaultFace()
 	}
 	return p, err
 }
 
-func readExtras(raw string) ([]object, error) {
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.UseNumber()
-	var extras []any
-	if err := dec.Decode(&extras); err != nil {
-		return nil, err
-	}
-	return sanitizeCatExtras(extras)
-}
-
 func writeCat(ctx context.Context, tx *sql.Tx, id string, c catState) error {
-	raw, err := json.Marshal(c.Extras)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO cats (device_id,`+activeCatColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?)
+	_, err := tx.ExecContext(ctx, `INSERT INTO cats (device_id,`+activeCatColumns+`,updated_at) VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(device_id) DO UPDATE SET name=excluded.name,configured=excluded.configured,face_bg=excluded.face_bg,
 		mark_color=excluded.mark_color,accent_color=excluded.accent_color,personality=excluded.personality,
-		extras_json=excluded.extras_json,svg_extras=excluded.svg_extras,updated_at=excluded.updated_at`,
-		id, c.Name, c.Configured, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, string(raw), c.SVGExtras, time.Now().UnixMilli())
+		face_svg=excluded.face_svg,updated_at=excluded.updated_at`,
+		id, c.Name, c.Configured, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, c.FaceSVG, time.Now().UnixMilli())
 	return err
 }
 
@@ -124,18 +110,14 @@ func saveCatProfile(ctx context.Context, tx *sql.Tx, c catState, replace bool) e
 	if slug == "" {
 		return nil
 	}
-	raw, err := json.Marshal(c.Extras)
-	if err != nil {
-		return err
-	}
 	conflict := `ON CONFLICT(slug) DO NOTHING`
 	if replace {
 		conflict = `ON CONFLICT(slug) DO UPDATE SET name=excluded.name,face_bg=excluded.face_bg,mark_color=excluded.mark_color,
 			accent_color=excluded.accent_color,personality=excluded.personality,voice=excluded.voice,
-			extras_json=excluded.extras_json,svg_extras=excluded.svg_extras,updated_at=excluded.updated_at`
+			face_svg=excluded.face_svg,updated_at=excluded.updated_at`
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO saved_cats (`+savedCatColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?) `+conflict,
-		slug, c.Name, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, c.Voice, string(raw), c.SVGExtras, time.Now().UnixMilli())
+	_, err := tx.ExecContext(ctx, `INSERT INTO saved_cats (`+savedCatColumns+`) VALUES (?,?,?,?,?,?,?,?,?) `+conflict,
+		slug, c.Name, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, c.Voice, c.FaceSVG, time.Now().UnixMilli())
 	return err
 }
 
@@ -205,7 +187,7 @@ type catQuery interface {
 
 func (b *bridge) readActiveCat(ctx context.Context, q catQuery, who peer) (catState, error) {
 	id := strings.ToLower(who.DeviceID)
-	c, err := readCat(q.QueryRowContext(ctx, `SELECT name,configured,face_bg,mark_color,accent_color,personality,extras_json,svg_extras,`+
+	c, err := readCat(q.QueryRowContext(ctx, `SELECT `+activeCatColumns+`,`+
 		catVoiceSQL+` FROM cats WHERE device_id=?`, id, id, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		c = blankCat()
@@ -226,52 +208,8 @@ func (b *bridge) catFor(who peer) catState {
 	return blankCat()
 }
 
-func sanitizeCatExtras(raw any) ([]object, error) {
-	values, ok := raw.([]any)
-	if !ok || len(values) > maxCatExtras {
-		return nil, problem(400, "Expected an array of at most 16 cat extras")
-	}
-	out := make([]object, 0, len(values))
-	for i, v := range values {
-		n, ok := v.(object)
-		kind := str(n["t"])
-		fields, shape := shapeFields[kind]
-		if !ok || !shape || kind == "btn" {
-			return nil, problem(400, "Cat extras must be rect, circle, line, arc, tri, or text")
-		}
-		for _, key := range fields[0] {
-			if n[key] == nil {
-				return nil, problem(400, "Missing cat extra field "+key)
-			}
-		}
-		if n["c"] == nil {
-			return nil, problem(400, "Missing cat extra color")
-		}
-		id := "extra-" + strconv.Itoa(i)
-		raw := object{"id": id, "t": kind}
-		for _, key := range append(append([]string{"c", "bc", "sw", "fill", "fs", "s"}, fields[0]...), fields[1]...) {
-			if val, ok := n[key]; ok {
-				raw[key] = val
-			}
-		}
-		node, err := visualNode(raw, false)
-		if err != nil {
-			return nil, err
-		}
-		if kind == "text" {
-			node["s"] = strings.Map(func(r rune) rune {
-				if r < 32 || r > 126 {
-					return -1
-				}
-				return r
-			}, str(node["s"]))
-		}
-		out = append(out, node)
-	}
-	return out, nil
-}
-
 func updateCat(c catState, args object, voices deviceVoices) (catState, bool, error) {
+	before := c
 	save, err := catBool(args, "save_profile", false)
 	if err != nil {
 		return c, false, err
@@ -310,37 +248,28 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 				return c, false, problem(400, "Unsupported voice")
 			}
 			c.Voice = str(val)
-		case "extras":
-			extras, err := sanitizeCatExtras(val)
-			if err != nil {
-				return c, false, err
-			}
-			c.Extras, editLook = extras, true
-		case "svg_extras":
-			raw, ok := val.(string)
-			if !ok || len(raw) > 16<<10 {
-				return c, false, problem(400, "Expected svg_extras string up to 16 KB")
-			}
-			if raw != "" {
-				if !strings.HasPrefix(strings.TrimSpace(raw), "<svg") {
-					raw = svgStart + raw + "</svg>"
-				}
-				svg, err := parseSVG(raw)
-				if err != nil {
-					return c, false, problem(400, err.Error())
-				}
-				raw = svgString(svg)
-				if _, _, err := renderSVG(raw); err != nil {
-					return c, false, problem(400, err.Error())
-				}
-			}
-			c.SVGExtras, editLook = raw, true
+		case "face_svg":
+			editLook = true
 		case "configured", "save_profile", "device_id", "op":
 		default:
 			return c, false, problem(400, "Unknown cat field "+key)
 		}
 	}
 	c.Configured, err = catBool(args, "configured", c.Configured || editLook)
+	if err != nil {
+		return c, false, err
+	}
+	oldPalette := [...]string{before.FaceBG, before.MarkColor, before.AccentColor}
+	newPalette := [...]string{c.FaceBG, c.MarkColor, c.AccentColor}
+	if raw, set := args["face_svg"]; set {
+		c.FaceSVG, err = sanitizeFaceSVG(str(raw))
+	} else if oldPalette != newPalette || c.Configured != before.Configured {
+		if c.FaceSVG == "" || c.FaceSVG == before.defaultFace() {
+			c.FaceSVG = c.defaultFace()
+		} else if oldPalette != newPalette {
+			c.FaceSVG, err = recolorFaceSVG(c.FaceSVG, oldPalette, newPalette)
+		}
+	}
 	return c, save, err
 }
 

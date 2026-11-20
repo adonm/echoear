@@ -204,6 +204,9 @@ func (b *bridge) deviceList() ([]object, error) {
 			b.ws.mu.Lock()
 			b.ws.deviceStatus(entry, id)
 			b.ws.mu.Unlock()
+		} else {
+			entry["auto_volume"], entry["volume"] = b.volumePrefs(id)
+			entry["sleeping"] = false
 		}
 		if entry["kind"] == "virtual" {
 			entry["online"] = entry["ws_connected"] == true

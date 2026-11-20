@@ -667,6 +667,7 @@ function select(d, quick = false) {
   // A fresh socket keeps unlabelled scene/patch frames from crossing selections.
   disconnect();
   view = {id, device:d, virtual:d?.kind === "virtual", quick, entries:new Map()};
+  setVolume(d?.volume ?? 55);
   $("text").value = "";
   $("target").value = "";
   say("chat-note", "");
@@ -699,6 +700,7 @@ function renderCurrent() {
   say("chat-mode", !d ? "" : view.virtual ? active ? (modeLabel[view.mode] || "Idle") : "Connecting" :
     isLive(d) ? mode || "Live WS" : d.online ? "HTTP" : "Offline");
   $("screen-controls").hidden = !ready;
+  renderVolume();
   renderVoice(d, view?.voicePending);
   $("phone-controls").hidden = !view?.virtual;
   const micAvailable = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
@@ -778,7 +780,7 @@ function connect(attempt = 0) {
     if (ws !== socket) return;
     loadTimers();
     loadSavedCats();
-    send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",volume}
+    send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web"}
       : {ev:"hello",role:"web"});
   };
   socket.onmessage = e => {
@@ -916,7 +918,7 @@ function command(msg) {
       }
       break;
     case "volume":
-      setVolume(msg.level);
+      if (!msg.device_id || msg.device_id === view.id) applyVolume(app, view, msg.level, msg.auto_volume);
       break;
     case "chime":
       if (view.virtual) chime(msg.kind);
@@ -1167,13 +1169,50 @@ screen.addEventListener("keydown", e => {
   send({ev:"tap",id:g.dataset.id,x:180,y:180});
 });
 $("volume").oninput = e => { $("volume-value").value = e.target.value + "%"; };
-$("volume").onchange = e => {
-  const level = +e.target.value, old = volume;
-  setVolume(level);
-  send({ev:"head",action:level < old ? "vol_down" : "vol_up",volume:level});
+$("volume").onchange = e => saveVolume({auto:false, volume:+e.target.value});
+$("volume-auto").onclick = () => {
+  if (view?.device?.auto_volume === false) saveVolume({auto:true});
 };
 
-let audio, gain, playAt = 0, volume = 80, endedAudio = null, muted = false;
+function renderVolume() {
+  $("volume-auto").setAttribute("aria-pressed", String(view?.device?.auto_volume !== false));
+  $("volume-auto").disabled = $("volume").disabled = !!view?.volumePending;
+}
+
+function applyVolume(current, cat, level, auto_volume) {
+  if (!cat?.device || !Number.isFinite(level)) return;
+  const fields = {volume:level, ...(typeof auto_volume === "boolean" && {auto_volume})};
+  Object.assign(cat.device, fields);
+  current.deviceVersion++;
+  const device = current.devices.find(d => d.device_id === cat.id);
+  if (device) Object.assign(device, fields);
+  if (view === cat) {
+    setVolume(level);
+    renderVolume();
+  }
+  if (app === current) renderDevices();
+}
+
+async function saveVolume(body) {
+  const cat = view, current = app;
+  if (!cat?.id || cat.volumePending) return;
+  cat.volumePending = true;
+  renderVolume();
+  try {
+    const result = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/volume`, {method:"POST", body});
+    applyVolume(current, cat, result.volume, result.auto_volume);
+  } catch {
+    if (view === cat) {
+      setVolume(volume);
+      say("chat-note", "Could not save volume.");
+    }
+  } finally {
+    cat.volumePending = false;
+    if (view === cat) renderVolume();
+  }
+}
+
+let audio, gain, playAt = 0, volume = 55, endedAudio = null, muted = false;
 const speaking = new Set();
 function speakerUI() {
   say("sound", audio?.state !== "running" ? "Enable speaker" : muted ? "Unmute speaker" : "Mute speaker");
@@ -1299,7 +1338,7 @@ async function startMic(target) {
   recordUI(true);
   try {
     if (!await audioReady() || !view?.virtual || mic !== rec || ws?.readyState !== WebSocket.OPEN) throw new Error();
-    rec.stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+    rec.stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:false,autoGainControl:false}});
     if (mic !== rec) { rec.stream.getTracks().forEach(t=>t.stop()); return; }
     workletLoaded ||= audio.audioWorklet.addModule("/app/mic.js").catch(err => { workletLoaded = null; throw err; });
     await workletLoaded;

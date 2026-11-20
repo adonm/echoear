@@ -78,6 +78,7 @@ func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 		h.render(d, now, false)
 		return
 	}
+	d.measureAmbient(pcm)
 	if target == "" && h.hasWaiter(d) {
 		h.render(d, now, false)
 		go func() {
@@ -399,6 +400,7 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 				return false
 			}
 			d.ttsStarted = true
+			h.applyAmbientVolume(d)
 			h.mu.Unlock()
 			if !control("start") {
 				return false
@@ -444,6 +446,30 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 	d.audioUntil, d.awaitAck = until, true
 	h.mu.Unlock()
 	return control("end")
+}
+
+func (d *wsDevice) measureAmbient(pcm []byte) {
+	if !d.autoVol {
+		return
+	}
+	if rms, ok := ambientRMS(pcm); ok {
+		if d.hasAmbient {
+			d.ambientEMA += 0.45 * (rms - d.ambientEMA)
+		} else {
+			d.ambientEMA, d.hasAmbient = rms, true
+		}
+	}
+}
+
+func (h *wsHub) applyAmbientVolume(d *wsDevice) {
+	if !d.autoVol || !d.hasAmbient {
+		return
+	}
+	level := ambientVolume(d.ambientEMA)
+	if delta := level - d.vol; delta >= 3 || delta <= -3 {
+		d.vol = level
+		h.push(d, d.volumeFrame(false), true)
+	}
 }
 
 func (h *wsHub) stopPlayback(d *wsDevice, notify bool) {

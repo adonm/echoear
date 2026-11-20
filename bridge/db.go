@@ -22,8 +22,9 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS sessions (device_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS virtual_clients (id TEXT PRIMARY KEY, character TEXT NOT NULL, theme TEXT NOT NULL, voice TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS voices (device_id TEXT PRIMARY KEY, voice TEXT NOT NULL)`,
-	`CREATE TABLE IF NOT EXISTS cats (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, configured INTEGER NOT NULL DEFAULT 0, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL)`,
-	`CREATE TABLE IF NOT EXISTS saved_cats (slug TEXT PRIMARY KEY, name TEXT NOT NULL, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', voice TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS device_prefs (device_id TEXT PRIMARY KEY, auto_volume INTEGER NOT NULL DEFAULT 1, manual_volume INTEGER NOT NULL DEFAULT 55)`,
+	`CREATE TABLE IF NOT EXISTS cats (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, configured INTEGER NOT NULL DEFAULT 0, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, face_svg TEXT NOT NULL DEFAULT '')`,
+	`CREATE TABLE IF NOT EXISTS saved_cats (slug TEXT PRIMARY KEY, name TEXT NOT NULL, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', voice TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, face_svg TEXT NOT NULL DEFAULT '')`,
 	`CREATE TABLE IF NOT EXISTS tunnels (device_id TEXT PRIMARY KEY, route_name TEXT NOT NULL, url TEXT NOT NULL, local_port INTEGER NOT NULL, scoped_token TEXT NOT NULL, profile TEXT NOT NULL, created_at TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS chat_events (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, role TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, scene_title TEXT NOT NULL DEFAULT '', tool_summary TEXT NOT NULL DEFAULT '', ts_ms INTEGER NOT NULL)`,
 	`CREATE INDEX IF NOT EXISTS chat_device_ts ON chat_events (device_id, ts_ms)`,
@@ -96,11 +97,19 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoic
 	if err := d.addV2Columns(ctx); err != nil {
 		return nil, fmt.Errorf("migrate EchoEar v2 columns: %w", err)
 	}
+	if err := d.migrateFaceSVG(ctx); err != nil {
+		return nil, fmt.Errorf("migrate EchoEar face SVG: %w", err)
+	}
 	if err := d.migrateLocalMessages(ctx); err != nil {
 		return nil, fmt.Errorf("backfill EchoEar chat events: %w", err)
 	}
 	if err := d.migrateCats(ctx, deviceVoiceStore(d, fallbackVoice)); err != nil {
 		return nil, fmt.Errorf("migrate EchoEar cats: %w", err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO device_prefs (device_id)
+		SELECT lower(device_id) FROM cats UNION SELECT lower(device_id) FROM devices UNION SELECT lower(id) FROM virtual_clients WHERE true
+		ON CONFLICT DO NOTHING`); err != nil {
+		return nil, fmt.Errorf("seed EchoEar device preferences: %w", err)
 	}
 	return d, nil
 }
@@ -127,6 +136,99 @@ func (d *bridgeDB) addV2Columns(ctx context.Context) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (d *bridgeDB) migrateFaceSVG(ctx context.Context) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, table := range []struct{ name, key, configured string }{
+		{"cats", "device_id", "configured"}, {"saved_cats", "slug", "1"},
+	} {
+		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table.name+`)`)
+		if err != nil {
+			return err
+		}
+		found := false
+		for rows.Next() {
+			var name string
+			var cid, kind, notNull, defaultVal, pk any
+			if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultVal, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			found = found || name == "face_svg"
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		if !found {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table.name+` ADD COLUMN face_svg TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		rows, err = tx.QueryContext(ctx, `SELECT `+table.key+`,face_bg,mark_color,accent_color,`+table.configured+
+			` FROM `+table.name+` WHERE face_svg=''`)
+		if err != nil {
+			return err
+		}
+		type seed struct{ key, svg string }
+		var seeds []seed
+		for rows.Next() {
+			var key, bg, mark, accent string
+			var configured int
+			if err := rows.Scan(&key, &bg, &mark, &accent, &configured); err != nil {
+				rows.Close()
+				return err
+			}
+			seeds = append(seeds, seed{key, defaultFaceSVG(bg, mark, accent, configured != 0)})
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		for _, s := range seeds {
+			if _, err := tx.ExecContext(ctx, `UPDATE `+table.name+` SET face_svg=? WHERE `+table.key+`=?`, s.svg, s.key); err != nil {
+				return err
+			}
+		}
+		// Overlays could mask the editable eyes (Cake's closed-eye overlay did).
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table.name+` SET svg_extras='', extras_json='[]'
+			WHERE (svg_extras<>'' OR extras_json<>'[]') AND NOT EXISTS (SELECT 1 FROM meta WHERE key='migrated_face_svg_v1')`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES ('migrated_face_svg_v1','1') ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+const initialAutoVolume = 55
+
+func (b *bridge) volumePrefs(id string) (auto bool, level int) {
+	auto, level = true, initialAutoVolume
+	if b.db != nil {
+		err := b.db.QueryRow(`SELECT auto_volume,manual_volume FROM device_prefs WHERE device_id=?`, strings.ToLower(id)).Scan(&auto, &level)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Print("EchoEar could not read volume preferences")
+		}
+	}
+	return auto, level
+}
+
+func (b *bridge) saveVolumePrefs(ctx context.Context, id string, auto bool, level int) error {
+	if b.db == nil {
+		return problem(503, "Volume storage unavailable")
+	}
+	_, err := b.db.ExecContext(ctx, `INSERT INTO device_prefs (device_id,auto_volume,manual_volume) VALUES (?,?,?)
+		ON CONFLICT(device_id) DO UPDATE SET auto_volume=excluded.auto_volume,manual_volume=excluded.manual_volume`,
+		strings.ToLower(id), auto, level)
+	if err != nil {
+		return problem(502, "Cannot save volume")
+	}
+	return nil
 }
 
 func (d *bridgeDB) syncCloud(ctx context.Context) error {

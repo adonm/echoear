@@ -47,7 +47,6 @@ type wsStatus struct {
 	Battery *int  `json:"battery_pct"`
 	MV      *int  `json:"battery_mv"`
 	Charge  *bool `json:"charging"`
-	Volume  *int  `json:"volume"`
 	RSSI    *int  `json:"rssi"`
 }
 
@@ -65,24 +64,27 @@ type wsClient struct {
 }
 
 type wsDevice struct {
-	client   *wsClient
-	who      peer
-	key      string
-	firmware string
-	proto    int
-	screen   screenGeometry
-	board    string
-	theme    string
-	cat      catState
-	vol      int
-	pct      int
-	mV       int
-	rssi     int
-	charging bool
-	svg      svgScreen
-	svgRaw   string
-	app      *appInstance
-	appView  svgScreen
+	client     *wsClient
+	who        peer
+	key        string
+	firmware   string
+	proto      int
+	screen     screenGeometry
+	board      string
+	theme      string
+	cat        catState
+	vol        int
+	autoVol    bool
+	ambientEMA float64
+	hasAmbient bool
+	pct        int
+	mV         int
+	rssi       int
+	charging   bool
+	svg        svgScreen
+	svgRaw     string
+	app        *appInstance
+	appView    svgScreen
 
 	scene            sceneView
 	view             *sceneView
@@ -90,9 +92,9 @@ type wsDevice struct {
 	pending          *sceneView
 	card             *sceneView
 	drawer           bool
+	volMenu          bool
 	rev              uint64
 	pose             catPose
-	drag             string
 	moodAt           time.Time
 	last             time.Time
 	meter            time.Time
@@ -416,9 +418,11 @@ func (h *wsHub) peerFrame() wsFrame {
 		if d := h.devices[strings.ToLower(list[i].DeviceID)]; d != nil && h.active(d) {
 			entry["ws"], entry["firmware"] = true, d.firmware
 			entry["cat"] = d.cat.catLook
+			entry["auto_volume"] = d.autoVol
 		} else {
 			entry["ws"] = false
 			entry["cat"] = h.b.catFor(list[i]).catLook
+			entry["auto_volume"], _ = h.b.volumePrefs(list[i].DeviceID)
 		}
 	}
 	return textFrame(object{"op": "peers", "devices": p})
@@ -473,7 +477,6 @@ func (h *wsHub) catChanged(id string, cat catState, profilesChanged bool) {
 		h.clearView(d)
 		d.agentSetScene = d.busy
 		now := time.Now()
-		h.wake(d, now)
 		h.render(d, now, true)
 	}
 	f := catFrame(id, cat, cat.Voice)
@@ -582,8 +585,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	ip, _ := lanIP(host, true) // Advertised IP never replaces an HTTP registration.
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: peer{DeviceID: ev.DeviceID, Character: character, IP: ip},
 		firmware: shortText(ev.Firmware, 24, false), proto: ev.Proto, screen: screen, board: board,
-		theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
+		theme: v.Theme, pct: -1, last: now, moodAt: now}
 	d.cat = h.b.catFor(d.who)
+	d.autoVol, d.vol = h.b.volumePrefs(d.key)
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
 		h.dropApp(old)
@@ -598,7 +602,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	if c.role == "web" {
 		c.enqueue(catFrame(d.who.DeviceID, d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme())))
 	}
-	h.push(d, object{"op": "volume", "level": d.vol}, true)
+	h.push(d, d.volumeFrame(false), true)
 	h.push(d, object{"op": "power", "brightness": 85}, true)
 	previous := h.peers
 	h.broadcastPeers()
@@ -631,9 +635,6 @@ func (d *wsDevice) status(s wsStatus) {
 	}
 	if s.RSSI != nil {
 		d.rssi = min(0, max(-127, *s.RSSI))
-	}
-	if s.Volume != nil {
-		d.vol = min(100, max(0, *s.Volume))
 	}
 }
 
@@ -670,10 +671,13 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	var svg string
 	switch {
 	case d.drawer && mood == "idle":
-		peers, _ := h.combinedPeers(d.who.DeviceID)
-		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
-		view = drawerScene(d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
-		svg = drawerSVG(view)
+		if d.volMenu {
+			view = volumeScene(d.cat, d.autoVol, d.vol)
+		} else {
+			peers, _ := h.combinedPeers(d.who.DeviceID)
+			peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
+			view = drawerScene(d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers, d.autoVol, d.vol)
+		}
 	case d.card != nil && (mood == "idle" || mood == "speaking" || mood != "sleepy" && d.card.actions["cat"].kind == "dismiss"):
 		view = *d.card
 	case d.app != nil && mood != "sleepy":
@@ -686,8 +690,11 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	case d.view != nil && mood != "sleepy" && mood != "listening":
 		view = *d.view
 	default:
-		view = catScene(d.cat, pose)
-		svg = catSVG(view, d.cat)
+		view = catChrome(d.cat, pose)
+		if d.client.role != "web" && d.proto < 2 {
+			view = catScene(d.cat, pose)
+		}
+		svg = catSVG(d.cat, pose)
 	}
 	var legacy object
 	if d.client.role != "web" && d.proto < 2 {
@@ -787,7 +794,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			c.watch = strings.ToLower(ev.DeviceID)
 			if d := h.devices[c.watch]; d != nil && h.active(d) {
 				c.enqueue(h.svgFrame(d))
-				c.enqueue(textFrame(object{"op": "volume", "level": d.vol}))
+				c.enqueue(textFrame(d.volumeFrame(false)))
 				brightness := 85
 				if d.asleep {
 					brightness = 12
@@ -802,7 +809,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		if ev.Event == "text" && ev.DeviceID != "" {
 			d = h.devices[strings.ToLower(ev.DeviceID)]
 		}
-		if ev.Event != "tap" && ev.Event != "drag" && ev.Event != "up" && ev.Event != "text" && ev.Event != "head" {
+		if ev.Event != "tap" && ev.Event != "text" && ev.Event != "head" {
 			return
 		}
 	}
@@ -815,13 +822,9 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	}
 	switch ev.Event {
 	case "status":
-		prev := d.vol
 		d.status(ev.wsStatus)
-		if d.vol != prev {
-			h.push(d, object{"op": "volume", "level": d.vol}, true)
-		}
 		h.render(d, now, false)
-	case "tap", "drag", "up":
+	case "tap":
 		h.pointer(d, ev, now, c == d.client && c.role == "device" && d.proto >= 2)
 	case "head":
 		switch ev.Action {
@@ -831,15 +834,6 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.push(d, object{"op": "chime", "kind": "tap"}, false)
 			h.emit(d.who.DeviceID, "head_pet", object{})
 			h.render(d, now, false)
-		case "vol_up", "vol_down":
-			v := d.vol + 5
-			if ev.Action == "vol_down" {
-				v = d.vol - 5
-			}
-			if ev.Volume != nil {
-				v = *ev.Volume
-			}
-			h.volume(d, v, now)
 		}
 	case "rec_start":
 		if target, ok := recordTarget(ev.Target); ok && !d.recOpen {
@@ -908,7 +902,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	}
 	v2 := d.proto >= 2 || d.virtual()
 	inside := d.screen.shape != "round" || inScreenCircle(ev.X, ev.Y)
-	if v2 && ev.Event == "tap" && d.app != nil && d.svg.source == d.appView.source {
+	if v2 && d.app != nil && d.svg.source == d.appView.source {
 		if i := slices.Index(d.app.devices, d); i >= 0 {
 			id := ""
 			if inside {
@@ -918,37 +912,14 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		}
 		return
 	}
-	if v2 && (ev.Event == "tap" || ev.Event == "drag" && d.drag == "") {
+	if v2 {
 		if !inside {
 			return
 		}
-		ev.ID = ""
-		for _, hit := range d.svg.hits {
-			if (d.scene.actions[hit.id].kind == "volume") == (ev.Event == "drag") {
-				if ev.ID = hitID([]hitBox{hit}, ev.X, ev.Y); ev.ID != "" {
-					break
-				}
-			}
+		ev.ID = hitID(d.svg.hits, ev.X, ev.Y)
+		if ev.ID == "" {
+			return
 		}
-	}
-	if v2 && ev.Event == "tap" && ev.ID == "" {
-		return
-	}
-	if ev.Event != "tap" {
-		if ev.Event == "drag" || d.drag != "" {
-			id := ev.ID
-			if d.drag != "" {
-				id = d.drag
-			}
-			if key, a := d.scene.action(id, ev.X, ev.Y, "drag"); a.kind == "volume" {
-				d.drag = key
-				h.volume(d, (ev.X-123)*100/114, now)
-			}
-		}
-		if ev.Event == "up" {
-			d.drag = ""
-		}
-		return
 	}
 	key, a := d.scene.action(ev.ID, ev.X, ev.Y, "tap")
 	waiting := false
@@ -966,7 +937,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	switch a.kind {
 	case "drawer":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
-		d.drawer, d.card, d.pending = true, nil, nil
+		d.drawer, d.volMenu, d.card, d.pending = true, false, nil, nil
 		if !d.customScene {
 			d.view = nil
 		}
@@ -982,6 +953,21 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		if err := h.b.voices.toggle(d.who.DeviceID, d.voiceTheme()); err == nil {
 			h.chime(d, "tap")
 			h.render(d, now, false)
+		}
+	case "vol-menu", "vol-back":
+		d.volMenu = a.kind == "vol-menu"
+		h.chime(d, "tap")
+		h.render(d, now, false)
+	case "vol-auto", "vol-minus", "vol-plus":
+		level := d.vol
+		switch a.kind {
+		case "vol-minus":
+			level = max(0, level-10)
+		case "vol-plus":
+			level = min(100, level+10)
+		}
+		if err := h.setVolume(d.client.ctx, d, a.kind == "vol-auto", level, now); err != nil {
+			h.push(d, object{"op": "error", "status": 502, "error": err.Error()}, true)
 		}
 	case "listen", "reply", "reply_to":
 		if !d.recAt.IsZero() {
@@ -1027,16 +1013,36 @@ func (h *wsHub) leaveScene(d *wsDevice, waiting bool, now time.Time) {
 func (h *wsHub) clearView(d *wsDevice) {
 	h.dropApp(d)
 	h.clearLocalScene(d)
-	d.drawer, d.view, d.pending, d.card, d.customScene = false, nil, nil, nil, false
+	d.drawer, d.volMenu, d.view, d.pending, d.card, d.customScene = false, false, nil, nil, nil, false
 }
 
-func (h *wsHub) volume(d *wsDevice, level int, now time.Time) {
-	h.wake(d, now)
-	level = min(100, max(0, level))
-	if level != d.vol {
-		d.vol = level
-		h.push(d, object{"op": "volume", "level": level}, true)
+func (d *wsDevice) volumeFrame(persist bool) object {
+	return object{"op": "volume", "device_id": d.who.DeviceID, "level": d.vol, "auto_volume": d.autoVol, "persist": persist}
+}
+
+func (h *wsHub) setVolume(ctx context.Context, d *wsDevice, auto bool, level int, now time.Time) error {
+	savedLevel := level
+	if auto {
+		savedLevel = initialAutoVolume
+		if !d.autoVol {
+			level = initialAutoVolume
+		} else {
+			level = d.vol
+		}
 	}
+	if err := h.b.saveVolumePrefs(ctx, d.key, auto, savedLevel); err != nil {
+		return err
+	}
+	if auto != d.autoVol {
+		d.hasAmbient = false
+	}
+	changedMode := d.autoVol != auto
+	d.autoVol, d.vol = auto, level
+	h.push(d, d.volumeFrame(!auto), true)
 	d.meter = now.Add(1800 * time.Millisecond)
 	h.render(d, now, false)
+	if changedMode {
+		h.broadcastPeers()
+	}
+	return nil
 }

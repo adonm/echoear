@@ -167,22 +167,10 @@ type catPose struct {
 func catScene(cat catState, pose catPose) sceneView {
 	listening, thinking := pose.mood == "listening", pose.mood == "thinking"
 	speaking, sleeping := pose.mood == "speaking", pose.mood == "sleepy"
-	s := sceneView{bg: cat.FaceBG, nodes: make([]object, 0, 40+len(cat.Extras)), actions: map[string]sceneAction{
-		"text": {"drawer", ""}, "cat-ring": {"listen", ""}, "volume-track": {"volume", ""},
-	}}
+	s := catChrome(cat, pose)
+	chrome := s.nodes
+	s.nodes = make([]object, 0, 40)
 	add := func(ns ...object) { s.nodes = append(s.nodes, ns...) }
-	ringColor, ringWidth := catInk, 3
-	switch pose.mood {
-	case "listening":
-		ringColor, ringWidth = "#FF5964", 5
-	case "thinking":
-		ringColor, ringWidth = "#F59E0B", 5
-	case "speaking":
-		ringColor, ringWidth = "#0284C7", 5
-	}
-	ring := circ("cat-ring", 180, 180, 172, ringColor)
-	ring["fill"], ring["sw"], ring["on"] = false, ringWidth, "tap"
-	add(ring)
 	if cat.Configured {
 		add(box("stripe-left", 147, 66, 14, 24, 7, cat.MarkColor), box("stripe-mid", 173, 61, 14, 33, 7, cat.MarkColor),
 			box("stripe-right", 199, 66, 14, 24, 7, cat.MarkColor))
@@ -191,7 +179,6 @@ func catScene(cat catState, pose catPose) sceneView {
 			add(circ("starter-mark-"+strconv.Itoa(i), 167+i*13, 79, 3, cat.MarkColor))
 		}
 	}
-	add(cat.Extras...)
 	for i, x := range []int{112, 248} {
 		tag := []string{"-l", "-r"}[i]
 		shut := pose.blink && !thinking || thinking && i == 1
@@ -225,6 +212,27 @@ func catScene(cat catState, pose catPose) sceneView {
 	}
 	add(visible(label("doze-small", 211, 109, 1, "z", catInk), sleeping),
 		visible(label("doze-large", 230, 88, 2, "Z", catInk), sleeping))
+	add(chrome...)
+	return s
+}
+
+func catChrome(cat catState, pose catPose) sceneView {
+	s := sceneView{bg: cat.FaceBG, nodes: make([]object, 0, 10), actions: map[string]sceneAction{
+		"text": {"drawer", ""}, "cat-ring": {"listen", ""},
+	}}
+	add := func(ns ...object) { s.nodes = append(s.nodes, ns...) }
+	ringColor, ringWidth := catInk, 3
+	switch pose.mood {
+	case "listening":
+		ringColor, ringWidth = "#FF5964", 5
+	case "thinking":
+		ringColor, ringWidth = "#F59E0B", 5
+	case "speaking":
+		ringColor, ringWidth = "#0284C7", 5
+	}
+	ring := circ("cat-ring", 180, 180, 172, ringColor)
+	ring["fill"], ring["sw"], ring["on"] = false, ringWidth, "tap"
+	add(ring)
 	batteryColor := "#39D1A0"
 	switch {
 	case !pose.charge && pose.battery < 10:
@@ -238,37 +246,56 @@ func catScene(cat catState, pose catPose) sceneView {
 		visible(box("battery-fill", 232, 44, max(1, pose.battery*25/100), 11, 2, batteryColor), pose.battery > 0),
 		visible(label("battery-charge", 246, 49, 1, "+", catInk), hasBattery && pose.charge))
 	meter := bordered(box("volume-track", 114, 246, 132, 33, 16, "#FFFAEE"), 2)
-	meter["on"] = "drag"
 	add(visible(meter, pose.meter), visible(box("volume-fill", 123, 255, max(1, pose.volume*114/100), 15, 7, cat.AccentColor), pose.meter),
 		visible(label("volume-label", 180, 263, 1, strconv.Itoa(pose.volume)+"%", catInk), pose.meter))
 	if !cat.Configured && pose.mood == "idle" && !pose.meter {
 		add(label("starter-badge", 180, 263, 1, "Say hi to design me!", "#475569"))
 	}
-	add(visible(comicButton("text", 137, 284, 86, 36, "Text", "#FFFAEE"), !sleeping))
-	// Keep the firmware's node budget without dropping any visible decorations or pose nodes.
-	for i := len(s.nodes) - 1; len(s.nodes) > maxNodes && i >= 0; i-- {
-		if s.nodes[i]["vis"] == false {
-			s.nodes = slices.Delete(s.nodes, i, i+1)
-		}
-	}
+	add(visible(comicButton("text", 137, 284, 86, 36, "Text", "#FFFAEE"), pose.mood != "sleepy"))
 	return s
 }
 
-func drawerScene(cat catState, voice string, peers []peer) sceneView {
+func volumeLabel(auto bool, level int) string {
+	if auto {
+		return "Vol: Auto"
+	}
+	return "Vol: " + strconv.Itoa(level) + "%"
+}
+
+func drawerScene(cat catState, voice string, peers []peer, auto bool, level int) sceneView {
 	s := sceneView{bg: "#251C3B", title: "Text", nodes: []object{
 		label("drawer-title", 180, 57, 2, "Text", "#FFFAEE"),
 		comicButton("cat", 135, 86, 90, 36, "Cat", cat.FaceBG),
 		comicButton("voice", 90, 300, 180, 36, "Voice: "+voiceNames[voice], cat.AccentColor),
-	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "voice": {"voice", ""}}}
+		comicButton("vol-menu", 102, 260, 156, 36, volumeLabel(auto, level), cat.FaceBG),
+	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "voice": {"voice", ""}, "vol-menu": {"vol-menu", ""}}}
 	for i, who := range peers[:min(4, len(peers))] {
 		id := "msg-" + strconv.Itoa(i)
-		s.nodes = append(s.nodes, comicButton(id, 70, 133+i*41, 220, 35, "Msg "+truncate(who.Character, 22), cat.FaceBG))
+		s.nodes = append(s.nodes, comicButton(id, 70, 130+i*32, 220, 29, "Msg "+truncate(who.Character, 22), cat.FaceBG))
 		s.actions[id] = sceneAction{"reply", who.DeviceID}
 	}
 	if len(peers) == 0 {
 		s.nodes = append(s.nodes, label("peers-empty", 180, 176, 1, "No nearby cats", "#FFFAEE"))
 	}
 	return s
+}
+
+func volumeScene(cat catState, auto bool, level int) sceneView {
+	autoTint := "#FFFAEE"
+	if auto {
+		autoTint = cat.AccentColor
+	}
+	return sceneView{bg: "#251C3B", title: "Volume", nodes: []object{
+		label("vol-title", 180, 73, 2, "Volume", "#FFFAEE"),
+		comicButton("vol-auto", 108, 108, 144, 49, "Auto", autoTint),
+		comicButton("vol-minus", 77, 172, 88, 54, "-", cat.FaceBG),
+		comicButton("vol-plus", 195, 172, 88, 54, "+", cat.FaceBG),
+		label("vol-level", 180, 244, 1, strconv.Itoa(level)+"%", "#FFFAEE"),
+		comicButton("vol-back", 124, 264, 112, 45, "Back", "#FFFAEE"),
+	}, actions: map[string]sceneAction{
+		"vol-auto": {"vol-auto", ""}, "vol-minus": {"vol-minus", ""},
+		"vol-plus": {"vol-plus", ""}, "vol-back": {"vol-back", ""},
+	}}
 }
 
 func screenScene(screen object, accent string) sceneView {

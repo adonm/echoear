@@ -351,10 +351,11 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 		}
 		messageID, messages := messagesDevice(path)
 		voiceID, voice := voiceDevice(path)
+		volumeID, volume := deviceSettingID(path, "volume")
 		timers := r.Method == http.MethodGet && path == "/api/timers" ||
 			r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/timers/")
 		get := r.Method == http.MethodGet && (path == "/ws" || path == "/api/scope" || messages)
-		post := r.Method == http.MethodPost && (path == "/api/chat" || voice)
+		post := r.Method == http.MethodPost && (path == "/api/chat" || voice || volume)
 		if !get && !post && !timers {
 			sendError(w, problem(404, "Not found"))
 			return
@@ -369,8 +370,16 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			sendResult(w, value, err)
 		case path == "/api/scope":
 			cat := b.catFor(peer{DeviceID: v.ID, Character: v.Character})
-			sendJSON(w, 200, object{"scoped": true, "device_id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme,
-				"voice": b.voices.get(v.ID, v.Theme)})
+			out := object{"scoped": true, "device_id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme,
+				"voice": b.voices.get(v.ID, v.Theme)}
+			if b.ws != nil {
+				b.ws.mu.Lock()
+				b.ws.deviceStatus(out, v.ID)
+				b.ws.mu.Unlock()
+			} else {
+				out["auto_volume"], out["volume"] = b.volumePrefs(v.ID)
+			}
+			sendJSON(w, 200, out)
 		case path == "/ws" && b.ws != nil:
 			if err := b.ws.serveScope(w, r, &v); err != nil {
 				sendError(w, err)
@@ -388,6 +397,13 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 				return
 			}
 			value, err := b.voiceAPI(r, voiceID)
+			sendResult(w, value, err)
+		case post && volume:
+			if volumeID != v.ID {
+				sendError(w, problem(403, "Device out of scope"))
+				return
+			}
+			value, err := b.volumeAPI(r, volumeID)
 			sendResult(w, value, err)
 		case post:
 			value, err := b.chatAPI(r, path, v.ID)

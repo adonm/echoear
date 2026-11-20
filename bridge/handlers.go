@@ -182,12 +182,33 @@ func (b *bridge) voiceTheme(who peer) string {
 }
 
 func voiceDevice(path string) (string, bool) {
+	return deviceSettingID(path, "voice")
+}
+
+func deviceSettingID(path, setting string) (string, bool) {
 	suffix, ok := strings.CutPrefix(path, "/api/devices/")
 	if !ok {
 		return "", false
 	}
-	id, ok := strings.CutSuffix(suffix, "/voice")
+	id, ok := strings.CutSuffix(suffix, "/"+setting)
 	return id, ok && deviceIDRE.MatchString(id)
+}
+
+func (b *bridge) volumeAPI(r *http.Request, id string) (any, error) {
+	args, err := jsonBody(r)
+	if err != nil {
+		return nil, err
+	}
+	auto, ok := args["auto"]
+	if !ok || len(args) > 2 || len(args) == 2 && args["volume"] == nil {
+		return nil, problem(400, `Expected {"auto":true} or {"auto":false,"volume":0..100}`)
+	}
+	if b.ws == nil {
+		return nil, problem(503, "Device hub unavailable")
+	}
+	delete(args, "auto")
+	args["auto_volume"] = auto
+	return b.ws.mcpControl(r.Context(), id, args)
 }
 
 func (b *bridge) voiceAPI(r *http.Request, id string) (any, error) {
@@ -703,7 +724,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			devices, err := b.deviceList()
 			return object{"devices": devices}, err
 		case path == "/api/scope":
-			return object{"scoped": false}, nil
+			return object{"scoped": false, "auto_volume": true}, nil
 		case strings.HasSuffix(path, "/messages"):
 			if id, ok := messagesDevice(path); ok {
 				return b.messages(ctx, id)
@@ -721,6 +742,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		}
 		if id, ok := voiceDevice(path); ok {
 			return b.voiceAPI(r, id)
+		}
+		if id, ok := deviceSettingID(path, "volume"); ok {
+			return b.volumeAPI(r, id)
 		}
 		ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 		defer cancel()

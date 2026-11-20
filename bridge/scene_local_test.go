@@ -36,8 +36,7 @@ func TestSceneTriangleProtocol(t *testing.T) {
 	c.json(t, object{"ev": "tap", "x": 218, "y": 189})
 	c.until(t, hasWS("chime", `"kind":"tap"`))
 	c.json(t, object{"ev": "tap", "x": 230, "y": 189})
-	c.json(t, object{"ev": "status", "volume": 73}) // Process the tap before inspecting the event ring.
-	c.until(t, hasWS("volume", `"level":73`))
+	c.barrier(t) // Process the tap before inspecting the event ring.
 	snapshot := toolTest(t, base, "snapshot", object{"device_id": id}, false)
 	events := snapshot["events"].([]any)
 	if len(events) != 2 || events[0].(object)["data"].(object)["id"] != "fin" || events[1].(object)["data"].(object)["id"] != "" {

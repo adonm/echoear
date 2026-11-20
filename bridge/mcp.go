@@ -177,17 +177,17 @@ var mcpTools = func() []object {
 	}
 	notes := object{"anyOf": []object{text, array(text)}, "description": "PITCH:MS separated by spaces or an array, e.g. C5:150 E5:150"}
 	return []object{
-		tool("inspect", "Read live cat, clock, peers, screen, app, timers, memory keys, and saved cats/apps. Omit device_id for discovery.",
+		tool("inspect", "Read the live cat and its editable face_svg, clock, peers, screen, app, timers, memory keys, and saved cats/apps. Omit device_id for discovery.",
 			schema(object{"device_id": text})),
 		tool("run_app", "Display a 360×360 SVG, run a sandboxed JS app, load/save by slug, or exit back to the cat face. One shared app state across devices, render(state, player) per device.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"load": text, "save_as": text, "tick_ms": number, "max_ticks": number, "exit": flag}, "devices")),
 		tool("act", "Send a spoken intercom, play a melody/chime, change device controls, set/cancel a timer, or design/load a cat.",
 			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"), "notes": notes, "chime": enum("tap", "think", "intercom", "celebrate"),
-				"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "sleep": flag,
+				"volume": object{"type": "integer", "minimum": 0, "maximum": 100, "description": "Set manual volume"}, "auto_volume": flag, "sleep": flag,
 				"timer": schema(object{"op": enum("set", "cancel"), "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag}, "op"),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
-					"personality": text, "voice": text, "svg_extras": text, "extras": array(object{"type": "object"}), "slug": text, "configured": flag}, "op")}, "to")),
+					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"}, "slug": text, "configured": flag}, "op")}, "to")),
 		tool("store", "Read/write persistent JSON in a device, shared, game:<name>, or app:<name> scope. expected_version is atomic; zero means no key exists.",
 			schema(object{"op": enum("get", "set", "delete", "list"), "scope": text, "key": text, "value": object{}, "expected_version": number}, "op", "scope")),
 	}
@@ -365,6 +365,7 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 	entry["ws_connected"], entry["ws"], entry["mode"] = false, false, "offline"
 	entry["room"] = ""
 	entry["battery_pct"], entry["volume"], entry["scene_rev"], entry["event_cursor"] = nil, nil, uint64(0), uint64(0)
+	entry["sleeping"] = false
 	if entry["online"] == true {
 		entry["mode"] = "http"
 	}
@@ -376,6 +377,7 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 		entry["character"], entry["cat"] = d.cat.Name, d.cat.catLook
 		_, rev := d.sceneState()
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, rev, d.firmware
+		entry["auto_volume"], entry["sleeping"] = d.autoVol, d.asleep
 		if d.board != "" {
 			entry["board"], entry["shape"], entry["width"], entry["height"] = d.board, d.screen.shape, d.screen.width, d.screen.height
 		}
@@ -383,10 +385,16 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct
 		}
+	} else {
+		auto, level := h.b.volumePrefs(id)
+		entry["auto_volume"] = auto
+		if !auto {
+			entry["volume"] = level
+		}
 	}
 }
 
-var mcpDeviceFields = []string{"device_id", "character", "cat", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "scene_rev", "event_cursor", "theme", "room"}
+var mcpDeviceFields = []string{"device_id", "character", "cat", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "auto_volume", "sleeping", "scene_rev", "event_cursor", "theme", "room"}
 
 func mcpDevice(entry object) object {
 	out := make(object, len(mcpDeviceFields))
@@ -436,6 +444,7 @@ func (b *bridge) inspect(ctx context.Context, id string) (object, error) {
 		p := object{"device_id": entry["device_id"], "name": entry["character"], "online": entry["online"], "kind": entry["kind"]}
 		if str(entry["device_id"]) == id {
 			p["mode"], p["volume"], p["battery_pct"], p["ws_connected"] = entry["mode"], entry["volume"], entry["battery_pct"], entry["ws_connected"]
+			p["auto_volume"], p["sleeping"], p["voice"] = entry["auto_volume"], entry["sleeping"], entry["voice"]
 			out["me"] = p
 		} else {
 			list = append(list, p)
@@ -449,7 +458,8 @@ func (b *bridge) inspect(ctx context.Context, id string) (object, error) {
 		if err != nil {
 			return nil, err
 		}
-		out["me"].(object)["cat"] = b.catFor(who)
+		cat, me := b.catFor(who), out["me"].(object)
+		me["cat"], me["configured"], me["personality"], me["face_svg"] = cat.catLook, cat.Configured, cat.Personality, cat.FaceSVG
 		if h := b.ws; h != nil {
 			h.mu.Lock()
 			if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
@@ -530,15 +540,18 @@ func (b *bridge) act(ctx context.Context, args object) (object, error) {
 		}
 		pcm = p
 	}
-	if args["volume"] != nil || args["sleep"] != nil {
+	_, volumeSet := args["volume"]
+	_, autoSet := args["auto_volume"]
+	_, sleepSet := args["sleep"]
+	if volumeSet || autoSet || sleepSet {
 		if b.ws == nil {
 			return nil, problem(503, "Device hub unavailable")
 		}
-		r, err := b.ws.mcpControl(to, args)
+		r, err := b.ws.mcpControl(ctx, to, args)
 		if err != nil {
 			return nil, err
 		}
-		out["volume"], out["sleeping"] = r["volume"], r["sleeping"]
+		out["volume"], out["auto_volume"], out["sleeping"] = r["volume"], r["auto_volume"], r["sleeping"]
 	}
 	if raw, ok := args["cat"]; ok {
 		c, ok := raw.(object)
@@ -735,40 +748,78 @@ func (b *bridge) callLegacyMCP(ctx context.Context, name string, args object) (o
 		}
 		return b.mcpChime(ctx, who, str(args["kind"]), pcm)
 	case "control":
-		return b.ws.mcpControl(id, args)
+		return b.ws.mcpControl(ctx, id, args)
 	}
 	return nil, problem(400, "Unknown tool")
 }
 
-func (h *wsHub) mcpControl(id string, args object) (object, error) {
+func volumeCommand(args object, key string) (auto bool, level int, set bool, err error) {
 	volume, err := mcpUint(args, "volume")
 	if err != nil || volume != nil && *volume > 100 {
-		return nil, problem(400, "Volume must be an integer from 0 to 100")
+		return false, 0, false, problem(400, "Volume must be an integer from 0 to 100")
+	}
+	if _, ok := args[key]; ok {
+		auto, err = catBool(args, key, false)
+		if err != nil {
+			return false, 0, false, err
+		}
+		if auto == (volume != nil) {
+			return false, 0, false, problem(400, "Use auto without volume, or provide a manual volume")
+		}
+	}
+	if auto {
+		return true, initialAutoVolume, true, nil
+	}
+	if volume != nil {
+		return false, int(*volume), true, nil
+	}
+	return false, 0, false, nil
+}
+
+func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object, error) {
+	auto, level, setVolume, err := volumeCommand(args, "auto_volume")
+	if err != nil {
+		return nil, err
 	}
 	sleep, setSleep := args["sleep"]
 	asleep, isBool := sleep.(bool)
 	if setSleep && !isBool {
 		return nil, problem(400, "Sleep must be a boolean")
 	}
-	if volume == nil && !setSleep {
-		return nil, problem(400, "Expected volume or sleep")
+	if !setVolume && !setSleep {
+		return nil, problem(400, "Expected volume, auto_volume, or sleep")
+	}
+	if !setSleep {
+		who, err := h.b.lookupDevice(id)
+		if err != nil {
+			return nil, err
+		}
+		id = who.DeviceID
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.devices[strings.ToLower(id)]
 	if d == nil || !h.active(d) {
-		return nil, problem(409, "Device is not connected")
+		if setSleep {
+			return nil, problem(409, "Device is not connected")
+		}
+		if err := h.b.saveVolumePrefs(ctx, id, auto, level); err != nil {
+			return nil, err
+		}
+		return object{"ok": true, "device_id": id, "volume": level, "auto_volume": auto, "sleeping": false}, nil
 	}
 	now := time.Now()
-	if volume != nil {
-		h.volume(d, int(*volume), now)
+	if setVolume {
+		if err := h.setVolume(ctx, d, auto, level, now); err != nil {
+			return nil, err
+		}
 	}
 	if setSleep {
 		d.last = now
 		h.setSleeping(d, asleep)
 		h.render(d, now, false)
 	}
-	return object{"ok": true, "device_id": d.who.DeviceID, "volume": d.vol, "sleeping": d.asleep}, nil
+	return object{"ok": true, "device_id": d.who.DeviceID, "volume": d.vol, "auto_volume": d.autoVol, "sleeping": d.asleep}, nil
 }
 
 type sceneConflict struct{ rev uint64 }

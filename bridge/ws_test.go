@@ -112,6 +112,12 @@ func (s *testWS) json(t *testing.T, v object) {
 	s.write(t, maskedFrame(wsText, true, textFrame(v).data))
 }
 
+func (s *testWS) barrier(t *testing.T) {
+	t.Helper()
+	s.write(t, maskedFrame(wsPing, true, nil))
+	s.until(t, func(f wsFrame) bool { return f.op == wsPong })
+}
+
 func (s *testWS) read(t *testing.T) wsFrame {
 	t.Helper()
 	_ = s.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -354,7 +360,7 @@ func TestWSKeyedCatScenes(t *testing.T) {
 		listening, thinking, speech, sleep := catScene(cat, poses[2]), catScene(cat, poses[3]), catScene(cat, poses[4]), catScene(cat, poses[5])
 		if nodeIn(listening, "cat-ring")["c"] != "#FF5964" || nodeIn(listening, "eye-l")["w"] != 40 ||
 			nodeIn(thinking, "lid-r")["vis"] != true || nodeIn(thinking, "dot-2")["y"] != 247 ||
-			nodeIn(speech, "tongue")["vis"] != true || nodeIn(speech, "volume-track")["on"] != "drag" ||
+			nodeIn(speech, "tongue")["vis"] != true || nodeIn(speech, "volume-track")["on"] != nil ||
 			nodeIn(sleep, "eye-sleep-l")["vis"] != true || nodeIn(sleep, "doze-large")["vis"] != true {
 			t.Fatalf("incorrect mood details for %s", char)
 		}
@@ -428,7 +434,7 @@ func TestWSMirrorAndControls(t *testing.T) {
 		bytes.Contains(a.data, []byte(`"id":"new"`)) || !bytes.Contains(a.data, []byte(`"id":"voice"`)) {
 		t.Fatal("drawer did not mirror voice controls without New")
 	}
-	web.json(t, object{"ev": "head", "action": "vol_down", "volume": 62})
+	testRequest(t, "POST", base+"/api/devices/echoear-33d8/volume", "unit", object{"auto": false, "volume": 62}, 200)
 	for _, c := range []*testWS{dev, web} {
 		c.until(t, hasWS("volume", `"level":62`))
 	}
@@ -540,8 +546,7 @@ func TestWSRecordingLimits(t *testing.T) {
 			}
 			if tc.timeout {
 				// Wait for the server to consume the PCM before aging the recording.
-				dev.json(t, object{"ev": "status", "volume": 42})
-				dev.until(t, hasWS("volume", `"level":42`))
+				dev.barrier(t)
 				b.ws.mu.Lock()
 				b.ws.devices[id].recAt = time.Now().Add(-91 * time.Second)
 				b.ws.mu.Unlock()
@@ -708,8 +713,7 @@ func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
 		t.Fatal("missing playback ID", err)
 	}
 	phone.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio + 1})
-	phone.json(t, object{"ev": "status", "volume": 42})
-	phone.until(t, hasWS("volume", `"level":42`))
+	phone.barrier(t)
 	b.ws.mu.Lock()
 	awaiting := d.awaitAck
 	b.ws.mu.Unlock()
@@ -820,12 +824,12 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Kokoro did not overlap the OpenCode turn")
 	}
-	dev.json(t, object{"ev": "status", "volume": 47})
+	dev.write(t, maskedFrame(wsPing, true, nil))
 	dev.until(t, func(f wsFrame) bool {
 		if f.op == wsBinary || hasWS("tts", `"state":"start"`)(f) {
 			t.Fatal("unverified speech was played")
 		}
-		return hasWS("volume", `"level":47`)(f)
+		return f.op == wsPong
 	})
 	closeRelease()
 	dev.until(t, hasWS("tts", `"state":"start"`))
