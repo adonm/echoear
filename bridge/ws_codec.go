@@ -31,9 +31,10 @@ type wsFrame struct {
 }
 
 type websocket struct {
-	conn net.Conn
-	in   *bufio.Reader
-	mu   sync.Mutex
+	conn   net.Conn
+	in     *bufio.Reader
+	mu     sync.Mutex
+	onPong func([]byte)
 }
 
 func hasHeaderToken(h http.Header, name, token string) bool {
@@ -201,6 +202,9 @@ func (s *websocket) read() (wsFrame, error) {
 			_ = s.write(wsFrame{wsClose, p})
 			return wsFrame{}, io.EOF
 		case wsPong:
+			if s.onPong != nil {
+				s.onPong(p)
+			}
 		default:
 			if final {
 				if msg.op == wsText && !utf8.Valid(msg.data) {

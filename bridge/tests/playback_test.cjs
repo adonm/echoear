@@ -25,10 +25,13 @@ test("schedules a 12-second reply gaplessly and acknowledges only after its fina
     ArrayBuffer, URL, context,
     location: {href: "https://echoear.test/app"},
     localStorage: {getItem: key => key === "echoear-phone" ? "phone-1234" : null},
-    document: {getElementById(id) {
-      if (!dom.has(id)) dom.set(id, {addEventListener() {}, showModal() {}});
-      return dom.get(id);
-    }},
+    document: {
+      addEventListener() {},
+      getElementById(id) {
+        if (!dom.has(id)) dom.set(id, {addEventListener() {}, showModal() {}});
+        return dom.get(id);
+      },
+    },
     matchMedia: () => ({addEventListener() {}}),
     WebSocket: {OPEN: 1},
     socket: {readyState: 1, send: raw => events.push(JSON.parse(raw))},

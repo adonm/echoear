@@ -245,6 +245,8 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": "echoear-private"}, 404)
 	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": id}, 404)
 	testRequest(t, "POST", scoped+"/api/cats/reassign", token, object{"from_device_id": id, "to_device_id": "echoear-private"}, 404)
+	testRequest(t, "GET", scoped+"/api/diagnostics", token, nil, 404)
+	testRequest(t, "GET", scoped+"/api/diagnostics", "unit", nil, 404)
 	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": id, "text": "Tell Cake Hi from HTTP."}, 200)
 	physical.until(t, hasWS("patch", "Hi from HTTP."))
 	_, rejected := dialTestWS(t, scoped, "unit", false, nil)
@@ -285,9 +287,14 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
 	conn.until(t, hasWS("svg", "cat-ring"))
-	conn.json(t, object{"ev": "tap", "id": "text", "x": 130, "y": 300})
-	conn.until(t, hasWS("svg", "Msg Cake"))
-	conn.json(t, object{"ev": "tap", "id": "msg-0", "x": 180, "y": 150})
+	conn.json(t, object{"ev": "tap", "x": 140, "y": 313})
+	menu := conn.until(t, hasWS("svg", "menu-intercom"))
+	if bytes.Contains(menu.data, []byte("menu-stats")) {
+		t.Fatal("scoped SVG offers host diagnostics")
+	}
+	conn.json(t, object{"ev": "tap", "x": 115, "y": 130})
+	conn.until(t, hasWS("svg", "intercom-echoear-private"))
+	conn.json(t, object{"ev": "tap", "x": 245, "y": 116})
 	conn.until(t, hasWS("rec", `"target":"echoear-private"`))
 	conn.json(t, object{"ev": "rec_start", "target": "echoear-private"})
 	pcm := bytes.Repeat([]byte{12, 0}, 120)
@@ -300,7 +307,7 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 		return f.op == wsBinary
 	})
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], pcm) {
-		t.Fatal("tunneled drawer did not deliver recorded PCM")
+		t.Fatal("tunneled menu did not deliver recorded PCM")
 	}
 	if !sawCaption {
 		physical.until(t, caption)

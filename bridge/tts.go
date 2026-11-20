@@ -37,9 +37,12 @@ type ttsResult struct {
 type synthWorker struct {
 	python, script, model, voices string
 	ready                         atomic.Bool
+	child                         atomic.Int64
 	requests                      chan ttsRequest
 	done                          chan struct{}
 }
+
+func (w *synthWorker) pid() int { return int(w.child.Load()) }
 
 func newSynthWorker(ctx context.Context, python, script, model, voices string) *synthWorker {
 	w := &synthWorker{python: python, script: script, model: model, voices: voices,
@@ -147,6 +150,7 @@ func (w *synthWorker) run(ctx context.Context) {
 	for ctx.Err() == nil {
 		p, err := w.start()
 		if err == nil {
+			w.child.Store(int64(p.cmd.Process.Pid))
 			timeout, cancel := context.WithTimeout(ctx, ttsWait)
 			probe, _ := p.call(timeout, heartVoice, "")
 			cancel()
@@ -178,6 +182,7 @@ func (w *synthWorker) run(ctx context.Context) {
 				w.ready.Store(false)
 			}
 			p.stop()
+			w.child.Store(0)
 		}
 		if ctx.Err() != nil {
 			return
@@ -282,12 +287,13 @@ func (c *speechClips) get(ctx context.Context, w *synthWorker, voice, text strin
 }
 
 type AudioStream struct {
-	cond   *sync.Cond
-	chunks [][]byte
-	size   int
-	done   bool
-	err    error
-	evict  func()
+	cond    *sync.Cond
+	chunks  [][]byte
+	firstAt time.Time
+	size    int
+	done    bool
+	err     error
+	evict   func()
 }
 
 func newAudioStream() *AudioStream { return &AudioStream{cond: sync.NewCond(&sync.Mutex{})} }
@@ -320,12 +326,26 @@ func (s *AudioStream) append(pcm []byte) bool {
 	if s.done || len(pcm) == 0 || len(pcm)%2 != 0 || len(pcm) > maxPCM-s.size {
 		return false
 	}
+	if len(s.chunks) == 0 {
+		s.firstAt = time.Now()
+	}
 	s.chunks = append(s.chunks, pcm)
 	s.size += len(pcm)
 	s.cond.Broadcast()
 	return true
 }
 
+func (s *AudioStream) traceFirst(t *turnTrace, start time.Time) {
+	if t == nil || start.IsZero() {
+		return
+	}
+	s.cond.L.Lock()
+	at := s.firstAt
+	s.cond.L.Unlock()
+	if !at.IsZero() {
+		t.measure(diagTTSFirst, at.Sub(start))
+	}
+}
 func (s *AudioStream) chunk(ctx context.Context, i int) ([]byte, error) {
 	return s.waitChunk(ctx, i, ttsWait)
 }

@@ -373,7 +373,7 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		view := noticeScene("Time's up!", message)
 		view.nodes[len(view.nodes)-1]["s"] = "OK"
 		view.actions["cat"] = sceneAction{"dismiss", ""}
-		d.card, d.drawer = &view, false
+		d.card, d.drawer = &view, ""
 		if t.Say != "" {
 			h.speakLocalAfter(d, t.Say, pcm)
 		}

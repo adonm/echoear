@@ -358,7 +358,7 @@ func TestWSKeyedCatScenes(t *testing.T) {
 			t.Fatal("blink should just toggle eyes/lids")
 		}
 		listening, thinking, speech, sleep := catScene(cat, poses[2]), catScene(cat, poses[3]), catScene(cat, poses[4]), catScene(cat, poses[5])
-		if nodeIn(listening, "cat-ring")["c"] != "#FF5964" || nodeIn(listening, "eye-l")["w"] != 40 ||
+		if nodeIn(listening, "cat-ring")["c"] != "#FF6978" || nodeIn(listening, "eye-l")["w"] != 40 ||
 			nodeIn(thinking, "lid-r")["vis"] != true || nodeIn(thinking, "dot-2")["y"] != 247 ||
 			nodeIn(speech, "tongue")["vis"] != true || nodeIn(speech, "volume-track")["on"] != nil ||
 			nodeIn(sleep, "eye-sleep-l")["vis"] != true || nodeIn(sleep, "doze-large")["vis"] != true {
@@ -412,8 +412,8 @@ func TestWSMirrorAndControls(t *testing.T) {
 		t.Fatal("New is still on the cat face")
 	}
 	face := catScene(legacyCat("Cake", "cake"), catPose{})
-	if text := nodeIn(face, "text"); nodeInt(text, "x")*2+nodeInt(text, "w") != 360 {
-		t.Fatal("Text button is not centered")
+	if menu := nodeIn(face, "menu"); nodeInt(menu, "x")*2+nodeInt(menu, "w") != 360 || nodeInt(menu, "h") != 48 {
+		t.Fatal("Menu button is not centered or large enough")
 	}
 	web := testConnectWS(t, base, "unit", true)
 	web.json(t, object{"ev": "hello", "role": "web"})
@@ -429,17 +429,17 @@ func TestWSMirrorAndControls(t *testing.T) {
 		t.Fatal("mirror revision differs from device")
 	}
 	web.json(t, object{"ev": "tap", "x": 180, "y": 300})
-	drawer := func(f wsFrame) bool { return f.op == wsText && bytes.Contains(f.data, []byte(`"drawer-title"`)) }
-	if a, b := dev.until(t, drawer), web.until(t, hasWS("svg", "Voice:")); testObject(t, a.data)["rev"] != testObject(t, b.data)["rev"] ||
-		bytes.Contains(a.data, []byte(`"id":"new"`)) || !bytes.Contains(a.data, []byte(`"id":"voice"`)) {
-		t.Fatal("drawer did not mirror voice controls without New")
+	drawer := func(f wsFrame) bool { return f.op == wsText && bytes.Contains(f.data, []byte(`"menu-title"`)) }
+	if a, b := dev.until(t, drawer), web.until(t, hasWS("svg", "menu-stats")); testObject(t, a.data)["rev"] != testObject(t, b.data)["rev"] ||
+		bytes.Contains(a.data, []byte(`"id":"new"`)) || !bytes.Contains(a.data, []byte(`"id":"menu-voice"`)) {
+		t.Fatal("menu did not mirror voice controls without New")
 	}
 	testRequest(t, "POST", base+"/api/devices/echoear-33d8/volume", "unit", object{"auto": false, "volume": 62}, 200)
 	for _, c := range []*testWS{dev, web} {
 		c.until(t, hasWS("volume", `"level":62`))
 	}
-	web.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 102})
-	dev.until(t, hasWS("scene", `"cat-ring"`))
+	web.json(t, object{"ev": "tap", "id": "menu-back", "x": 180, "y": 315})
+	dev.until(t, hasWS("patch", `"cat-ring"`))
 	web.json(t, object{"ev": "tap", "id": "", "x": 180, "y": 180})
 	dev.until(t, hasWS("rec", `"action":"start"`))
 	dev.json(t, object{"ev": "rec_end", "cancelled": true})
@@ -844,6 +844,18 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	dev.until(t, hasWS("tts", `"state":"end"`))
 	dev.json(t, object{"ev": "tts_ack", "state": "done"})
 	dev.until(t, func(f wsFrame) bool { return hasWS("scene", "Night sky")(f) || hasWS("patch", "Night sky")(f) })
+	var diag diagReport
+	if err := json.Unmarshal(testRequest(t, "GET", base+"/api/diagnostics", "unit", nil, 200), &diag); err != nil {
+		t.Fatal(err)
+	}
+	if len(diag.Turns) != 1 {
+		t.Fatalf("one voice turn expected, got %+v", diag.Turns)
+	}
+	turn := diag.Turns[0]
+	if turn.Device != "echoear-a" || turn.Source != "voice" || turn.STT == nil || turn.First == nil ||
+		turn.Total == nil || turn.TTS == nil || turn.E2E == nil || *turn.First > *turn.Total || *turn.Total > *turn.E2E {
+		t.Fatalf("voice milestones missing or out of order: %+v", turn)
+	}
 	dev.json(t, object{"ev": "tap", "id": "shape-0", "x": 180, "y": 226})
 	dev.until(t, hasWS("patch", "Stars are bright."))
 	dev.until(t, func(f wsFrame) bool { return f.op == wsBinary })

@@ -70,6 +70,8 @@ async function api(current, path, options) {
 }
 
 function stop() {
+  setDiagnostics(false);
+  $("diagnostics-toggle").hidden = true;
   clearInterval(poll);
   clearInterval(timerTick);
   view?.loading?.abort();
@@ -104,6 +106,7 @@ async function authorize(token) {
     timerTick = setInterval(tickTimers, 1000);
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
+    $("diagnostics-toggle").hidden = !!scope;
     $("sidebar-toggle").hidden = !!scope;
     $("opencode-pairing").hidden = !!scope;
     $("credentials").close();
@@ -136,6 +139,169 @@ $("token-form").onsubmit = e => {
   const token = $("token").value.trim();
   if (token) authorize(token);
 };
+
+let diagnosticsOpen = false, diagnosticsTimer, diagnosticsRequest;
+
+function pauseDiagnostics() {
+  clearTimeout(diagnosticsTimer);
+  diagnosticsRequest?.abort();
+  diagnosticsRequest = null;
+}
+
+function setDiagnostics(open) {
+  pauseDiagnostics();
+  diagnosticsOpen = open && !!app && !app.scope;
+  $("diagnostics").hidden = !diagnosticsOpen;
+  $("workspace").hidden = !app || diagnosticsOpen;
+  $("sidebar-toggle").hidden = !app || !!app.scope || diagnosticsOpen;
+  $("diagnostics-toggle").textContent = diagnosticsOpen ? "Cat Club" : "Diagnostics";
+  $("diagnostics-toggle").setAttribute("aria-expanded", String(diagnosticsOpen));
+  if (!diagnosticsOpen) return;
+  say("diag-status", "Connecting…");
+  $("diag-heading").focus();
+  pollDiagnostics();
+}
+
+async function pollDiagnostics() {
+  const current = app;
+  if (!diagnosticsOpen || document.hidden || diagnosticsRequest || !current || current.scope) return;
+  const request = diagnosticsRequest = new AbortController();
+  const start = performance.now();
+  try {
+    const data = await api(current, "/api/diagnostics", {signal:request.signal});
+    if (diagnosticsRequest !== request) return;
+    renderDiagnostics(data);
+    say("diag-status", `Live · ${new Date(data.generated_at).toLocaleTimeString()} · updates every 2 s`);
+  } catch {
+    if (diagnosticsRequest === request) say("diag-status", "Telemetry unavailable · retrying…");
+  } finally {
+    if (diagnosticsRequest === request) {
+      diagnosticsRequest = null;
+      diagnosticsTimer = setTimeout(pollDiagnostics, Math.max(0, 2000 - (performance.now() - start)));
+    }
+  }
+}
+
+$("diagnostics-toggle").onclick = () => setDiagnostics(!diagnosticsOpen);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) pauseDiagnostics();
+  else pollDiagnostics();
+});
+
+const diagFormat = (v, unit = "", digits = 0) => Number.isFinite(v) ? `${v.toFixed(digits)}${unit}` : "—";
+const diagBytes = (v, base = 1024, unit = " KiB") => Number.isFinite(v) ? diagFormat(v / base, unit, 1) : "—";
+const diagMB = v => diagBytes(v, 1048576, " MiB");
+const diagGB = v => diagBytes(v, 1073741824, " GiB");
+const diagMS = v => diagFormat(v, " ms", 1);
+const diagPct = v => diagFormat(v, "%", 1);
+function diagUptime(v) {
+  if (!Number.isFinite(v)) return "—";
+  if (v < 60) return `${v}s`;
+  const d = Math.floor(v / 86400), h = Math.floor(v / 3600) % 24, m = Math.floor(v / 60) % 60;
+  return [d && `${d}d`, (d || h) && `${h}h`, `${m}m`].filter(Boolean).join(" ");
+}
+
+function diagTile(title, fields) {
+  const card = node("article", "diag-tile");
+  card.append(node("h4", "", title));
+  const list = node("dl", "diag-fields");
+  for (const [key, value] of fields) list.append(node("dt", "", key), node("dd", "", value));
+  card.append(list);
+  return card;
+}
+
+function diagBar(card, title, pct) {
+  if (!Number.isFinite(pct)) return;
+  const meter = node("progress", "diag-bar");
+  meter.max = 100;
+  meter.value = Math.min(100, Math.max(0, pct));
+  meter.setAttribute("aria-label", `${title}: ${diagPct(pct)}`);
+  card.append(meter);
+}
+
+function diagSparkline(samples) {
+  const chart = document.createElementNS(svgNS, "svg");
+  chart.setAttribute("viewBox", "0 0 120 28");
+  chart.setAttribute("class", "diag-spark");
+  chart.setAttribute("aria-hidden", "true");
+  const points = samples.filter(Number.isFinite);
+  if (points.length) {
+    const path = document.createElementNS(svgNS, "polyline");
+    const max = Math.max(1, ...points);
+    const coords = points.map((v, i) => `${2+i*116/Math.max(1, points.length-1)},${25-v*22/max}`);
+    if (coords.length === 1) coords.push(`118,${coords[0].split(",")[1]}`);
+    path.setAttribute("points", coords.join(" "));
+    chart.append(path);
+  }
+  return chart;
+}
+
+function renderDiagnostics(data) {
+  const {bridge, tts_worker:tts, host, services, latency, recent_turns:turns, devices} = data;
+  const usage = Number.isFinite(host.mem_used_bytes) && host.mem_total_bytes > 0 ? host.mem_used_bytes / host.mem_total_bytes * 100 : null;
+  const system = [
+    diagTile("Go bridge", [
+      ["CPU / RSS", `${diagPct(bridge.cpu_pct)} / ${diagMB(bridge.rss_bytes)}`],
+      ["Heap alloc / in use", `${diagMB(bridge.heap_alloc_bytes)} / ${diagMB(bridge.heap_inuse_bytes)}`],
+      ["Goroutines", diagFormat(bridge.goroutines)], ["Uptime", diagUptime(bridge.uptime_s)],
+      ["Turso DB + WAL", diagBytes(bridge.db_bytes)],
+    ]),
+    diagTile("Kokoro worker", [
+      ["CPU / RSS", `${diagPct(tts.cpu_pct)} / ${diagMB(tts.rss_bytes)}`],
+      ["Process", tts.pid > 0 ? `PID ${tts.pid}` : "—"],
+      ["State", tts.ready ? "Ready" : "Not ready"],
+    ]),
+    diagTile("Linux host", [
+      ["CPU / 1m load", `${diagPct(host.cpu_pct)} / ${diagFormat(host.load_1m, "", 2)}`],
+      ["RAM", `${diagGB(host.mem_used_bytes)} / ${diagGB(host.mem_total_bytes)}`],
+    ]),
+  ];
+  diagBar(system[2], "Host RAM used", usage);
+  $("diag-system").replaceChildren(...system);
+  $("diag-services").replaceChildren(...Object.entries({hex:"Hex", opencode:"OpenCode", tts:"Kokoro", opentunnel:"OpenTunnel"}).map(([key, label]) =>
+    node("li", services[key] ? "is-up" : "", `${label} · ${services[key] ? (key === "opentunnel" ? "installed" : "ready") : "unavailable"}`)));
+  $("diag-latency").replaceChildren(...Object.entries({stt_ms:"Hex STT", llm_first_ms:"OpenCode TTFT", llm_total_ms:"OpenCode Total",
+    tts_first_ms:"Kokoro TTS", e2e_ms:"Voice E2E", render_ms:"SVG→RLE565 Render"}).map(([key, title]) => {
+    const m = latency[key];
+    const card = diagTile(title, [["Last", diagMS(m.last)], ["p50 / p95", `${diagMS(m.p50)} / ${diagMS(m.p95)}`]]);
+    card.append(diagSparkline(m.samples));
+    if (key === "render_ms") {
+      card.append(node("p", "small", `Last frame ${diagBytes(latency.frame_bytes.last)} / ${diagBytes(latency.frame_raw_bytes.last)} raw`));
+    }
+    return card;
+  }));
+  const rows = turns.map(t => {
+    const row = node("tr");
+    row.append(...[new Date(t.ts_ms).toLocaleTimeString(), `${t.character} / ${t.device}`, t.source, ...[
+      t.stt_ms, t.llm_first_ms, t.llm_total_ms, t.tts_first_ms, t.e2e_ms,
+    ].map(diagMS)].map(value => node("td", "", value)));
+    return row;
+  });
+  if (!rows.length) {
+    const row = node("tr"), cell = node("td", "", "No turns yet.");
+    cell.colSpan = 8;
+    row.append(cell);
+    rows.push(row);
+  }
+  $("diag-turns").replaceChildren(...rows);
+  $("diag-devices").replaceChildren(...(devices.length ? devices.map(d => {
+    const f = d.last_frame;
+    const battery = d.has_battery === false ? "USB" : Number.isFinite(d.battery_pct) ?
+      `${diagFormat(d.battery_pct, "%")} · ${diagFormat(d.battery_mv, " mV")}${d.charging ? " · charging" : ""}` : "—";
+    const card = diagTile(d.character, [
+      ["Device", d.device_id], ["Board / FW", `${d.board || d.kind} / ${d.firmware || "—"}`],
+      ["OTA", d.kind === "virtual" ? "—" : `${d.ota || "—"} · ${d.ota_bundle ? "image on bridge" : "no image"}`],
+      ["WS / RTT", `${d.ws_connected ? `Connected · ${d.mode}` : "Disconnected"} / ${diagMS(d.rtt_ms)}`],
+      ["Wi-Fi", diagFormat(d.wifi_rssi, " dBm")], ["ESP32 CPU", diagPct(d.cpu_pct)],
+      ["SRAM free / min", `${diagBytes(d.free_heap)} / ${diagBytes(d.min_free_heap)}`],
+      ["PSRAM free", diagMB(d.free_psram)], ["Uptime", diagUptime(d.uptime_s)], ["Battery", battery],
+      ["Ambient RMS", diagFormat(d.ambient_rms, "", 1)], ["Volume", Number.isFinite(d.volume) ? `${d.volume}% · ${d.auto_volume ? "Auto" : "Manual"}` : "—"],
+      ["Last frame", f ? `${diagBytes(f.frame_bytes)} · ${diagMS(f.render_ms)} · ${f.frame_codec}` : "—"],
+    ]);
+    diagBar(card, "ESP32 CPU", d.cpu_pct);
+    return card;
+  }) : [node("p", "small", "No devices have checked in.")]));
+}
 
 function renderSidebar() {
   $("sidebar").hidden = !app?.sidebar;
@@ -926,7 +1092,7 @@ function command(msg) {
     case "rec":
       if (view.virtual) {
         if (msg.action === "start") startMic(msg.target || "");
-        else if (msg.action === "stop") endMic(false);
+        else if (msg.action === "stop") endMic(!!msg.cancelled, !msg.cancelled);
       }
       break;
     case "tts":
@@ -1320,7 +1486,10 @@ function chime(kind) {
 let mic, workletLoaded;
 function recordUI(active) {
   $("talk").setAttribute("aria-pressed", String(active));
-  $("talk").textContent = active ? "Stop & send" : "Mic · Talk";
+  $("talk").hidden = active;
+  $("mic-send").hidden = !active;
+  $("mic-send").disabled = true;
+  $("mic-send").textContent = "Send now";
   $("cancel").hidden = !active;
   $("target").disabled = active;
 }
@@ -1358,6 +1527,7 @@ async function startMic(target) {
     };
     send({ev:"rec_start",target});
     rec.source.connect(rec.node).connect(audio.destination);
+    $("mic-send").disabled = false;
     say("chat-note", target ? "Recording intercom…" : "Listening…");
   } catch {
     if (mic === rec) {
@@ -1372,15 +1542,12 @@ function endMic(cancelled, tell = true, flushed = false) {
   if (rec.node && !cancelled && !flushed) {
     if (!rec.stopping) {
       rec.stopping = true;
-      $("talk").disabled = true;
-      $("talk").textContent = "Finishing…";
-      rec.flushTimer = setTimeout(() => {
-        if (mic === rec) rec.node.port.postMessage("flush");
-      }, 200);
+      $("mic-send").disabled = true;
+      $("mic-send").textContent = "Sending…";
+      rec.node.port.postMessage("flush");
     }
     return;
   }
-  clearTimeout(rec.flushTimer);
   mic = null;
   rec.stream?.getTracks().forEach(t => t.stop());
   rec.source?.disconnect();
@@ -1394,7 +1561,8 @@ function endMic(cancelled, tell = true, flushed = false) {
     say("chat-note", cancelled ? "Recording cancelled." : "Message sent to the bridge.");
   }
 }
-$("talk").onclick = () => { if (mic) endMic(false); else startMic($("target").value); };
+$("talk").onclick = () => startMic($("target").value);
+$("mic-send").onclick = () => endMic(false);
 $("cancel").onclick = () => endMic(true);
 credentials();
 if (initialToken) authorize(initialToken);

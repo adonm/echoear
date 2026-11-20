@@ -1,0 +1,236 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestDiagnosticsMetricWindowAndTurns(t *testing.T) {
+	b := &bridge{}
+	t0 := time.Now()
+	for i := 1; i <= 40; i++ {
+		ctx := b.traceTurn(t.Context(), "board", "Cake", "voice", t0.Add(time.Duration(i)*time.Second))
+		trace := traceFrom(ctx)
+		trace.measure(diagSTT, time.Duration(i)*time.Millisecond)
+		trace.measure(diagSTT, 999*time.Millisecond)
+		trace.audioEnqueued(trace.recEnd.Add(50 * time.Millisecond))
+	}
+	report := b.diagnosticReport()
+	stt := report.Latency["stt_ms"]
+	if stt.Count != 32 || *stt.Last != 40 || *stt.P50 != 24 || *stt.P95 != 39 || stt.Samples[0] != 9 {
+		t.Fatalf("unexpected STT window: %+v", stt)
+	}
+	if report.Latency["llm_first_ms"].Last != nil || len(report.Turns) != 20 ||
+		report.Turns[0].TS != t0.Add(40*time.Second).UnixMilli() || *report.Turns[19].STT != 21 ||
+		*report.Turns[0].E2E != 50 || report.Turns[0].Device != "board" || report.Turns[0].Character != "Cake" {
+		t.Fatalf("unexpected turn log: %+v", report.Turns)
+	}
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			trace := traceFrom(b.traceTurn(t.Context(), "web", "Mint", "typed", time.Now()))
+			trace.measure(diagLLMFirst, 3*time.Millisecond)
+			trace.measure(diagLLMTotal, 7*time.Millisecond)
+			_ = b.diagnosticReport()
+		})
+	}
+	wg.Wait()
+	if m := b.diagnosticReport().Latency["llm_total_ms"]; m.Count != 16 || *m.P95 != 7 {
+		t.Fatalf("concurrent metric writes: %+v", m)
+	}
+}
+
+func TestDiagnosticsProcAndShutdown(t *testing.T) {
+	if got := parseProcStat("42 (cat ) server) S 0 0 0 0 0 0 0 0 0 0 12 30 0 0 0 0 0 0 567", 42); got != (procReading{42, 42, 567}) {
+		t.Fatal(got)
+	}
+	if got := parseHostCPU("cpu 1 2 3 4 5 6 7 8 9 10\ncpu0 15"); got != (cpuReading{27, 36}) {
+		t.Fatal(got)
+	}
+	path := filepath.Join(t.TempDir(), "echoear.db")
+	for _, f := range []string{path, path + "-wal"} {
+		if err := os.WriteFile(f, []byte("telemetry"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	b := &bridge{root: root}
+	stop := b.sampleDiagnostics(time.Now(), path)
+	defer stop()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		r := b.diagnosticReport()
+		if r.Host.CPU != nil && r.Bridge.CPU != nil {
+			if r.Host.Total == nil || r.Host.Used == nil || r.Bridge.RSS == nil || *r.Bridge.RSS == 0 ||
+				r.Bridge.Goroutine == 0 || r.Bridge.DB != 18 {
+				t.Fatalf("incomplete sample: %+v", r.diagSystem)
+			}
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("timed out waiting for Linux CPU deltas")
+		case <-tick.C:
+		}
+	}
+	cancel()
+	stop()
+}
+
+func TestDiagnosticsEndpointAndBoardHUD(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	board := testConnectWS(t, base, "unit", false)
+	const id = "echoear-diag"
+	board.json(t, object{"ev": "hello", "role": "device", "proto": 2, "device_id": id, "character": "Cake", "firmware": "0.8.4",
+		"board": "esp-box-3", "width": 320, "height": 240, "shape": "rect", "has_battery": false, "wifi_rssi": -60, "cpu_pct": 27,
+		"free_heap": 65536, "min_free_heap": 32768, "free_psram": 6291456, "uptime_s": 320, "volume": 70})
+	board.until(t, isDisplay)
+	b.ws.mu.Lock()
+	device := b.ws.devices[id]
+	probe := device.client.ping(time.Now().Add(-12 * time.Millisecond))
+	b.ws.mu.Unlock()
+	board.write(t, maskedFrame(wsPong, true, []byte("not mine")))
+	board.barrier(t)
+	if device.client.pingRTT() != nil {
+		t.Fatal("unsolicited pong was accepted")
+	}
+	board.write(t, maskedFrame(wsPong, true, probe.data))
+	board.barrier(t)
+	testRequest(t, "GET", base+"/api/diagnostics", "", nil, 401)
+	testRequest(t, "GET", base+"/api/diagnostics?token=unit", "", nil, 401)
+	raw := testRequest(t, "GET", base+"/api/diagnostics", "unit", nil, 200)
+	var report diagReport
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Generated.IsZero() || len(report.Devices) != 1 || report.Turns == nil || report.Latency["render_ms"].Count == 0 {
+		t.Fatalf("invalid diagnostics response: %s", raw)
+	}
+	d := report.Devices[0]
+	if !d.WS || d.Board != "esp-box-3" || d.Firmware != "0.8.4" || d.RTT == nil || *d.RTT < 12 ||
+		d.CPU == nil || *d.CPU != 27 || *d.WiFi != -60 || *d.FreeHeap != 65536 || *d.MinHeap != 32768 || *d.FreePSRAM != 6291456 ||
+		*d.HasBattery || d.DeviceVol == nil || *d.DeviceVol != 70 || d.Frame.Bytes >= d.Frame.RawBytes || d.Frame.Codec != "RLE565" {
+		t.Fatalf("invalid device telemetry: %+v", d)
+	}
+	view := testConnectWS(t, base, "unit", true)
+	view.json(t, object{"ev": "hello", "role": "web"})
+	view.until(t, hasWS("peers", id))
+	view.json(t, object{"ev": "watch", "device_id": id})
+	view.until(t, hasWS("svg", "cat-ring"))
+	tap := func(x, y int) { board.json(t, object{"ev": "tap", "x": x, "y": y}) }
+	tap(160, 210) // Menu after the 360-square view is letterboxed into 320×240.
+	view.until(t, hasWS("svg", "menu-stats"))
+	tap(207, 146)
+	hud := view.until(t, hasWS("svg", "CPU 27%"))
+	if !strings.Contains(string(hud.data), "Cake · 0.8.4 · esp-box-3") || !strings.Contains(string(hud.data), "USB") {
+		t.Fatal("missing identity/power in HUD")
+	}
+	board.json(t, object{"ev": "status", "cpu_pct": 39, "wifi_rssi": -54})
+	view.until(t, hasWS("svg", "CPU 39%"))
+	tap(160, 210)
+	view.until(t, hasWS("svg", "menu-stats"))
+	tap(160, 210)
+	view.until(t, hasWS("svg", "cat-ring"))
+}
+
+func TestDiagnosticsFirstSpokenDeltaAndAudio(t *testing.T) {
+	b := &bridge{}
+	ctx := b.traceTurn(t.Context(), "box", "Mint", "voice", time.Now().Add(-10*time.Millisecond))
+	tr := traceFrom(ctx)
+	text := streamedText{onFirst: func() { tr.measure(diagLLMFirst, time.Millisecond) }}
+	if next := text.add(" \nHey"); len(next) != 0 || tr.record.First == nil {
+		t.Fatal("time-to-first-text waited for a complete sentence")
+	}
+	audio := newAudioStream()
+	start := time.Now()
+	audio.append([]byte{1, 0})
+	audio.traceFirst(tr, start)
+	tr.audioEnqueued(time.Now())
+	row := b.diagnosticReport().Turns[0]
+	if row.TTS == nil || row.E2E == nil || *row.E2E < 10 {
+		t.Fatal(row)
+	}
+}
+
+func TestAccessibleRecordingControls(t *testing.T) {
+	transcribed := make(chan struct{}, 2)
+	_, base := wsHarness(t, func(b *bridge, dir string) {
+		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			transcribed <- struct{}{}
+			_, _ = io.WriteString(w, `{"transcript":""}`)
+		})
+	})
+	dev := testConnectWS(t, base, "unit", false)
+	dev.hello(t, "echoear-mic-controls", "Cake")
+	tap := func(id string) { dev.json(t, object{"ev": "tap", "id": id}) }
+	record := func() {
+		tap("cat-ring")
+		dev.until(t, hasWS("rec", `"action":"start"`))
+		dev.until(t, hasWS("patch", "rec-send"))
+		dev.json(t, object{"ev": "rec_start"})
+		dev.write(t, maskedFrame(wsBinary, true, []byte{micPrefix, 12, 0}))
+	}
+	record()
+	tap("rec-cancel")
+	dev.until(t, hasWS("rec", `"cancelled":true`))
+	dev.until(t, hasWS("chime", `"kind":"cancel"`))
+	dev.json(t, object{"ev": "rec_end"})
+	dev.barrier(t)
+	select {
+	case <-transcribed:
+		t.Fatal("cancelled PCM reached Hex")
+	default:
+	}
+	record()
+	tap("rec-send")
+	dev.until(t, hasWS("rec", `"action":"stop"`))
+	select {
+	case <-transcribed:
+		// The target did not send rec_end; buffered hardware PCM went immediately.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send waited for the hardware rec_end event")
+	}
+	dev.json(t, object{"ev": "rec_end"})
+	dev.barrier(t)
+	raw := apiObjects(t, base+"/api/diagnostics", "recent_turns")
+	if len(raw) != 1 || raw[0].(object)["source"] != "voice" {
+		t.Fatal("recording did not produce exactly one voice turn", raw)
+	}
+}
+
+func TestAccessibleStopAndFaceInterrupt(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "echoear-stop"
+	dev := testConnectWS(t, base, "unit", false)
+	dev.hello(t, id, "Cake")
+	for _, target := range []string{"stop", "cat-ring"} {
+		cancelled := make(chan struct{})
+		b.ws.mu.Lock()
+		b.ws.startTurn(b.ws.devices[id], time.Now(), false, func(ctx context.Context, _ uint64) {
+			<-ctx.Done()
+			close(cancelled)
+		})
+		b.ws.mu.Unlock()
+		dev.until(t, hasWS("patch", `"stop":{"vis":true}`))
+		dev.json(t, object{"ev": "tap", "id": target})
+		dev.until(t, hasWS("chime", `"kind":"cancel"`))
+		select {
+		case <-cancelled:
+		case <-time.After(2 * time.Second):
+			t.Fatal("did not interrupt thinking with", target)
+		}
+	}
+}

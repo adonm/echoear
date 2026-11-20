@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,23 +47,35 @@ type wsEvent struct {
 }
 
 type wsStatus struct {
-	Battery *int  `json:"battery_pct"`
-	MV      *int  `json:"battery_mv"`
-	Charge  *bool `json:"charging"`
-	RSSI    *int  `json:"rssi"`
+	Battery    *int     `json:"battery_pct"`
+	MV         *int     `json:"battery_mv"`
+	Charge     *bool    `json:"charging"`
+	RSSI       *int     `json:"rssi,omitempty"`
+	WiFi       *int     `json:"wifi_rssi"`
+	HasBattery *bool    `json:"has_battery"`
+	Volume     *int     `json:"volume"`
+	FreeHeap   *uint64  `json:"free_heap"`
+	MinHeap    *uint64  `json:"min_free_heap"`
+	FreePSRAM  *uint64  `json:"free_psram"`
+	Uptime     *uint64  `json:"uptime_s"`
+	CPU        *float64 `json:"cpu_pct"`
+	Partition  string   `json:"running_partition,omitempty"`
 }
 
 type wsClient struct {
-	wire    *websocket
-	ctx     context.Context
-	cancel  context.CancelFunc
-	out     chan wsFrame
-	outMu   sync.Mutex
-	drained chan struct{}
-	role    string
-	watch   string
-	device  *wsDevice
-	scope   *virtualClient
+	wire       *websocket
+	ctx        context.Context
+	cancel     context.CancelFunc
+	out        chan wsFrame
+	outMu      sync.Mutex
+	drained    chan struct{}
+	role       string
+	watch      string
+	device     *wsDevice
+	scope      *virtualClient
+	pingMu     sync.Mutex
+	pingSentAt time.Time
+	rtt        *float64
 }
 
 type wsDevice struct {
@@ -78,9 +93,9 @@ type wsDevice struct {
 	ambientEMA float64
 	hasAmbient bool
 	pct        int
-	mV         int
-	rssi       int
 	charging   bool
+	telemetry  wsStatus
+	frame      *diagFrame
 	svg        svgScreen
 	svgRaw     string
 	app        *appInstance
@@ -91,8 +106,9 @@ type wsDevice struct {
 	viewRev          uint64 // Custom scene revision, excluding transient display changes.
 	pending          *sceneView
 	card             *sceneView
-	drawer           bool
-	volMenu          bool
+	drawer           string
+	peerPage         int
+	statsAt          time.Time
 	rev              uint64
 	pose             catPose
 	moodAt           time.Time
@@ -108,15 +124,17 @@ type wsDevice struct {
 	lastIntercomFrom string
 	lastIntercomAt   time.Time
 
-	recAt         time.Time
-	recOpen       bool
-	recTarget     string
-	mic           []byte
-	turn          uint64
-	cancel        context.CancelFunc
-	busy          bool
-	agentSetScene bool
-	agentSpoke    bool
+	recAt          time.Time
+	recOpen        bool
+	recTarget      string
+	recStopping    bool
+	recIgnoreStart bool
+	mic            []byte
+	turn           uint64
+	cancel         context.CancelFunc
+	busy           bool
+	agentSetScene  bool
+	agentSpoke     bool
 
 	audio      uint64
 	stopAudio  context.CancelFunc
@@ -199,6 +217,7 @@ func (h *wsHub) serveScope(w http.ResponseWriter, r *http.Request, scope *virtua
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	c := &wsClient{wire: wire, ctx: ctx, cancel: cancel, out: make(chan wsFrame, 192), scope: scope}
+	wire.onPong = c.pong
 	h.mu.Lock()
 	if closed := h.closed; closed || len(h.clients) >= wsConnections {
 		h.mu.Unlock()
@@ -240,7 +259,7 @@ func (h *wsHub) serveScope(w http.ResponseWriter, r *http.Request, scope *virtua
 
 func (c *wsClient) write() {
 	defer c.wire.conn.Close()
-	ping := time.NewTicker(25 * time.Second)
+	ping := time.NewTicker(12 * time.Second)
 	defer ping.Stop()
 	for c.ctx.Err() == nil {
 		select {
@@ -256,12 +275,34 @@ func (c *wsClient) write() {
 				return
 			}
 		case <-ping.C:
-			if c.wire.write(wsFrame{op: wsPing}) != nil {
+			if c.wire.write(c.ping(time.Now())) != nil {
 				return
 			}
 		}
 	}
 	_ = c.wire.write(wsCloseFrame(1001))
+}
+
+func (c *wsClient) ping(now time.Time) wsFrame {
+	c.pingMu.Lock()
+	c.pingSentAt = now
+	c.pingMu.Unlock()
+	return wsFrame{wsPing, le.AppendUint64(nil, uint64(now.UnixNano()))}
+}
+
+func (c *wsClient) pong(data []byte) {
+	c.pingMu.Lock()
+	defer c.pingMu.Unlock()
+	if len(data) == 8 && !c.pingSentAt.IsZero() && le.Uint64(data) == uint64(c.pingSentAt.UnixNano()) {
+		c.rtt = new(milliseconds(time.Since(c.pingSentAt)))
+		c.pingSentAt = time.Time{}
+	}
+}
+
+func (c *wsClient) pingRTT() *float64 {
+	c.pingMu.Lock()
+	defer c.pingMu.Unlock()
+	return c.rtt
 }
 
 func (c *wsClient) enqueue(f wsFrame) bool {
@@ -462,7 +503,7 @@ func (h *wsHub) broadcastPeers() {
 			}
 		}
 		for _, d := range h.devices {
-			if d.drawer {
+			if d.drawer == "intercom" {
 				h.render(d, time.Now(), false)
 			}
 		}
@@ -588,6 +629,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		theme: v.Theme, pct: -1, last: now, moodAt: now}
 	d.cat = h.b.catFor(d.who)
 	d.autoVol, d.vol = h.b.volumePrefs(d.key)
+	if ev.Role == "device" {
+		d.telemetry.HasBattery = new(board == "esp-vocat")
+	}
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
 		h.dropApp(old)
@@ -624,17 +668,53 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 }
 
 func (d *wsDevice) status(s wsStatus) {
+	t := &d.telemetry
+	if s.HasBattery != nil {
+		t.HasBattery = s.HasBattery
+		if !*s.HasBattery {
+			d.pct, d.charging = -1, false
+			t.Battery, t.MV, t.Charge = nil, nil, nil
+		}
+	}
 	if s.Battery != nil {
 		d.pct = min(100, max(-1, *s.Battery))
+		if d.pct >= 0 {
+			t.Battery, t.HasBattery = new(d.pct), new(true)
+		}
 	}
 	if s.MV != nil {
-		d.mV = min(6000, max(0, *s.MV))
+		t.MV = new(min(6000, max(0, *s.MV)))
 	}
 	if s.Charge != nil {
 		d.charging = *s.Charge
+		t.Charge = s.Charge
 	}
-	if s.RSSI != nil {
-		d.rssi = min(0, max(-127, *s.RSSI))
+	if s.WiFi == nil {
+		s.WiFi = s.RSSI
+	}
+	if s.WiFi != nil && *s.WiFi < 0 {
+		t.WiFi = new(max(-127, *s.WiFi))
+	}
+	if s.Volume != nil {
+		t.Volume = new(min(100, max(0, *s.Volume)))
+	}
+	if s.FreeHeap != nil {
+		t.FreeHeap = s.FreeHeap
+	}
+	if s.MinHeap != nil {
+		t.MinHeap = s.MinHeap
+	}
+	if s.FreePSRAM != nil {
+		t.FreePSRAM = s.FreePSRAM
+	}
+	if s.Uptime != nil {
+		t.Uptime = s.Uptime
+	}
+	if s.CPU != nil && !math.IsNaN(*s.CPU) {
+		t.CPU = new(min(100., max(0., *s.CPU)))
+	}
+	if s.Partition != "" {
+		t.Partition = shortText(s.Partition, 24, false)
 	}
 }
 
@@ -670,14 +750,42 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	var view sceneView
 	var svg string
 	switch {
-	case d.drawer && mood == "idle":
-		if d.volMenu {
-			view = volumeScene(d.cat, d.autoVol, d.vol)
-		} else {
+	case d.drawer != "" && mood == "idle":
+		switch d.drawer {
+		case "volume":
+			view = volumeScene(d.autoVol, d.vol)
+		case "voice":
+			view = voiceScene(h.b.voices.get(d.who.DeviceID, d.voiceTheme()))
+		case "intercom":
 			peers, _ := h.combinedPeers(d.who.DeviceID)
-			peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
-			view = drawerScene(d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers, d.autoVol, d.vol)
+			choices := []menuPeer{{"all", "Everyone", "#FFADAC", "#FFD68B"}}
+			for _, p := range peers {
+				if now.Unix()-p.LastSeen <= 180 {
+					cat := h.b.catFor(p)
+					if device := h.devices[strings.ToLower(p.DeviceID)]; device != nil && h.active(device) {
+						cat = device.cat
+					}
+					choices = append(choices, menuPeer{p.DeviceID, p.Character, cat.FaceBG, cat.AccentColor})
+				}
+			}
+			d.peerPage = min(max(0, d.peerPage), (len(choices)-1)/4)
+			view = intercomSceneMenu(choices, d.peerPage)
+		case "stats":
+			if d.client.scope == nil {
+				d.statsAt = now
+				view = h.statsScene(d)
+				break
+			}
+			fallthrough
+		default:
+			view = menuHome(h.b.voices.get(d.who.DeviceID, d.voiceTheme()), d.autoVol, d.vol, d.client.scope != nil)
 		}
+	case mood == "listening":
+		view = catChrome(d.cat, pose)
+		if d.client.role != "web" && d.proto < 2 {
+			view = catScene(d.cat, pose)
+		}
+		svg = catSVG(d.cat, pose)
 	case d.card != nil && (mood == "idle" || mood == "speaking" || mood != "sleepy" && d.card.actions["cat"].kind == "dismiss"):
 		view = *d.card
 	case d.app != nil && mood != "sleepy":
@@ -695,6 +803,14 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 			view = catScene(d.cat, pose)
 		}
 		svg = catSVG(d.cat, pose)
+	}
+	if svg == "" && (mood == "thinking" || mood == "speaking") {
+		view.actions = maps.Clone(view.actions)
+		if view.actions == nil {
+			view.actions = make(map[string]sceneAction)
+		}
+		view.nodes = slices.Clone(view.nodes)
+		view.stopControl()
 	}
 	var legacy object
 	if d.client.role != "web" && d.proto < 2 {
@@ -750,7 +866,9 @@ func (h *wsHub) animate(ctx context.Context) {
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
 					h.setSleeping(d, true)
 					h.render(d, now, false)
-				case !d.drawer && (d.app == nil && d.view == nil || d.asleep || !d.recAt.IsZero()):
+				case d.drawer == "stats" && !d.asleep && now.Sub(d.statsAt) >= diagInterval:
+					h.render(d, now, false)
+				case (d.drawer == "" || d.asleep) && (d.app == nil && d.view == nil || d.asleep || !d.recAt.IsZero()):
 					p := poseFrame(now, d.moodAt, d.last, d.pose.mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 					p.blink = p.blink || now.Before(d.pet)
 					if p != d.pose {
@@ -823,7 +941,9 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	switch ev.Event {
 	case "status":
 		d.status(ev.wsStatus)
-		h.render(d, now, false)
+		if d.drawer != "stats" {
+			h.render(d, now, false)
+		}
 	case "tap":
 		h.pointer(d, ev, now, c == d.client && c.role == "device" && d.proto >= 2)
 	case "head":
@@ -836,13 +956,18 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.render(d, now, false)
 		}
 	case "rec_start":
-		if target, ok := recordTarget(ev.Target); ok && !d.recOpen {
+		if target, ok := recordTarget(ev.Target); ok && !d.recOpen && !d.recIgnoreStart {
 			if target == "" {
 				target = d.recTarget
 			}
-			h.startRecording(d, target, now, false)
+			if !d.recAt.IsZero() {
+				d.recOpen = true
+			} else {
+				h.startRecording(d, target, now, false)
+			}
 		}
 	case "rec_end":
+		d.recIgnoreStart = false
 		if !d.recAt.IsZero() {
 			h.endRecording(d, ev, now)
 		}
@@ -916,6 +1041,8 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		if !inside {
 			return
 		}
+	} else if ev.ID == "drawer" || ev.ID == "text" {
+		ev.ID = "menu"
 		ev.ID = hitID(d.svg.hits, ev.X, ev.Y)
 		if ev.ID == "" {
 			return
@@ -935,13 +1062,37 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		}
 	}
 	switch a.kind {
-	case "drawer":
-		h.push(d, object{"op": "chime", "kind": "tap"}, false)
-		d.drawer, d.volMenu, d.card, d.pending = true, false, nil, nil
+	case "menu":
+		h.chime(d, "tap")
+		d.drawer, d.card, d.pending = "menu", nil, nil
 		if !d.customScene {
 			d.view = nil
 		}
 		h.render(d, now, false)
+	case "menu-open", "menu-back", "intercom-page":
+		switch a.kind {
+		case "menu-open":
+			d.drawer, d.peerPage = a.value, 0
+		case "menu-back":
+			if d.drawer == "menu" {
+				d.drawer = ""
+			} else {
+				d.drawer = "menu"
+			}
+		case "intercom-page":
+			delta, _ := strconv.Atoi(a.value)
+			d.peerPage += delta
+		}
+		h.chime(d, "tap")
+		h.render(d, now, false)
+	case "rec-cancel", "rec-send":
+		h.recordingControl(d, now, a.kind == "rec-cancel")
+	case "stop":
+		playing := d.ttsStarted || d.awaitAck
+		h.leaveScene(d, false, now)
+		if !playing {
+			h.chime(d, "cancel")
+		}
 	case "cat":
 		h.leaveScene(d, waiting && d.customScene, now)
 	case "dismiss":
@@ -949,15 +1100,11 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		h.render(d, now, false)
 	case "local":
 		h.localTap(d, key, event, waiting, now)
-	case "voice":
-		if err := h.b.voices.toggle(d.who.DeviceID, d.voiceTheme()); err == nil {
+	case "voice-select":
+		if err := h.b.voices.save(d.who.DeviceID, a.value); err == nil {
 			h.chime(d, "tap")
 			h.render(d, now, false)
 		}
-	case "vol-menu", "vol-back":
-		d.volMenu = a.kind == "vol-menu"
-		h.chime(d, "tap")
-		h.render(d, now, false)
 	case "vol-auto", "vol-minus", "vol-plus":
 		level := d.vol
 		switch a.kind {
@@ -966,12 +1113,12 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		case "vol-plus":
 			level = min(100, level+10)
 		}
-		if err := h.setVolume(d.client.ctx, d, a.kind == "vol-auto", level, now); err != nil {
+		if err := h.setVolume(d.client.ctx, d, a.kind == "vol-auto" && !d.autoVol, level, now); err != nil {
 			h.push(d, object{"op": "error", "status": 502, "error": err.Error()}, true)
 		}
 	case "listen", "reply", "reply_to":
 		if !d.recAt.IsZero() {
-			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
+			h.recordingControl(d, now, false)
 		} else {
 			h.startRecording(d, a.value, now, true)
 		}
@@ -1013,7 +1160,7 @@ func (h *wsHub) leaveScene(d *wsDevice, waiting bool, now time.Time) {
 func (h *wsHub) clearView(d *wsDevice) {
 	h.dropApp(d)
 	h.clearLocalScene(d)
-	d.drawer, d.volMenu, d.view, d.pending, d.card, d.customScene = false, false, nil, nil, nil, false
+	d.drawer, d.view, d.pending, d.card, d.customScene = "", nil, nil, nil, false
 }
 
 func (d *wsDevice) volumeFrame(persist bool) object {

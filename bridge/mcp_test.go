@@ -331,7 +331,7 @@ func TestCustomSceneSurvivesRecordingAndPlainTurn(t *testing.T) {
 		}
 	}
 	c.json(t, object{"ev": "rec_start"})
-	c.until(t, hasWS("patch", `"s":"Cat / Mic"`))
+	c.until(t, func(f wsFrame) bool { return bytes.Contains(f.data, []byte(`"id":"rec-send"`)) })
 	assertScene("Tiramisu")
 	c.json(t, object{"ev": "rec_end", "cancelled": true})
 	c.until(t, hasWS("patch", `"s":"Cat"`))

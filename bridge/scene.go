@@ -218,13 +218,13 @@ func catScene(cat catState, pose catPose) sceneView {
 
 func catChrome(cat catState, pose catPose) sceneView {
 	s := sceneView{bg: cat.FaceBG, nodes: make([]object, 0, 10), actions: map[string]sceneAction{
-		"text": {"drawer", ""}, "cat-ring": {"listen", ""},
+		"cat-ring": {"listen", ""},
 	}}
 	add := func(ns ...object) { s.nodes = append(s.nodes, ns...) }
 	ringColor, ringWidth := catInk, 3
 	switch pose.mood {
 	case "listening":
-		ringColor, ringWidth = "#FF5964", 5
+		ringColor, ringWidth = "#FF6978", 6+pose.dot
 	case "thinking":
 		ringColor, ringWidth = "#F59E0B", 5
 	case "speaking":
@@ -251,51 +251,32 @@ func catChrome(cat catState, pose catPose) sceneView {
 	if !cat.Configured && pose.mood == "idle" && !pose.meter {
 		add(label("starter-badge", 180, 263, 1, "Say hi to design me!", "#475569"))
 	}
-	add(visible(comicButton("text", 137, 284, 86, 36, "Text", "#FFFAEE"), pose.mood != "sleepy"))
+	active := pose.mood == "thinking" || pose.mood == "speaking"
+	if active {
+		s.actions["cat-ring"] = sceneAction{"stop", ""}
+	}
+	s.control("menu", "menu", "", 120, 292, 120, 48, "Menu", "", "menu", "#202538", "#FFFFFF")
+	visible(s.nodes[len(s.nodes)-1], pose.mood == "idle" || pose.mood == "")
+	listening := pose.mood == "listening"
+	first := len(s.nodes)
+	add(box("listening-bg", 103, 30, 154, 40, 20, "#202538"),
+		circ("listening-dot", 124, 50, 5, "#FF6978"), uiLabel("listening", 187, 56, 18, "Listening…", "#FFFFFF"))
+	s.control("rec-cancel", "rec-cancel", "", 56, 284, 114, 52, "Cancel", "", "cancel", "#412936", "#FFE3E8")
+	s.control("rec-send", "rec-send", "", 190, 284, 114, 52, "Send", "", "check", "#54E6A9", "#0A2821")
+	for _, n := range s.nodes[first:] {
+		visible(n, listening)
+	}
+	s.stopControl()
+	visible(s.nodes[len(s.nodes)-1], active)
 	return s
 }
 
 func volumeLabel(auto bool, level int) string {
+	value := strconv.Itoa(level) + "%"
 	if auto {
-		return "Vol: Auto"
+		return "Auto · " + value
 	}
-	return "Vol: " + strconv.Itoa(level) + "%"
-}
-
-func drawerScene(cat catState, voice string, peers []peer, auto bool, level int) sceneView {
-	s := sceneView{bg: "#251C3B", title: "Text", nodes: []object{
-		label("drawer-title", 180, 57, 2, "Text", "#FFFAEE"),
-		comicButton("cat", 135, 86, 90, 36, "Cat", cat.FaceBG),
-		comicButton("voice", 90, 300, 180, 36, "Voice: "+voiceNames[voice], cat.AccentColor),
-		comicButton("vol-menu", 102, 260, 156, 36, volumeLabel(auto, level), cat.FaceBG),
-	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "voice": {"voice", ""}, "vol-menu": {"vol-menu", ""}}}
-	for i, who := range peers[:min(4, len(peers))] {
-		id := "msg-" + strconv.Itoa(i)
-		s.nodes = append(s.nodes, comicButton(id, 70, 130+i*32, 220, 29, "Msg "+truncate(who.Character, 22), cat.FaceBG))
-		s.actions[id] = sceneAction{"reply", who.DeviceID}
-	}
-	if len(peers) == 0 {
-		s.nodes = append(s.nodes, label("peers-empty", 180, 176, 1, "No nearby cats", "#FFFAEE"))
-	}
-	return s
-}
-
-func volumeScene(cat catState, auto bool, level int) sceneView {
-	autoTint := "#FFFAEE"
-	if auto {
-		autoTint = cat.AccentColor
-	}
-	return sceneView{bg: "#251C3B", title: "Volume", nodes: []object{
-		label("vol-title", 180, 73, 2, "Volume", "#FFFAEE"),
-		comicButton("vol-auto", 108, 108, 144, 49, "Auto", autoTint),
-		comicButton("vol-minus", 77, 172, 88, 54, "-", cat.FaceBG),
-		comicButton("vol-plus", 195, 172, 88, 54, "+", cat.FaceBG),
-		label("vol-level", 180, 244, 1, strconv.Itoa(level)+"%", "#FFFAEE"),
-		comicButton("vol-back", 124, 264, 112, 45, "Back", "#FFFAEE"),
-	}, actions: map[string]sceneAction{
-		"vol-auto": {"vol-auto", ""}, "vol-minus": {"vol-minus", ""},
-		"vol-plus": {"vol-plus", ""}, "vol-back": {"vol-back", ""},
-	}}
+	return value
 }
 
 func screenScene(screen object, accent string) sceneView {
@@ -456,6 +437,9 @@ func poseFrame(now, since, idle time.Time, mood string, pct, volume int, charge,
 	switch mood {
 	case "idle", "listening":
 		p.blink = now.Sub(idle)%(3500*time.Millisecond) >= 3350*time.Millisecond
+		if mood == "listening" {
+			p.dot = int(now.Sub(since)/(300*time.Millisecond)) % 3
+		}
 	case "thinking":
 		p.dot = int(now.Sub(since)/(160*time.Millisecond)) % 3
 	case "speaking":

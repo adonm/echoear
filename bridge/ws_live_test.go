@@ -83,11 +83,11 @@ func TestLiveWebSocket(t *testing.T) {
 		t.Fatalf("battery update did not use a dirty rectangle: %v", battery)
 	}
 	from.json(t, object{"ev": "tap", "x": 180, "y": 300})
-	drawer := viewer.until(t, hasWS("svg", "Voice:"))
+	drawer := viewer.until(t, hasWS("svg", "menu-voice"))
 	if bytes.Contains(drawer.data, []byte(`data-id=\"new\"`)) {
 		t.Fatal("hardware drawer offered reset")
 	}
-	from.json(t, object{"ev": "tap", "x": 180, "y": 106})
+	from.json(t, object{"ev": "tap", "x": 180, "y": 315})
 	viewer.until(t, hasWS("svg", "cat-ring"))
 	const code = `let text="Ready";
 function render(){return '<svg viewBox="0 0 360 360"><rect data-id="flip" x="140" y="95" width="80" height="50" fill="gold"/><text x="180" y="195" fill="white" text-anchor="middle">'+text+'</text></svg>';}

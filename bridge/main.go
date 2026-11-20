@@ -41,6 +41,7 @@ func openCodeSettings(agent, spec string) (ocSettings, error) {
 }
 
 func run() error {
+	started := time.Now()
 	token := os.Getenv("ECHOEAR_BRIDGE_TOKEN")
 	if !tokenRE.MatchString(token) {
 		return errors.New("set ECHOEAR_BRIDGE_TOKEN to a nonempty ASCII token without whitespace")
@@ -85,7 +86,8 @@ func run() error {
 		return err
 	}
 	fallbackVoice := env("ECHOEAR_TTS_VOICE", heartVoice)
-	db, err := openBridgeDB(context.Background(), env("ECHOEAR_DB_PATH", filepath.Join(local, "echoear.db")), local,
+	dbPath := env("ECHOEAR_DB_PATH", filepath.Join(local, "echoear.db"))
+	db, err := openBridgeDB(context.Background(), dbPath, local,
 		os.Getenv("ECHOEAR_TURSO_URL"), os.Getenv("ECHOEAR_TURSO_AUTH_TOKEN"), fallbackVoice)
 	if err != nil {
 		return err
@@ -154,6 +156,8 @@ func run() error {
 	}
 	b.tunnels = newTunnelManager(b, bin, runner)
 	b.tunnels.restore()
+	stopDiagnostics := b.sampleDiagnostics(started, dbPath)
+	defer stopDiagnostics()
 	b.timers = newTimerManager(b)
 	if err := b.timers.restore(time.Now()); err != nil {
 		b.timers.close()

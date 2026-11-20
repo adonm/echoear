@@ -761,7 +761,7 @@ func (h *wsHub) scheduleSceneTimer(d *wsDevice, delay time.Duration, run func(ti
 }
 
 func (h *wsHub) showCustomScene(d *wsDevice, view sceneView, now time.Time, full bool) {
-	d.pending, d.card, d.drawer, d.agentSetScene = nil, nil, false, d.busy
+	d.pending, d.card, d.drawer, d.agentSetScene = nil, nil, "", d.busy
 	h.wake(d, now)
 	h.updateCustomScene(d, view, now, full)
 }

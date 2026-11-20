@@ -66,7 +66,7 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 		t.Fatal("timer didn't synthesize and remove exactly once")
 	}
 	dev.json(t, object{"ev": "tap", "id": "cat"})
-	dev.until(t, hasWS("patch", `"card"`))
+	dev.until(t, func(f wsFrame) bool { return bytes.Contains(f.data, []byte(`"id":"cat-ring"`)) })
 	entries := apiObjects(t, base+"/api/devices/"+id+"/messages", "messages")
 	if len(entries) != 2 || entries[0].(object)["text"] != "Timer: Cake break" || entries[1].(object)["source"] != "timer" {
 		t.Fatal(entries)

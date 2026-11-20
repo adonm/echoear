@@ -320,13 +320,13 @@ func TestFaceSVGPoseFilterAndChrome(t *testing.T) {
 		if !strings.Contains(svg, "#AAAAAA") || strings.Contains(svg, `data-id="fake"`) {
 			t.Fatal("shared art lost or gained a hit target", svg)
 		}
-		if tc.pose.mood == "listening" && !strings.Contains(svg, "#FF5964") {
+		if tc.pose.mood == "listening" && !strings.Contains(svg, "#FF6978") {
 			t.Fatal("listening halo missing")
 		}
 	}
 	screen, err := buildScreen(catSVG(cat, catPose{mood: "idle"}), false, roundScreen)
-	if err != nil || hitID(screen.hits, 180, 300) != "text" {
-		t.Fatalf("art blocked Text: %v, %v", screen.hits, err)
+	if err != nil || hitID(screen.hits, 180, 300) != "menu" {
+		t.Fatalf("art blocked Menu: %v, %v", screen.hits, err)
 	}
 }
 

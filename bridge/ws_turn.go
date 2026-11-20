@@ -21,6 +21,7 @@ func recordTarget(s string) (string, bool) {
 
 func (h *wsHub) clearRecording(d *wsDevice) {
 	d.recAt, d.recOpen, d.recTarget, d.mic = time.Time{}, false, "", nil
+	d.recStopping = false
 }
 
 func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, request bool) {
@@ -28,17 +29,33 @@ func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, reques
 	waiting := target == "" && h.hasWaiter(d)
 	if !waiting {
 		h.cancelTurn(d)
-		d.drawer, d.card, d.pending = false, nil, nil
+		d.drawer, d.card, d.pending = "", nil, nil
 		if !d.customScene {
 			d.view = nil
 		}
 	}
 	h.stopPlayback(d, true)
 	d.recAt, d.recOpen, d.recTarget, d.mic = now, !request, target, nil
+	d.recStopping, d.recIgnoreStart = false, false
 	if request {
 		h.push(d, object{"op": "rec", "action": "start", "target": target}, false)
 	}
 	h.render(d, now, false)
+}
+
+func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
+	if d.recAt.IsZero() || d.recStopping && !cancelled {
+		return
+	}
+	h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget, "cancelled": cancelled}, false)
+	if cancelled {
+		d.recIgnoreStart = !d.recOpen
+		h.endRecording(d, wsEvent{Cancelled: true}, now)
+	} else if len(d.mic) != 0 && d.client.role != "web" {
+		h.endRecording(d, wsEvent{}, now)
+	} else {
+		d.recStopping = true // Let the client finish and deliver any pending PCM.
+	}
 }
 
 func (h *wsHub) micChunk(c *wsClient, data []byte) {
@@ -80,18 +97,21 @@ func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 	}
 	d.measureAmbient(pcm)
 	if target == "" && h.hasWaiter(d) {
+		character := d.cat.Name
 		h.render(d, now, false)
 		go func() {
 			ctx, cancel := context.WithTimeout(d.client.ctx, turnTimeout)
 			defer cancel()
-			if text, err := h.b.hex.transcribe(ctx, pcm, pcmType); err == nil && text != "" {
+			ctx = h.b.traceTurn(ctx, d.who.DeviceID, character, "voice", now)
+			if text, err := h.b.transcribe(ctx, pcm, pcmType); err == nil && text != "" {
 				h.b.deviceEvent(d.who.DeviceID, "speech", object{"text": text, "source": "voice"})
 			}
 		}()
 		return
 	}
+	character := d.cat.Name
 	h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
-		h.runVoice(ctx, d, id, target, pcm)
+		h.runVoice(h.b.traceTurn(ctx, d.who.DeviceID, character, "voice", now), d, id, target, pcm)
 	})
 }
 
@@ -129,7 +149,7 @@ func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, run func(co
 		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
 		h.clearRecording(d)
 	}
-	d.drawer, d.card, d.pending = false, nil, nil
+	d.drawer, d.card, d.pending = "", nil, nil
 	if !keepView && !d.customScene {
 		d.view = nil
 	}
@@ -203,13 +223,13 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		}
 		recipients := targets(others, target)
 		voice := h.b.voiceFor(sender)
-		receipts, legacy := h.deliverOnline(sender, recipients, voice, "", pcm)
+		receipts, legacy := h.deliverOnline(sender, recipients, voice, "", pcm, traceFrom(ctx))
 		// Connected peers can play the original clip before Hex has generated a caption.
 		if len(receipts) != 0 && len(legacy) == 0 {
 			go func() {
-				captionCtx, cancel := context.WithTimeout(h.b.root, 30*time.Second)
+				captionCtx, cancel := context.WithTimeout(context.WithValue(h.b.root, traceKey{}, traceFrom(ctx)), 30*time.Second)
 				defer cancel()
-				transcript, _ := h.b.hex.transcribe(captionCtx, pcm, pcmType)
+				transcript, _ := h.b.transcribe(captionCtx, pcm, pcmType)
 				h.caption(receipts, sender, transcript)
 				ids := make([]string, 0, len(receipts))
 				for _, r := range receipts {
@@ -222,7 +242,7 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		}
 		var transcript string
 		if len(recipients) > 0 {
-			transcript, _ = h.b.hex.transcribe(ctx, pcm, pcmType)
+			transcript, _ = h.b.transcribe(ctx, pcm, pcmType)
 			h.caption(receipts, sender, transcript)
 		}
 		res := h.b.deliverHTTP(ctx, sender, legacy, voice, transcript, pcm)
@@ -233,7 +253,7 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		h.confirm(ctx, d, id, target, recipients, len(res.sent) != 0, len(res.sent) < len(recipients))
 		return
 	}
-	text, err := h.b.hex.transcribe(ctx, pcm, pcmType)
+	text, err := h.b.transcribe(ctx, pcm, pcmType)
 	if err != nil {
 		h.turnError(d, id, "Could not hear that. Try again.")
 		return
@@ -247,6 +267,9 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 }
 
 func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, source string, pcm []byte) {
+	if traceFrom(ctx) == nil {
+		ctx = h.b.traceTurn(ctx, d.who.DeviceID, h.b.catFor(d.who).Name, source, time.Now())
+	}
 	others, err := h.peerSnapshot(d.who.DeviceID)
 	if err != nil || ctx.Err() != nil {
 		h.turnError(d, id, "Could not find nearby cats.")
@@ -262,7 +285,7 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		return
 	}
 	gen, err := h.b.generateReply(ctx, ctx, d.who, text, turnOptions{source: source, web: d.virtual(),
-		publish: func(stream *AudioStream) { h.publish(d, id, ctx, stream) }})
+		publish: func(stream *AudioStream, start time.Time) { h.publish(d, id, ctx, stream, start) }})
 	if err != nil {
 		h.turnError(d, id, "Could not finish that turn.")
 		return
@@ -296,6 +319,9 @@ func (h *wsHub) turnScreen(id string, live *turnContext) {
 }
 
 func (h *wsHub) sendIntercom(ctx context.Context, d *wsDevice, id uint64, others []peer, target, text string, pcm []byte) {
+	if traceFrom(ctx) == nil {
+		ctx = h.b.traceTurn(ctx, d.who.DeviceID, h.b.catFor(d.who).Name, "intercom", time.Now())
+	}
 	recipients := targets(others, target)
 	res := h.b.deliver(ctx, d.who, recipients, text, pcm)
 	h.confirm(ctx, d, id, target, recipients, len(res.sent) != 0, len(res.failed) != 0)
@@ -320,10 +346,14 @@ func (h *wsHub) confirm(ctx context.Context, d *wsDevice, id uint64, target stri
 }
 
 func (h *wsHub) sayTurn(ctx context.Context, d *wsDevice, id uint64, text string, view *sceneView) {
+	start := time.Now()
+	if traceFrom(ctx) == nil {
+		ctx = h.b.traceTurn(ctx, d.who.DeviceID, h.b.catFor(d.who).Name, "tap", start)
+	}
 	w := h.b.worker
 	if w != nil && w.ready.Load() {
 		stream := newAudioStream()
-		h.publish(d, id, ctx, stream)
+		h.publish(d, id, ctx, stream, start)
 		voice := h.b.voiceFor(d.who)
 		pcm := h.b.clips.peek(voice, text)
 		if pcm == nil {
@@ -341,7 +371,7 @@ func (h *wsHub) sayTurn(ctx context.Context, d *wsDevice, id uint64, text string
 	h.finishTurn(d, id, view)
 }
 
-func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *AudioStream) {
+func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *AudioStream, start time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.active(d) || d.turn != id || ctx.Err() != nil {
@@ -349,17 +379,21 @@ func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *Aud
 	}
 	// The turn deadline bounds synthesis; it must not cut off paced playback
 	// of PCM that is already available. An interrupt still calls stopPlayback.
-	h.play(d, stream)
+	h.playTraced(d, stream, traceFrom(ctx), start)
 }
 
 func (h *wsHub) play(d *wsDevice, stream *AudioStream) context.Context {
+	return h.playTraced(d, stream, nil, time.Time{})
+}
+
+func (h *wsHub) playTraced(d *wsDevice, stream *AudioStream, trace *turnTrace, ttsStart time.Time) context.Context {
 	h.stopPlayback(d, true)
 	ctx, cancel := context.WithCancel(d.client.ctx)
 	d.stopAudio = cancel
 	id := d.audio
 	go func() {
 		defer cancel()
-		sent := h.streamPlayback(ctx, d, id, stream)
+		sent := h.streamPlayback(ctx, d, id, stream, trace, ttsStart)
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.active(d) || d.audio != id {
@@ -380,7 +414,7 @@ func (h *wsHub) play(d *wsDevice, stream *AudioStream) context.Context {
 	return ctx
 }
 
-func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stream *AudioStream) bool {
+func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stream *AudioStream, trace *turnTrace, ttsStart time.Time) bool {
 	control := func(state string) bool {
 		return d.client.enqueueWait(ctx, textFrame(object{"op": "tts", "state": state, "audio": id}))
 	}
@@ -394,6 +428,7 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 			break
 		}
 		if i == 0 {
+			stream.traceFirst(trace, ttsStart)
 			h.mu.Lock()
 			if !h.active(d) || d.audio != id || ctx.Err() != nil {
 				h.mu.Unlock()
@@ -430,6 +465,9 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 				return false
 			}
 			now := time.Now()
+			if until.IsZero() {
+				trace.audioEnqueued(now)
+			}
 			if until.Before(now) {
 				until = now
 			}
@@ -449,9 +487,6 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 }
 
 func (d *wsDevice) measureAmbient(pcm []byte) {
-	if !d.autoVol {
-		return
-	}
 	if rms, ok := ambientRMS(pcm); ok {
 		if d.hasAmbient {
 			d.ambientEMA += 0.45 * (rms - d.ambientEMA)
@@ -501,7 +536,7 @@ type wsReceipt struct {
 	view   *sceneView
 }
 
-func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string, pcm []byte) ([]wsReceipt, []peer) {
+func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string, pcm []byte, trace *turnTrace) ([]wsReceipt, []peer) {
 	h.mu.Lock()
 	var connected []*wsDevice
 	legacy := make([]peer, 0, len(recipients))
@@ -544,7 +579,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 				h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
 				h.clearRecording(d)
 			}
-			d.drawer, d.pending = false, nil
+			d.drawer, d.pending = "", nil
 			if d.customScene || d.app != nil {
 				d.card = &view
 			} else {
@@ -558,7 +593,11 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 		h.push(d, object{"op": "chime", "kind": "intercom"}, false)
 		if d.client.ctx.Err() == nil {
 			receipts = append(receipts, wsReceipt{d, &view})
-			h.play(d, stream)
+			if pcm != nil {
+				h.playTraced(d, stream, trace, time.Time{})
+			} else {
+				h.play(d, stream)
+			}
 		}
 	}
 	h.mu.Unlock()
@@ -619,7 +658,7 @@ func (b *bridge) deliver(ctx context.Context, sender peer, recipients []peer, te
 	if b.ws == nil || len(recipients) == 0 {
 		return b.deliverHTTP(ctx, sender, recipients, voice, text, raw)
 	}
-	ws, rest := b.ws.deliverOnline(sender, recipients, voice, text, raw)
+	ws, rest := b.ws.deliverOnline(sender, recipients, voice, text, raw, traceFrom(ctx))
 	if len(rest) == len(recipients) {
 		return b.deliverHTTP(ctx, sender, recipients, voice, text, raw)
 	}

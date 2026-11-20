@@ -96,10 +96,10 @@ func TestHardwareVolumeMenuAndLegacyHeadTouch(t *testing.T) {
 	web.until(t, hasWS("svg", "cat-ring"))
 	tap := func(x, y int) { board.json(t, object{"ev": "tap", "x": x, "y": y}) }
 	tap(180, 300)
-	web.until(t, hasWS("svg", "Vol: Auto"))
-	tap(180, 278)
+	web.until(t, hasWS("svg", "Auto · 55%"))
+	tap(245, 130)
 	drawer := string(web.until(t, hasWS("svg", "vol-auto")).data)
-	for _, control := range []string{"vol-minus", "vol-plus", "vol-back"} {
+	for _, control := range []string{"vol-minus", "vol-plus", "menu-back"} {
 		if !strings.Contains(drawer, control) {
 			t.Fatal("missing volume submenu control", control)
 		}
@@ -112,15 +112,19 @@ func TestHardwareVolumeMenuAndLegacyHeadTouch(t *testing.T) {
 		board.json(t, object{"ev": "head", "action": action, "volume": 95})
 	}
 	board.json(t, object{"ev": "status", "volume": 95})
-	tap(180, 286)
-	web.until(t, hasWS("svg", "Vol: 55%"))
+	tap(180, 315)
+	web.until(t, hasWS("svg", "menu-volume"))
 	entry := apiObjects(t, base+"/api/devices", "devices")[0].(object)
 	if auto, vol := b.volumePrefs(id); auto || vol != 55 || entry["auto_volume"] != false || entry["volume"] != json.Number("55") {
 		t.Fatalf("unintended head-touch volume change: persisted %t %d, device %v", auto, vol, entry)
 	}
-	tap(180, 278)
-	web.until(t, hasWS("svg", "vol-back"))
-	tap(180, 135)
+	tap(245, 130)
+	web.until(t, hasWS("svg", "vol-auto"))
+	tap(180, 262)
+	level("55", true, false)
+	tap(180, 262)
+	level("55", false, true)
+	tap(180, 262)
 	level("55", true, false)
 	if auto, _ := b.volumePrefs(id); !auto {
 		t.Fatal("Auto was not persisted")

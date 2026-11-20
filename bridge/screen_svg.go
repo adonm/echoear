@@ -5,10 +5,221 @@ import (
 	"html"
 	"log"
 	"math"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const svgStart = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 360">`
+
+const (
+	menuBG    = "#151826"
+	menuInk   = "#F2F4FB"
+	menuMuted = "#BFC9DD"
+)
+
+var uiIcons = map[string]string{
+	"menu":     "M3 5h18M3 12h18M3 19h18",
+	"cancel":   "M5 5l14 14M19 5L5 19",
+	"check":    "M4 12l5 5L20 6",
+	"stop":     "M6 6h12v12H6z",
+	"back":     "M11 5l-7 7 7 7M4 12h16",
+	"next":     "M13 5l7 7-7 7M20 12H4",
+	"intercom": "M6 7V2m-3 5h10v15H3zm3 5h4m-4 4h4m7-8q4 4 0 8m3-11q6 7 0 14",
+	"volume":   "M3 9h4l6-5v16l-6-5H3zm13 0q3 3 0 6m3-9q5 6 0 12",
+	"voice":    "M2 12h2l2-5 4 12 4-15 3 10 2-2h3",
+	"stats":    "M2 5v15h20M5 14h4l3-7 3 9 3-5h4",
+	"plus":     "M4 12h16M12 4v16",
+	"minus":    "M4 12h16",
+}
+
+func uiLabel(id string, x, baseline, size int, text, color string) object {
+	n := label(id, x, baseline-4, max(1, size/14), text, color)
+	n["size"], n["baseline"] = size, baseline
+	return n
+}
+
+func (s *sceneView) control(id, action, value string, x, y, w, h int, text, sub, icon, bg, fg string) {
+	n := comicButton(id, x, y, w, h, text, bg)
+	n["bc"], n["sw"], n["tc"], n["icon"], n["sub"] = fg, 2, fg, icon, sub
+	if h == 78 {
+		n["r"], n["tile"] = 18, true
+	}
+	s.nodes = append(s.nodes, n)
+	s.actions[id] = sceneAction{action, value}
+}
+
+func (s *sceneView) stopControl() {
+	s.control("stop", "stop", "", 120, 292, 120, 46, "Stop", "", "stop", "#32263C", "#FFE3E8")
+}
+
+func menuScene(title string) sceneView {
+	s := sceneView{bg: menuBG, title: title, actions: map[string]sceneAction{},
+		nodes: []object{uiLabel("menu-title", 180, 76, 28, title, menuInk)}}
+	s.control("menu-back", "menu-back", "", 120, 292, 120, 46, "Back", "", "back", "#262E43", menuInk)
+	return s
+}
+
+func (s *sceneView) menuTile(i int, id, action, value, label, sub, icon, bg, fg string) {
+	s.control(id, action, value, 58+130*(i%2), 93+88*(i/2), 114, 78, label, sub, icon, bg, fg)
+}
+
+func menuHome(voice string, auto bool, level int, scoped bool) sceneView {
+	s := menuScene("Menu")
+	s.menuTile(0, "menu-intercom", "menu-open", "intercom", "Talk to…", "", "intercom", "#372530", "#FFADAC")
+	s.menuTile(1, "menu-volume", "menu-open", "volume", "Volume", volumeLabel(auto, level), "volume", "#203144", "#A6DCFF")
+	s.menuTile(2, "menu-voice", "menu-open", "voice", "Voice", voiceNames[voice], "voice", "#322741", "#E2C5FF")
+	if !scoped {
+		s.menuTile(3, "menu-stats", "menu-open", "stats", "Stats", "", "stats", "#193833", "#80F1C5")
+	}
+	return s
+}
+
+func volumeScene(auto bool, level int) sceneView {
+	s := menuScene("Volume")
+	s.nodes = append(s.nodes, uiLabel("vol-level", 180, 125, 31, volumeLabel(auto, level), menuInk),
+		box("vol-track", 71, 145, 218, 12, 6, "#323D52"),
+		visible(box("vol-progress", 71, 145, max(1, 218*level/100), 12, 6, "#7BD3FF"), level > 0))
+	s.control("vol-minus", "vol-minus", "", 91, 174, 68, 56, "−", "", "minus", "#203144", "#A6DCFF")
+	s.control("vol-plus", "vol-plus", "", 201, 174, 68, 56, "+", "", "plus", "#203144", "#A6DCFF")
+	icon, tint := "", menuMuted
+	if auto {
+		icon, tint = "check", "#A6DCFF"
+	}
+	s.control("vol-auto", "vol-auto", "", 116, 238, 128, 46, "Auto", "", icon, "#203144", tint)
+	return s
+}
+
+func voiceScene(current string) sceneView {
+	s := menuScene("Voice")
+	for i, voice := range []string{heartVoice, "bm_fable", "bf_emma", "bm_george"} {
+		name, icon, tint := voiceNames[voice], "voice", "#E2C5FF"
+		if current == voice {
+			icon, tint = "check", "#FFD68B"
+		}
+		s.menuTile(i, "voice-"+strings.ToLower(name), "voice-select", voice, name, "", icon, "#322741", tint)
+	}
+	return s
+}
+
+type menuPeer struct {
+	id, name, face, accent string
+}
+
+func intercomSceneMenu(peers []menuPeer, page int) sceneView {
+	s := menuScene("Talk to…")
+	pageSize := 4
+	start, end := page*pageSize, min(len(peers), (page+1)*pageSize)
+	for i, p := range peers[start:end] {
+		x, y := 58+130*(i%2), 86+72*(i/2)
+		id := "intercom-" + p.id
+		if len(id) > 64 {
+			id = "intercom:" + strconv.Itoa(start+i)
+		}
+		fg := menuPeerInk(p.face)
+		s.control(id, "reply", p.id, x, y, 114, 62, truncate(p.name, 11), "", "", p.face, fg)
+		n := s.nodes[len(s.nodes)-1]
+		n["size"], n["dy"], n["bc"] = 14, 9, menuMuted
+		accent := box("peer-accent-"+strconv.Itoa(i), x+46, y+11, 22, 9, 4, p.accent)
+		accent["bc"], accent["sw"] = fg, 1
+		s.nodes = append(s.nodes, accent)
+	}
+	if start > 0 {
+		s.control("intercom-prev", "intercom-page", "-1", 85, 231, 84, 46, "Prev", "", "", "#262E43", menuInk)
+	}
+	if end < len(peers) {
+		s.control("intercom-next", "intercom-page", "1", 191, 231, 84, 46, "Next", "", "", "#262E43", menuInk)
+	}
+	return s
+}
+
+// Pick black or white to retain at least 4.5:1 contrast on a custom cat color.
+func menuPeerInk(tint string) string {
+	n, _ := strconv.ParseUint(strings.TrimPrefix(tint, "#"), 16, 32)
+	channel := func(shift int) float64 {
+		v := float64(n>>shift&255) / 255
+		if v <= .04045 {
+			return v / 12.92
+		}
+		return math.Pow((v+.055)/1.055, 2.4)
+	}
+	if .2126*channel(16)+.7152*channel(8)+.0722*channel(0) > .179 {
+		return "#000000"
+	}
+	return "#FFFFFF"
+}
+
+func (h *wsHub) statsScene(d *wsDevice) sceneView {
+	s := menuScene("Stats")
+	s.nodes = append(s.nodes, box("stats-card", 38, 93, 284, 185, 18, "#0E111B"))
+	device := d.diagDevice()
+	h.b.diag.mu.Lock()
+	sys := h.b.diag.system
+	latest := [4]*float64{}
+	for i, metric := range []diagMetric{diagSTT, diagLLMFirst, diagTTSFirst, diagRender} {
+		if r := h.b.diag.metrics[metric]; len(r.items) != 0 {
+			latest[i] = new(r.last())
+		}
+	}
+	h.b.diag.mu.Unlock()
+	value := func(n *float64, suffix string) string {
+		if n == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%.0f%s", *n, suffix)
+	}
+	bytes := func(n *uint64, unit uint64, suffix string) string {
+		if n == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%d%s", *n/unit, suffix)
+	}
+	integer := func(n *int, suffix string) string {
+		if n == nil {
+			return "—"
+		}
+		return fmt.Sprint(*n) + suffix
+	}
+	battery := "Bat " + integer(device.Battery, "%")
+	if device.HasBattery != nil && !*device.HasBattery {
+		battery = "USB"
+	} else if device.Kind == "virtual" {
+		battery = "Web"
+	}
+	mode := "Man"
+	if d.autoVol {
+		mode = "Auto"
+	}
+	if d.frame != nil {
+		latest[3] = &d.frame.MS
+	}
+	fw, board := device.Firmware, device.Board
+	if fw == "" {
+		fw = "—"
+	}
+	if board == "" {
+		board = device.Kind
+	}
+	rows := []string{
+		fmt.Sprintf("%s · %s · %s", truncate(device.Character, 15), truncate(fw, 12), board),
+		fmt.Sprintf("CPU %s · WiFi %s · RTT %s", value(device.CPU, "%"), integer(device.WiFi, "dBm"), value(device.RTT, "ms")),
+		fmt.Sprintf("SRAM %s · PSRAM %s · %s", bytes(device.FreeHeap, 1024, "K"), bytes(device.FreePSRAM, 1<<20, "M"), battery),
+		fmt.Sprintf("Vol %d%% (%s) · Amb %s", d.vol, mode, value(device.Ambient, "")),
+		fmt.Sprintf("STT %s · LLM %s · TTS %s · Frame %s", value(latest[0], ""), value(latest[1], ""), value(latest[2], ""), value(latest[3], "")),
+		fmt.Sprintf("Go %s %s · TTS %s · Up %s", value(sys.Bridge.CPU, "%"), bytes(sys.Bridge.RSS, 1<<20, "M"),
+			bytes(sys.Worker.RSS, 1<<20, "M"), (time.Duration(sys.Bridge.Uptime) * time.Second).Truncate(time.Second).String()),
+	}
+	for i, row := range rows {
+		tint := menuInk
+		if i == 0 {
+			tint = "#80F1C5"
+		}
+		n := uiLabel(fmt.Sprintf("stats-row-%d", i), 180, 121+i*27, min(15, 438/max(1, runeLen(row))), row, tint)
+		n["mono"] = true
+		s.nodes = append(s.nodes, n)
+	}
+	return s
+}
 
 func defaultFaceSVG(faceBG, markColor, accentColor string, configured bool) string {
 	mark := `<circle cx="167" cy="79" r="3"/><circle cx="180" cy="79" r="3"/><circle cx="193" cy="79" r="3"/>`
@@ -249,7 +460,33 @@ func sceneSVG(s sceneView, art string) string {
 				if tc == "" {
 					tc = catInk
 				}
-				fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="16" font-weight="bold">%s</text>`, x+w/2, y+h/2+6, tc, text)
+				ix, iy, is := x+w/2-10, y+h/2-10, 20
+				tx, ty, size := x+w/2, y+h/2+6+v("dy"), 16
+				icon, sub := str(n["icon"]), str(n["sub"])
+				if n["tile"] == true {
+					iy, ty = y+13, y+57
+					if sub != "" {
+						iy, ty = y+9, y+47
+					}
+					size = 18
+				} else if icon == "plus" || icon == "minus" {
+					text, is, ix, iy = "", 30, x+w/2-15, y+h/2-15
+				} else if icon != "" {
+					size = 18
+					ix, tx = x+w/2-(runeLen(str(n["s"]))*size/2+26)/2, tx+12
+				}
+				if v("size") > 0 {
+					size = v("size")
+				}
+				if path := uiIcons[icon]; path != "" {
+					fmt.Fprintf(&out, `<path d="%s" transform="translate(%d %d) scale(%.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, float64(is)/24, tc)
+				}
+				if text != "" {
+					fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="%d" font-weight="bold">%s</text>`, tx, ty, tc, size, text)
+				}
+				if sub != "" {
+					fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="13">%s</text>`, tx, y+66, menuMuted, html.EscapeString(sub))
+				}
 			}
 		case "circle":
 			fmt.Fprintf(&out, `<circle cx="%d" cy="%d" r="%d"%s%s/>`, x, y, v("r"), paint, attr)
@@ -278,8 +515,16 @@ func sceneSVG(s sceneView, art string) string {
 			}
 			fmt.Fprintf(&out, `<path d="M%.3f %.3f A%d %d 0 %d 1 %.3f %.3f" fill="none" stroke="%s" stroke-width="%d" stroke-linecap="round"%s/>`, ax, ay, r, r, big, bx, by, tint, sw, attr)
 		case "text":
-			size := 14 * max(1, v("fs"))
-			fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="%d" font-weight="bold"%s>%s</text>`, x, y+size/3, tint, size, attr, text)
+			size, baseline := v("size"), v("baseline")
+			if size == 0 {
+				size = 14 * max(1, v("fs"))
+				baseline = y + size/3
+			}
+			font := `font-weight="bold"`
+			if n["mono"] == true {
+				font = `font-family="monospace"`
+			}
+			fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="%d" %s%s>%s</text>`, x, baseline, tint, size, font, attr, text)
 		}
 	}
 	out.WriteString("</g>")
@@ -291,9 +536,11 @@ type svgScreen struct {
 	source string
 	hits   []hitBox
 	fb     []uint16
+	render time.Duration
 }
 
 func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	start := time.Now()
 	root, hits, err := prepareSVG(raw, exit)
 	if err != nil {
 		return svgScreen{}, err
@@ -302,6 +549,7 @@ func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, err
 	if geometry.width != 0 {
 		screen.fb, err = rasterSVG(screen.source, geometry, root.background())
 	}
+	screen.render = time.Since(start)
 	return screen, err
 }
 
@@ -321,12 +569,21 @@ func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, legacy object, full bo
 	d.rev++
 	if d.client.role == "web" {
 		d.svg = screen
-		d.client.enqueue(h.svgFrame(d))
+		frame := h.svgFrame(d)
+		d.client.enqueue(frame)
+		h.trackFrame(d, screen.render, len(frame.data), len(screen.source), "svg")
 	} else if d.proto >= 2 {
 		if screen.fb != nil {
 			rect := dirtyRect(d.svg.fb, screen.fb, d.screen)
 			if !rect.Empty() {
-				d.client.enqueue(displayFrame(screen.fb, rect, d.rev, d.screen.width))
+				start := time.Now()
+				frame := displayFrame(screen.fb, rect, d.rev, d.screen.width)
+				d.client.enqueue(frame)
+				codec := "RGB565"
+				if frame.data[9] == 1 {
+					codec = "RLE565"
+				}
+				h.trackFrame(d, screen.render+time.Since(start), len(frame.data), 12+rect.Dx()*rect.Dy()*2, codec)
 			}
 		}
 		d.svg = screen

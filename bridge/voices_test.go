@@ -121,7 +121,7 @@ func TestDeviceVoiceAPI(t *testing.T) {
 	}
 }
 
-func TestDrawerVoiceToggle(t *testing.T) {
+func TestMenuVoicePicker(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.voices = deviceVoiceStore(b.db, heartVoice)
 	})
@@ -129,19 +129,24 @@ func TestDrawerVoiceToggle(t *testing.T) {
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, id, "Cake")
 	c.json(t, object{"ev": "tap", "id": "text", "x": 180, "y": 300})
-	c.until(t, hasWS("patch", "Voice: Heart"))
-	toggle := func(label, voice string) {
+	c.until(t, hasWS("patch", `"sub":"Heart"`))
+	c.json(t, object{"ev": "tap", "id": "menu-voice"})
+	c.until(t, hasWS("patch", `"voice-george"`))
+	choose := func(idKey, voice string) {
 		t.Helper()
-		c.json(t, object{"ev": "tap", "id": "voice", "x": 180, "y": 317})
+		c.json(t, object{"ev": "tap", "id": idKey})
 		c.until(t, hasWS("chime", `"kind":"tap"`))
-		c.until(t, hasWS("patch", "Voice: "+label))
+		c.until(t, hasWS("patch", `"icon":"check"`))
 		if reloaded := deviceVoiceStore(b.db, heartVoice); reloaded.get(id, "cake") != voice {
-			t.Errorf("drawer did not persist %s", label)
+			t.Errorf("voice picker did not persist %s", voice)
 		}
 	}
-	toggle("Fable", fableVoice)
-	toggle("Heart", heartVoice)
+	choose("voice-fable", fableVoice)
+	choose("voice-emma", emmaVoice)
+	choose("voice-george", "bm_george")
+	choose("voice-heart", heartVoice)
+	c.json(t, object{"ev": "tap", "id": "menu-back"})
+	c.until(t, hasWS("patch", `"sub":"Heart"`))
 	testRequest(t, "POST", base+"/api/devices/"+id+"/voice", "unit", object{"voice": "bf_alice"}, 200)
-	c.until(t, hasWS("patch", "Voice: Alice"))
-	toggle("Heart", heartVoice)
+	c.until(t, hasWS("patch", `"sub":"Alice"`))
 }

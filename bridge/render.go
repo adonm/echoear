@@ -18,6 +18,7 @@ import (
 	"github.com/srwiley/rasterx"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
@@ -69,7 +70,7 @@ type svgNode struct {
 
 var (
 	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text")
-	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight text-anchor data-id data-hit data-on data-pose")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor data-id data-hit data-on data-pose")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
 	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
@@ -79,6 +80,7 @@ var (
 	svgID             = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 	svgTransform      = regexp.MustCompile(`^\s*(matrix|translate|scale|rotate|skewX|skewY)\s*\(([0-9Ee.,+\s-]+)\)\s*,?`)
 	regularSVGFont, _ = sfnt.Parse(goregular.TTF)
+	monoSVGFont, _    = sfnt.Parse(gomono.TTF)
 	boldSVGFont, _    = sfnt.Parse(gobold.TTF)
 )
 
@@ -178,6 +180,8 @@ func cleanSVGAttr(k, v string) (string, bool) {
 		return v, svgPaint.MatchString(v) || k != "stop-color" && svgRef.MatchString(v)
 	case "fill-rule", "stroke-linecap", "stroke-linejoin", "gradientUnits", "spreadMethod", "font-weight", "text-anchor":
 		return v, svgPaint.MatchString(v) || k == "font-weight" && svgScalar.MatchString(v)
+	case "font-family":
+		return v, v == "monospace"
 	case "transform", "gradientTransform":
 		_, ok := svgMatrix(v)
 		return v, ok
@@ -378,7 +382,9 @@ func (n *svgNode) bounds() (svgBounds, bool) {
 func outlineText(n *svgNode, inherited map[string]string) (svgBounds, bool) {
 	f := regularSVGFont
 	weight := inherited["font-weight"]
-	if weight == "bold" || svgNum(weight) >= 600 {
+	if inherited["font-family"] == "monospace" {
+		f = monoSVGFont
+	} else if weight == "bold" || svgNum(weight) >= 600 {
 		f = boldSVGFont
 	}
 	size := svgNum(inherited["font-size"])
@@ -481,7 +487,7 @@ func prepareSVG(raw string, exit bool) (*svgNode, []hitBox, error) {
 			}
 		}
 		next := make(map[string]string, 3)
-		for _, k := range []string{"font-size", "font-weight", "text-anchor"} {
+		for _, k := range []string{"font-size", "font-weight", "font-family", "text-anchor"} {
 			next[k] = style[k]
 			if v := n.attr[k]; v != "" {
 				next[k] = v

@@ -41,6 +41,7 @@ type bridge struct {
 	tunnels   *tunnelManager
 	history   *chatHistory
 	timers    *timerManager
+	diag      diagnostics
 	catTitles sync.Mutex
 }
 
@@ -225,7 +226,7 @@ func (b *bridge) voiceAPI(r *http.Request, id string) (any, error) {
 	}
 	if b.ws != nil {
 		b.ws.mu.Lock()
-		if d := b.ws.devices[strings.ToLower(id)]; d != nil && d.drawer {
+		if d := b.ws.devices[strings.ToLower(id)]; d != nil && d.drawer != "" {
 			b.ws.render(d, time.Now(), false)
 		}
 		b.ws.mu.Unlock()
@@ -335,6 +336,7 @@ type voiceAnswer struct {
 func (b *bridge) attachAudio(ctx context.Context, out *answer, stream *AudioStream, start time.Time) {
 	if stream != nil {
 		if pcm, err := stream.chunk(ctx, 0); err == nil && len(pcm) != 0 {
+			stream.traceFirst(traceFrom(ctx), start)
 			if id, size, ongoing := b.audio.add(stream); id != "" {
 				path := "/api/audio/" + id
 				out.AudioURL, out.AudioBytes, out.AudioStreaming = &path, size, ongoing
@@ -502,6 +504,9 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 	if body != nil {
 		source = "voice"
 	}
+	if traceFrom(ctx) == nil {
+		ctx = b.traceTurn(ctx, sender.DeviceID, b.catFor(sender).Name, source, time.Now())
+	}
 	if direct := directMessage(others, text); direct != nil {
 		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
 		pcm := body
@@ -542,7 +547,7 @@ type generatedReply struct {
 type turnOptions struct {
 	source  string
 	web     bool
-	publish func(*AudioStream)
+	publish func(*AudioStream, time.Time)
 }
 
 type turnContext struct {
@@ -568,6 +573,9 @@ func turnPrompt(sender peer, web bool, source, text string, cat catState, _ turn
 
 // SSE overlaps synthesis with the turn. Only the verified final reply is audible.
 func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text string, options turnOptions) (generatedReply, error) {
+	if traceFrom(ctx) == nil {
+		ctx = b.traceTurn(ctx, sender.DeviceID, b.catFor(sender).Name, options.source, time.Now())
+	}
 	makeSpeech := func() *speechTurn {
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -620,7 +628,7 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text
 		}
 		stream = eager.stream
 		if options.publish != nil {
-			options.publish(stream)
+			options.publish(stream, ttsStart)
 		}
 	} else if eager != nil {
 		eager.discard()
@@ -649,7 +657,8 @@ func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any
 		return nil, err
 	}
 	start := time.Now()
-	transcript, err := b.hex.transcribe(ctx, wire, kind)
+	ctx = b.traceTurn(ctx, sender.DeviceID, sender.Character, "voice", start)
+	transcript, err := b.transcribe(ctx, wire, kind)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		return nil, err
@@ -723,6 +732,8 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		case path == "/api/devices":
 			devices, err := b.deviceList()
 			return object{"devices": devices}, err
+		case path == "/api/diagnostics":
+			return b.diagnosticReport(), nil
 		case path == "/api/scope":
 			return object{"scoped": false, "auto_volume": true}, nil
 		case strings.HasSuffix(path, "/messages"):

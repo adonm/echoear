@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const turnTimeout = 90 * time.Second
@@ -837,11 +838,23 @@ func finalReply(messages []ocMessage, promptID string) (string, ocMessage, error
 
 type streamedText struct {
 	sentenceExtractor
+	onFirst   func()
 	messageID string
 	parts     map[string]string
 	byOrdinal map[int]string
 	ordinal   int
 	havePart  bool
+}
+
+func (t *streamedText) add(delta string) []string {
+	out := t.sentenceExtractor.add(delta)
+	if t.onFirst != nil && strings.ContainsFunc(plainText(t.raw), func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	}) {
+		t.onFirst()
+		t.onFirst = nil
+	}
+	return out
 }
 
 func (t *streamedText) addEvent(event ocEvent) []string {
@@ -921,6 +934,9 @@ func (o *openCode) RunTurnStreaming(ctx context.Context, sid, prompt string, onS
 }
 
 func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, onSentence func(string), source string, onChat func(chatEntry)) (string, error) {
+	start := time.Now()
+	trace := traceFrom(ctx)
+	defer func() { trace.measure(diagLLMTotal, time.Since(start)) }()
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
 	events, unsubscribe := o.feed.subscribe(ctx, sid)
@@ -966,6 +982,9 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, onS
 		return reply, err
 	}
 	var streamed streamedText
+	if trace != nil {
+		streamed.onFirst = func() { trace.measure(diagLLMFirst, time.Since(start)) }
+	}
 stream:
 	for events != nil {
 		select {
@@ -988,9 +1007,11 @@ stream:
 				}
 				break stream
 			default:
-				if onSentence != nil {
+				if onSentence != nil || streamed.onFirst != nil {
 					for _, s := range streamed.addEvent(event) {
-						onSentence(s)
+						if onSentence != nil {
+							onSentence(s)
+						}
 					}
 				}
 			}

@@ -17,6 +17,7 @@
     </div>
     <div class="row header-actions">
       <span id="link-state" class="connection" role="status">Not connected</span>
+      <button id="diagnostics-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="diagnostics" hidden>Diagnostics</button>
       <button id="sidebar-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="sidebar" hidden>Devices</button>
       <button id="settings" class="quiet" type="button">Bridge token</button>
     </div>
@@ -171,7 +172,8 @@
         </form>
         <div id="phone-controls" class="row wrap" hidden>
           <button id="talk" type="button" class="quiet" aria-pressed="false" aria-describedby="mic-help">Mic · Talk</button>
-          <button id="cancel" type="button" class="quiet" hidden>Cancel recording</button>
+          <button id="mic-send" type="button" class="mic-send" hidden>Send now</button>
+          <button id="cancel" type="button" class="quiet mic-cancel" hidden>Cancel</button>
           <button id="sound" type="button" class="quiet">Enable speaker</button>
           <label id="target-label" class="sr-only" for="target">Talk destination</label>
           <select id="target"><option value="">Ask my cat</option></select>
@@ -179,6 +181,35 @@
         <p id="mic-help" class="small" hidden></p>
         <p id="chat-note" class="note" role="status"></p>
       </div>
+    </section>
+  </main>
+  <main id="diagnostics" class="diagnostics" aria-labelledby="diag-heading" hidden>
+    <header class="diag-header">
+      <div>
+        <p class="eyebrow">LAN / Telemetry</p>
+        <h2 id="diag-heading" tabindex="-1">Diagnostics</h2>
+      </div>
+      <p id="diag-status" class="small">Connecting…</p>
+    </header>
+    <section aria-labelledby="diag-bridge-heading">
+      <h3 id="diag-bridge-heading">Bridge &amp; host</h3>
+      <div id="diag-system" class="diag-grid"></div>
+      <ul id="diag-services" class="diag-services" aria-label="Services"></ul>
+    </section>
+    <section aria-labelledby="diag-latency-heading">
+      <h3 id="diag-latency-heading">Latency</h3>
+      <div id="diag-latency" class="diag-grid"></div>
+      <h4 id="diag-turns-heading">Recent turns</h4>
+      <div class="diag-table" role="region" tabindex="0" aria-labelledby="diag-turns-heading">
+        <table>
+          <thead><tr><th>Time</th><th>Cat / Device</th><th>Source</th><th>STT</th><th>TTFT</th><th>LLM</th><th>TTS</th><th>E2E</th></tr></thead>
+          <tbody id="diag-turns"><tr><td colspan="8">No turns yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section aria-labelledby="diag-devices-heading">
+      <h3 id="diag-devices-heading">Devices</h3>
+      <div id="diag-devices" class="diag-grid"></div>
     </section>
   </main>
   <dialog id="credentials" aria-labelledby="token-heading">
