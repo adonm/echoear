@@ -1,23 +1,32 @@
 #include "bridge_client.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
 #include "audio.h"
+#include "cat_face.h"
 #include "conversation.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 #include "ui.h"
 #include "wifi.h"
 
-enum { RESPONSE_MAX = 32 * 1024, SPEECH_MAX = 2 * 1024 * 1024, SPEECH_CHUNK = 4096, PATH_MAX_LEN = 512 };
+enum { RESPONSE_MAX = 32 * 1024, SPEECH_MAX = 2 * 1024 * 1024, SPEECH_CHUNK = 4096, PATH_MAX_LEN = 512,
+       REGISTER_REPLY_MAX = 4096, REGISTER_INTERVAL_MS = 60000 };
 static const char *TAG = "bridge";
+static TaskHandle_t registrar;
+static atomic_bool connected;
+static portMUX_TYPE peer_lock = portMUX_INITIALIZER_UNLOCKED;
+static char peer_name[BRIDGE_TARGET_CAP];
 
 typedef struct {
     char *data;
@@ -26,6 +35,51 @@ typedef struct {
     bool oversized;
     bool pcm_type;
 } response_t;
+
+typedef struct {
+    const char *url;
+    const char *content_type;
+    const void *body;
+    size_t bytes;
+    const char *target;
+    int timeout_ms;
+} post_t;
+
+bool bridge_client_valid_target(const char *target)
+{
+    if (!target || !*target) {
+        return false;
+    }
+    for (size_t i = 0; target[i]; ++i) {
+        const unsigned char c = target[i];
+        // Names and device IDs also travel in HTTP headers and the public status JSON.
+        if (i >= BRIDGE_TARGET_CAP - 1 || !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                            (c >= '0' && c <= '9') || c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void bridge_client_get_peer(char peer[BRIDGE_TARGET_CAP])
+{
+    taskENTER_CRITICAL(&peer_lock);
+    memcpy(peer, peer_name, sizeof(peer_name));
+    taskEXIT_CRITICAL(&peer_lock);
+}
+
+static void set_peer(const char *name)
+{
+    char next[BRIDGE_TARGET_CAP] = "";
+    snprintf(next, sizeof(next), "%s", name);
+    taskENTER_CRITICAL(&peer_lock);
+    bool changed = strcmp(peer_name, next) != 0;
+    memcpy(peer_name, next, sizeof(peer_name));
+    taskEXIT_CRITICAL(&peer_lock);
+    if (changed) {
+        ui_set_peer(next);
+    }
+}
 
 static esp_err_t on_response(esp_http_client_event_t *event)
 {
@@ -52,16 +106,18 @@ static esp_err_t on_response(esp_http_client_event_t *event)
 static esp_err_t device_headers(esp_http_client_handle_t client)
 {
     esp_err_t err = esp_http_client_set_header(client, "X-EchoEar-Token", CONFIG_ECHOEAR_BRIDGE_TOKEN);
-    return err == ESP_OK ? esp_http_client_set_header(client, "X-Device-Id", device_id) : err;
+    if (err == ESP_OK) {
+        err = esp_http_client_set_header(client, "X-Device-Id", device_id);
+    }
+    return err == ESP_OK ? esp_http_client_set_header(client, "X-Character", cat_face_name()) : err;
 }
 
-static esp_err_t request(esp_http_client_method_t method, const char *url, const char *content_type,
-                         const void *body, size_t bytes, response_t *response, char *error, size_t error_len)
+static esp_err_t post(post_t req, response_t *response, char *error, size_t error_len)
 {
     const esp_http_client_config_t config = {
-        .url = url,
-        .method = method,
-        .timeout_ms = method == HTTP_METHOD_GET ? 15000 : 60000,
+        .url = req.url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = req.timeout_ms ? req.timeout_ms : 60000,
         .disable_auto_redirect = true,
         .event_handler = on_response,
         .user_data = response,
@@ -74,11 +130,14 @@ static esp_err_t request(esp_http_client_method_t method, const char *url, const
     }
 
     esp_err_t err = device_headers(client);
-    if (err == ESP_OK && content_type) {
-        err = esp_http_client_set_header(client, "Content-Type", content_type);
+    if (err == ESP_OK) {
+        err = esp_http_client_set_header(client, "Content-Type", req.content_type);
     }
-    if (err == ESP_OK && method == HTTP_METHOD_POST) {
-        err = esp_http_client_set_post_field(client, body, bytes);
+    if (err == ESP_OK && req.target) {
+        err = esp_http_client_set_header(client, "X-Target", req.target);
+    }
+    if (err == ESP_OK) {
+        err = esp_http_client_set_post_field(client, req.body, req.bytes);
     }
     if (err == ESP_OK) {
         err = esp_http_client_perform(client);
@@ -95,7 +154,116 @@ static esp_err_t request(esp_http_client_method_t method, const char *url, const
     return err;
 }
 
-static void speak_reply(const char *path, size_t bytes)
+static esp_err_t post_json(post_t req, size_t capacity, cJSON **json, char *error, size_t error_len)
+{
+    response_t response = { .data = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                            .capacity = capacity - 1 };
+    if (!response.data) {
+        snprintf(error, error_len, "Not enough memory for bridge reply");
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t err = post(req, &response, error, error_len);
+    if (err == ESP_OK) {
+        if (response.oversized) {
+            snprintf(error, error_len, "Bridge reply is too large");
+            err = ESP_ERR_INVALID_SIZE;
+        } else {
+            response.data[response.len] = '\0';
+            *json = cJSON_ParseWithLengthOpts(response.data, response.len + 1, NULL, true);
+            if (!*json) {
+                snprintf(error, error_len, "Bridge returned invalid JSON");
+                err = ESP_ERR_INVALID_RESPONSE;
+            }
+        }
+    }
+    free(response.data);
+    return err;
+}
+
+static const char *primary_peer(const cJSON *peers)
+{
+    const char *fallback = "";
+    const cJSON *peer;
+    cJSON_ArrayForEach(peer, peers) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(peer, "device_id");
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(peer, "character");
+        if (!cJSON_IsString(id) || strncmp(id->valuestring, "echoear-", 8) != 0 ||
+            strlen(id->valuestring) != 12 || strspn(id->valuestring + 8, "0123456789abcdefABCDEF") != 4 ||
+            strcasecmp(id->valuestring, device_id) == 0 ||
+            !cJSON_IsString(name) || !bridge_client_valid_target(name->valuestring)) {
+            continue;
+        }
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(peer, "online"))) {
+            return name->valuestring;
+        }
+        if (!*fallback) {
+            fallback = name->valuestring;
+        }
+    }
+    return fallback;
+}
+
+static void register_device(void)
+{
+    char ip[WIFI_IP_LEN];
+    wifi_get_ip(ip);
+    if (strcmp(ip, "0.0.0.0") == 0) {
+        return;
+    }
+    char body[128];
+    int bytes = snprintf(body, sizeof(body), "{\"device_id\":\"%s\",\"character\":\"%s\",\"ip\":\"%s\",\"port\":80}",
+                         device_id, cat_face_name(), ip);
+    if (bytes < 0 || (size_t)bytes >= sizeof(body)) {
+        return;
+    }
+    const post_t req = {
+        .url = CONFIG_ECHOEAR_BRIDGE_URL "/api/register", .content_type = "application/json",
+        .body = body, .bytes = (size_t)bytes, .timeout_ms = 5000,
+    };
+    cJSON *json = NULL;
+    char error[128];
+    esp_err_t err = post_json(req, REGISTER_REPLY_MAX, &json, error, sizeof(error));
+    const cJSON *peers = cJSON_GetObjectItemCaseSensitive(json, "peers");
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Registration: %s", error);
+    } else if (!cJSON_IsArray(peers)) {
+        ESP_LOGW(TAG, "Registration response has no peers array");
+    } else if (atomic_load(&connected)) {
+        set_peer(primary_peer(peers));
+    }
+    cJSON_Delete(json);
+}
+
+static void registration_task(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, atomic_load(&connected) ? pdMS_TO_TICKS(REGISTER_INTERVAL_MS) : portMAX_DELAY);
+        if (atomic_load(&connected)) {
+            register_device();
+        } else {
+            set_peer("");
+        }
+    }
+}
+
+esp_err_t bridge_client_start_registration(void)
+{
+    if (!CONFIG_ECHOEAR_BRIDGE_URL[0]) {
+        return ESP_OK;
+    }
+    return xTaskCreate(registration_task, "bridge_reg", 4096, NULL, 3, &registrar) == pdPASS
+           ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+void bridge_client_network_changed(bool online)
+{
+    atomic_store(&connected, online);
+    if (registrar) {
+        xTaskNotifyGive(registrar);
+    }
+}
+
+static void speak_reply(const char *path, size_t bytes, const char *caption)
 {
     if (path[0] != '/' || path[1] == '/' || strnlen(path, PATH_MAX_LEN + 1) > PATH_MAX_LEN) {
         ESP_LOGW(TAG, "Ignored invalid speech path");
@@ -166,7 +334,7 @@ static void speak_reply(const char *path, size_t bytes)
         size_t available = carry + received;
         size_t samples = available / sizeof(int16_t);
         if (samples && !playing) {
-            err = conversation_stream_begin();
+            err = conversation_stream_begin(caption);
             playing = err == ESP_OK;
         }
         if (samples && err == ESP_OK) {
@@ -195,16 +363,8 @@ static void speak_reply(const char *path, size_t bytes)
     }
 }
 
-static esp_err_t handle_reply(cJSON *json, const char *question, char *error, size_t error_len)
+static void play_reply_audio(const cJSON *json, const char *caption)
 {
-    const cJSON *transcript = cJSON_GetObjectItemCaseSensitive(json, "transcript");
-    const cJSON *reply = cJSON_GetObjectItemCaseSensitive(json, "reply");
-    if (!cJSON_IsString(reply) || (!question && !cJSON_IsString(transcript))) {
-        snprintf(error, error_len, "Bridge reply is incomplete");
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    const cJSON *screen = cJSON_GetObjectItemCaseSensitive(json, "screen");
-    ui_show_reply(cJSON_IsString(transcript) ? transcript->valuestring : question, reply->valuestring, screen);
     const cJSON *audio_url = cJSON_GetObjectItemCaseSensitive(json, "audio_url");
     const cJSON *audio_bytes = cJSON_GetObjectItemCaseSensitive(json, "audio_bytes");
     bool length_ok = !audio_bytes || cJSON_IsNull(audio_bytes) ||
@@ -212,34 +372,25 @@ static esp_err_t handle_reply(cJSON *json, const char *question, char *error, si
                       audio_bytes->valueint >= 0 && audio_bytes->valueint <= SPEECH_MAX &&
                       audio_bytes->valueint % sizeof(int16_t) == 0);
     if (cJSON_IsString(audio_url) && audio_url->valuestring[0] && length_ok) {
-        speak_reply(audio_url->valuestring, cJSON_IsNumber(audio_bytes) ? audio_bytes->valueint : 0);
+        speak_reply(audio_url->valuestring, cJSON_IsNumber(audio_bytes) ? audio_bytes->valueint : 0, caption);
     }
-    return ESP_OK;
 }
 
-static esp_err_t ask(const char *url, const char *type, const void *body, size_t bytes,
-                     const char *question, char *error, size_t error_len)
+static esp_err_t ask(post_t req, const char *question, char *error, size_t error_len)
 {
-    response_t response = { .data = heap_caps_malloc(RESPONSE_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-                            .capacity = RESPONSE_MAX - 1 };
-    if (!response.data) {
-        snprintf(error, error_len, "Not enough memory for bridge reply");
-        return ESP_ERR_NO_MEM;
-    }
-    esp_err_t err = request(HTTP_METHOD_POST, url, type, body, bytes, &response, error, error_len);
     cJSON *json = NULL;
+    esp_err_t err = post_json(req, RESPONSE_MAX, &json, error, error_len);
     if (err == ESP_OK) {
-        if (response.oversized) {
-            snprintf(error, error_len, "Bridge reply is too large");
-            err = ESP_ERR_INVALID_SIZE;
+        const cJSON *transcript = cJSON_GetObjectItemCaseSensitive(json, "transcript");
+        const cJSON *reply = cJSON_GetObjectItemCaseSensitive(json, "reply");
+        if (!cJSON_IsString(reply) || (!question && !cJSON_IsString(transcript))) {
+            snprintf(error, error_len, "Bridge reply is incomplete");
+            err = ESP_ERR_INVALID_RESPONSE;
         } else {
-            response.data[response.len] = '\0';
-            json = cJSON_ParseWithLengthOpts(response.data, response.len + 1, NULL, true);
+            const cJSON *screen = cJSON_GetObjectItemCaseSensitive(json, "screen");
+            ui_show_reply(cJSON_IsString(transcript) ? transcript->valuestring : question, reply->valuestring, screen);
+            play_reply_audio(json, NULL);
         }
-    }
-    free(response.data);
-    if (err == ESP_OK) {
-        err = handle_reply(json, question, error, error_len);
     }
     cJSON_Delete(json);
     return err;
@@ -247,7 +398,8 @@ static esp_err_t ask(const char *url, const char *type, const void *body, size_t
 
 esp_err_t bridge_voice(const int16_t *pcm, size_t bytes, char *error, size_t error_len)
 {
-    return ask(CONFIG_ECHOEAR_BRIDGE_URL "/api/voice", "audio/pcm", pcm, bytes, NULL, error, error_len);
+    return ask((post_t){ .url = CONFIG_ECHOEAR_BRIDGE_URL "/api/voice", .content_type = "audio/pcm",
+                         .body = pcm, .bytes = bytes }, NULL, error, error_len);
 }
 
 esp_err_t bridge_client_ask_text(const char *question)
@@ -264,8 +416,8 @@ esp_err_t bridge_client_ask_text(const char *question)
         return ESP_ERR_NO_MEM;
     }
     char error[128];
-    esp_err_t err = ask(CONFIG_ECHOEAR_BRIDGE_URL "/api/text", "application/json",
-                        body, strlen(body), question, error, sizeof(error));
+    esp_err_t err = ask((post_t){ .url = CONFIG_ECHOEAR_BRIDGE_URL "/api/text", .content_type = "application/json",
+                                 .body = body, .bytes = strlen(body) }, question, error, sizeof(error));
     cJSON_free(body);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Text follow-up: %s", error);
@@ -273,8 +425,39 @@ esp_err_t bridge_client_ask_text(const char *question)
     return err;
 }
 
+esp_err_t bridge_client_send_intercom(const char *target, const int16_t *pcm, size_t sample_count)
+{
+    if (!bridge_client_valid_target(target) || !pcm || !sample_count || sample_count > AUDIO_RATE * AUDIO_MAX_SECONDS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const post_t req = { .url = CONFIG_ECHOEAR_BRIDGE_URL "/api/intercom", .content_type = "audio/pcm",
+                         .body = pcm, .bytes = sample_count * sizeof(*pcm), .target = target };
+    cJSON *json = NULL;
+    char error[128];
+    esp_err_t err = post_json(req, RESPONSE_MAX, &json, error, sizeof(error));
+    if (err == ESP_OK) {
+        const cJSON *reply = cJSON_GetObjectItemCaseSensitive(json, "reply");
+        if (cJSON_IsString(reply) && *reply->valuestring) {
+            const char *caption = strnlen(reply->valuestring, 65) <= 64 ? reply->valuestring : NULL;
+            play_reply_audio(json, caption);
+            if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(json, "ok"))) {
+                snprintf(error, sizeof(error), "Bridge could not reach the peer");
+                err = ESP_FAIL;
+            }
+        } else {
+            snprintf(error, sizeof(error), "Bridge did not confirm delivery");
+            err = ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Intercom: %s", error);
+    }
+    cJSON_Delete(json);
+    return err;
+}
+
 esp_err_t bridge_reset(char *error, size_t error_len)
 {
-    return request(HTTP_METHOD_POST, CONFIG_ECHOEAR_BRIDGE_URL "/api/reset", "application/json",
-                   "{}", 2, NULL, error, error_len);
+    return post((post_t){ .url = CONFIG_ECHOEAR_BRIDGE_URL "/api/reset", .content_type = "application/json",
+                          .body = "{}", .bytes = 2 }, NULL, error, error_len);
 }

@@ -5,12 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bridge_client.h"
 #include "bsp/esp_vocat.h"
 #include "cat_face.h"
 #include "conversation.h"
 #include "esp_log.h"
 
-enum { SCREEN_SIZE = 360, MAX_SHAPES = 24 };
+enum { SCREEN_SIZE = 360, MAX_SHAPES = 24, CHAT_ACTION_Y = 293 };
 
 static lv_obj_t *network_label;
 static lv_obj_t *cat;
@@ -21,6 +22,9 @@ static lv_obj_t *volume_label;
 static lv_timer_t *volume_timer;
 static lv_obj_t *cat_text;
 static lv_obj_t *chat_cat;
+static lv_obj_t *chat_new;
+static lv_obj_t *chat_peer;
+static lv_obj_t *chat_peer_label;
 static lv_obj_t *scroll;
 static lv_obj_t *message_label;
 static lv_obj_t *talk;
@@ -36,9 +40,11 @@ static lv_obj_t *diagram_talk_label;
 static lv_obj_t *diagram_back;
 static lv_obj_t *highlighted;
 static lv_timer_t *highlight_timer;
+static lv_timer_t *notice_timer;
 static lv_point_precise_t line_points[MAX_SHAPES][2];
-typedef struct { char *tap; char *ask; } shape_action_t;
+typedef struct { char *tap; char *ask; char *reply_to; } shape_action_t;
 static shape_action_t shape_actions[MAX_SHAPES];
+static char displayed_peer[BRIDGE_TARGET_CAP];
 static ui_action_cb_t dispatch;
 static ui_phase_t phase;
 static bool online;
@@ -78,16 +84,26 @@ static void touch_started(lv_event_t *event)
     touch_woke = wake_locked();
 }
 
-static void update_talk(lv_obj_t *button, lv_obj_t *text, bool enabled)
+static void set_enabled(lv_obj_t *button, bool enabled)
 {
-    const char *title = phase == UI_RECORDING ? "Send" : phase == UI_SPEAKING ? "Stop speech" : "Tap to Talk";
-    lv_label_set_text(text, title);
-    lv_obj_set_style_bg_color(button, lv_color_hex(phase == UI_RECORDING ? 0x9b3045 : 0x5444a3), LV_PART_MAIN);
     if (enabled) {
         lv_obj_remove_state(button, LV_STATE_DISABLED);
     } else {
         lv_obj_add_state(button, LV_STATE_DISABLED);
     }
+}
+
+static void update_talk(lv_obj_t *button, lv_obj_t *text, bool enabled)
+{
+    const char *title = phase == UI_RECORDING ? "Send" : phase == UI_SPEAKING ? "Stop speech" : "Tap to Talk";
+    lv_label_set_text(text, title);
+    lv_obj_set_style_bg_color(button, lv_color_hex(phase == UI_RECORDING ? 0x9b3045 : 0x5444a3), LV_PART_MAIN);
+    set_enabled(button, enabled);
+}
+
+static bool can_intercom(void)
+{
+    return online && audio_ready && (phase == UI_IDLE || phase == UI_SPEAKING);
 }
 
 static void update_controls(void)
@@ -96,11 +112,9 @@ static void update_controls(void)
                               (phase == UI_IDLE && online && audio_ready);
     update_talk(talk, talk_label, talk_enabled);
     update_talk(diagram_talk, diagram_talk_label, talk_enabled);
-    if (phase == UI_IDLE && online) {
-        lv_obj_remove_state(reset, LV_STATE_DISABLED);
-    } else {
-        lv_obj_add_state(reset, LV_STATE_DISABLED);
-    }
+    set_enabled(reset, phase == UI_IDLE && online);
+    set_enabled(chat_new, phase == UI_IDLE && online);
+    set_enabled(chat_peer, can_intercom());
 }
 
 static int utf8_prefix(const char *text, size_t max)
@@ -123,6 +137,7 @@ static void set_diagram_subtitle(const char *message)
 
 static void set_phase(ui_phase_t next, const char *message)
 {
+    lv_timer_pause(notice_timer);
     if (phase != next) {
         wake_locked();
     }
@@ -150,6 +165,11 @@ static void set_phase(ui_phase_t next, const char *message)
     }
     cat_face_set_phase(phase);
     update_controls();
+}
+
+static void restore_caption(lv_timer_t *timer)
+{
+    set_phase(UI_IDLE, NULL);
 }
 
 static void update_pages(void)
@@ -190,12 +210,27 @@ static void hide_screen(void)
     for (unsigned i = 0; i < MAX_SHAPES; ++i) {
         free(shape_actions[i].tap);
         free(shape_actions[i].ask);
+        free(shape_actions[i].reply_to);
         shape_actions[i] = (shape_action_t){ 0 };
     }
     diagram_asking = false;
     lv_label_set_text(diagram_title, "");
     set_diagram_subtitle("");
     update_pages();
+}
+
+static bool start_intercom(const char *target)
+{
+    if (!can_intercom() || conversation_start_intercom(target) != ESP_OK) {
+        return false;
+    }
+    char message[sizeof("To !") + BRIDGE_TARGET_CAP];
+    snprintf(message, sizeof(message), "To %s!", target);
+    wake_locked();
+    text_view = false;
+    hide_screen();
+    set_phase(UI_RECORDING, message);
+    return true;
 }
 
 static void talk_action(bool dismiss_diagram)
@@ -237,7 +272,9 @@ static void on_click(lv_event_t *event)
     } else if (button == cat_text || button == chat_cat) {
         text_view = button == cat_text;
         update_pages();
-    } else if (button == reset) {
+    } else if (button == chat_peer) {
+        start_intercom(displayed_peer);
+    } else if (button == reset || button == chat_new) {
         if (dispatch(UI_NEW_CHAT)) {
             set_phase(UI_BUSY, "Freshening up...");
         }
@@ -495,6 +532,13 @@ static lv_obj_t *draw_shape(const cJSON *shape, unsigned index)
 static void on_shape_tap(lv_event_t *event)
 {
     shape_action_t *action = lv_event_get_user_data(event);
+    if (action->reply_to) {
+        if (!start_intercom(action->reply_to)) {
+            set_diagram_subtitle(!online ? "Waiting for Wi-Fi" : !audio_ready ? "Sound unavailable" :
+                                "Busy. Try again!");
+        }
+        return;
+    }
     clear_highlight(highlight_timer);
     highlighted = lv_event_get_target(event);
     lv_obj_add_state(highlighted, LV_STATE_USER_1);
@@ -526,7 +570,11 @@ static void add_shape_action(lv_obj_t *obj, const cJSON *shape, unsigned index)
     action->tap = *tap && strnlen(tap, 257) <= 256 ? strdup(tap) : NULL;
     action->ask = *ask && strnlen(ask, CONVERSATION_QUESTION_MAX + 1) <= CONVERSATION_QUESTION_MAX
                   ? strdup(ask) : NULL;
-    if (!action->tap && !action->ask) {
+    const char *reply_to = field_text(shape, "reply_to");
+    if (strcmp(field_text(shape, "t"), "btn") == 0 && bridge_client_valid_target(reply_to)) {
+        action->reply_to = strdup(reply_to);
+    }
+    if (!action->tap && !action->ask && !action->reply_to) {
         return;
     }
     lv_obj_set_clickable(obj, true);
@@ -620,15 +668,24 @@ esp_err_t ui_init(const char *device_suffix, const uint8_t mac[6], ui_action_cb_
     lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP);
 
     lv_label_set_text(message_label, "Our chat will appear here.");
-    talk = pill(chat, 166, 42, 263, 0x5444a3);
+    talk = pill(chat, 166, 36, 252, 0x5444a3);
     talk_label = label(talk, &lv_font_montserrat_20, 0xf1f6fb);
     lv_obj_center(talk_label);
-    chat_cat = named_pill(chat, "Cat", 0, 311, 0xfffaee);
+    chat_cat = named_pill(chat, "Cat", -39, CHAT_ACTION_Y, 0xfffaee);
+    chat_new = named_pill(chat, "New", 39, CHAT_ACTION_Y, cat_face_accent());
+    chat_peer = named_pill(chat, "", 0, CHAT_ACTION_Y, cat_face_accent());
+    lv_obj_set_width(chat_peer, 90);
+    chat_peer_label = lv_obj_get_child(chat_peer, 0);
+    lv_obj_set_width(chat_peer_label, 82);
+    lv_obj_set_style_text_align(chat_peer_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(chat_peer_label, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_hidden(chat_peer, true);
     init_diagram(screen);
     init_volume(screen);
     lv_indev_add_event_cb(bsp_display_get_input_dev(), touch_started, LV_EVENT_PRESSED, NULL);
     last_activity = lv_tick_get();
     lv_timer_create(idle_check, 500, NULL);
+    notice_timer = lv_timer_create(restore_caption, 2200, NULL);
     set_phase(UI_IDLE, "Starting…");
     bsp_display_unlock();
 
@@ -657,6 +714,29 @@ void ui_set_audio_ready(bool ready)
     bsp_display_lock(0);
     audio_ready = ready;
     set_phase(UI_IDLE, NULL);
+    bsp_display_unlock();
+}
+
+void ui_set_peer(const char *name)
+{
+    bsp_display_lock(0);
+    snprintf(displayed_peer, sizeof(displayed_peer), "%s", name);
+    bool known = displayed_peer[0] != '\0';
+    lv_label_set_text_fmt(chat_peer_label, "Msg %s", displayed_peer);
+    lv_obj_set_hidden(chat_peer, !known);
+    lv_obj_align(chat_cat, LV_ALIGN_TOP_MID, known ? -81 : -39, CHAT_ACTION_Y);
+    lv_obj_align(chat_new, LV_ALIGN_TOP_MID, known ? 81 : 39, CHAT_ACTION_Y);
+    bsp_display_unlock();
+}
+
+void ui_show_intercom_sent(const char *target)
+{
+    char message[sizeof("Sent to !") + BRIDGE_TARGET_CAP];
+    snprintf(message, sizeof(message), "Sent to %s!", target);
+    bsp_display_lock(0);
+    set_phase(UI_IDLE, message);
+    lv_timer_reset(notice_timer);
+    lv_timer_resume(notice_timer);
     bsp_display_unlock();
 }
 

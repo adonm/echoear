@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bridge_client.h"
 #include "cat_face.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -92,6 +93,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Disconnected (reason=%u); reconnecting", event->reason);
         state_cb(false, NULL);
+        bridge_client_network_changed(false);
         schedule_retry();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = data;
@@ -106,6 +108,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             }
         }
         state_cb(true, ip);
+        bridge_client_network_changed(true);
         if (!mdns_started) {
             esp_err_t err = start_mdns();
             mdns_started = err == ESP_OK;

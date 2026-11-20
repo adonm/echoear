@@ -72,6 +72,25 @@ esp_err_t conversation_ask(const char *question)
     return err;
 }
 
+esp_err_t conversation_start_intercom(const char *target)
+{
+    if (!audio_ready) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (!bridge_client_valid_target(target)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char *copy = strdup(target);
+    if (!copy) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t err = submit((job_t){ .kind = JOB_RECORD, .data = copy }, true);
+    if (err != ESP_OK) {
+        free(copy);
+    }
+    return err;
+}
+
 void conversation_chime(void)
 {
     if (!audio_ready) {
@@ -84,14 +103,14 @@ void conversation_chime(void)
     }
 }
 
-esp_err_t conversation_stream_begin(void)
+esp_err_t conversation_stream_begin(const char *caption)
 {
     if (!audio_ready) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     audio_stream_begin();
     atomic_store(&mode, WORK_SPEAKING);
-    ui_set_phase(UI_SPEAKING, NULL);
+    ui_set_phase(UI_SPEAKING, caption);
     return ESP_OK;
 }
 
@@ -105,7 +124,7 @@ esp_err_t conversation_stream_end(void)
 
 esp_err_t conversation_play(const int16_t *pcm, size_t samples)
 {
-    esp_err_t err = conversation_stream_begin();
+    esp_err_t err = conversation_stream_begin(NULL);
     if (err != ESP_OK) {
         return err;
     }
@@ -142,12 +161,15 @@ static void on_wifi(bool connected, const char *ip)
     }
 }
 
-static const char *record_and_ask(char error[128])
+static const char *record_and_send(const char *target, char error[128])
 {
-    audio_tone(AUDIO_START_TONE);
+    audio_tone(target ? AUDIO_HAPPY_TONE : AUDIO_START_TONE);
     const int16_t *pcm;
     size_t bytes;
     esp_err_t err = audio_record(stop_requested, &pcm, &bytes);
+    ui_set_phase(UI_BUSY, target ? "Sending..." : NULL);
+    // A stop tap can race the recording limit. Don't carry it into the next recording.
+    stop_requested();
     if (err == ESP_ERR_NOT_FOUND) {
         audio_tone(AUDIO_QUIET_TONE);
         return "Didn't hear you";
@@ -159,10 +181,10 @@ static const char *record_and_ask(char error[128])
         audio_tone(AUDIO_QUIET_TONE);
         return "Ready to try again!";
     }
-    ui_set_phase(UI_BUSY, NULL);
-    // A stop tap can race the recording limit. Don't carry it into the next recording.
-    stop_requested();
     audio_tone(AUDIO_THINK_TONE);
+    if (target) {
+        return bridge_client_send_intercom(target, pcm, bytes / sizeof(*pcm)) == ESP_OK ? NULL : "Couldn't send";
+    }
     return bridge_voice(pcm, bytes, error, 128) == ESP_OK ? NULL : error;
 }
 
@@ -176,7 +198,7 @@ static void conversation_task(void *arg)
         const char *caption = NULL;
         switch (job.kind) {
         case JOB_RECORD:
-            caption = record_and_ask(error);
+            caption = record_and_send(job.data, error);
             break;
         case JOB_RESET:
             if (bridge_reset(error, sizeof(error)) == ESP_OK) {
@@ -207,16 +229,15 @@ static void conversation_task(void *arg)
             audio_tone(AUDIO_HAPPY_TONE);
             break;
         }
-        if (job.kind == JOB_RECORD) {
-            stop_requested();
-        }
-        free(job.data);
         work_mode_t busy = WORK_BUSY;
         if (atomic_compare_exchange_strong(&mode, &busy, WORK_IDLE)) {
-            ui_set_phase(UI_IDLE, caption);
-        } else {
-            ui_set_phase(UI_BUSY, "Asking...");
+            if (job.kind == JOB_RECORD && job.data && !caption) {
+                ui_show_intercom_sent(job.data);
+            } else {
+                ui_set_phase(UI_IDLE, caption);
+            }
         }
+        free(job.data);
     }
 }
 
@@ -241,6 +262,9 @@ void app_main(void)
     }
     if (power_start() != ESP_OK) {
         ESP_LOGW("echoear", "Battery monitor unavailable");
+    }
+    if (bridge_client_start_registration() != ESP_OK) {
+        ESP_LOGW("echoear", "Bridge registration task unavailable");
     }
     ESP_ERROR_CHECK(wifi_start(on_wifi));
     ESP_ERROR_CHECK(ota_server_start());

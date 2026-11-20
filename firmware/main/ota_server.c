@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "audio.h"
+#include "bridge_client.h"
 #include "cat_face.h"
 #include "conversation.h"
 #include "esp_app_desc.h"
@@ -60,15 +61,21 @@ static esp_err_t status_get(httpd_req_t *request)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char json[400];
+    char peer[BRIDGE_TARGET_CAP], peer_json[BRIDGE_TARGET_CAP + 2] = "null";
+    bridge_client_get_peer(peer);
+    if (peer[0]) {
+        snprintf(peer_json, sizeof(peer_json), "\"%s\"", peer);
+    }
+    char json[448];
     snprintf(json, sizeof(json),
              "{\"device\":\"%s\",\"character\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
              "\"free_heap\":%zu,\"free_psram\":%zu,\"firmware\":\"%s\",\"running_partition\":\"%s\","
-             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s}",
+             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"peer\":%s}",
              device_id, cat_face_name(), device_mac, ip, rssi,
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label,
-             audio_get_volume(), pct, mv, battery.charging ? "true" : "false", ui_is_sleeping() ? "true" : "false");
+             audio_get_volume(), pct, mv, battery.charging ? "true" : "false",
+             ui_is_sleeping() ? "true" : "false", peer_json);
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, json);
 }

@@ -13,6 +13,8 @@ typedef bool (*ui_action_cb_t)(ui_action_t action);
 esp_err_t ui_init(const char *device_suffix, const uint8_t mac[6], ui_action_cb_t action_cb);
 void ui_set_network(bool connected, const char *ip);
 void ui_set_audio_ready(bool ready);
+void ui_set_peer(const char *name);
+void ui_show_intercom_sent(const char *target);
 void ui_set_phase(ui_phase_t phase, const char *message);
 void ui_show_reply(const char *transcript, const char *reply, const cJSON *screen);
 void ui_clear_reply(void);
