@@ -452,7 +452,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		go func() {
 			ctx, cancel := context.WithTimeout(c.ctx, ttsWait)
 			defer cancel()
-			h.b.warmCharacter(ctx, character)
+			h.b.warmCharacter(ctx, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), character)
 		}()
 	}
 }
@@ -473,6 +473,13 @@ func (d *wsDevice) status(s wsStatus) {
 	if s.Volume != nil {
 		d.vol = min(100, max(0, *s.Volume))
 	}
+}
+
+func (d *wsDevice) voiceTheme() string {
+	if d.theme != "" {
+		return d.theme
+	}
+	return deviceTheme(d.who.Character)
 }
 
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
@@ -501,7 +508,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	case d.drawer && mood == "idle":
 		peers, _ := h.combinedPeers(d.who.DeviceID)
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
-		view = drawerScene(d.who.Character, peers)
+		view = drawerScene(d.who.Character, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
 	case d.view != nil && (d.customScene || mood != "sleepy" && mood != "listening"):
 		view = *d.view
 	default:
@@ -750,6 +757,11 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		h.leaveScene(d, waiting && d.customScene, now)
 	case "local":
 		h.localTap(d, key, waiting, now)
+	case "voice":
+		if err := h.b.voices.toggle(d.who.DeviceID, d.voiceTheme()); err == nil {
+			h.chime(d, "tap")
+			h.render(d, now, false)
+		}
 	case "new":
 		h.cancelLocalTurn(d)
 		var reset func(context.Context) error

@@ -83,6 +83,7 @@ func run() error {
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, peers: loadPeers(filepath.Join(local, "devices.json")),
 		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
+		voices:  loadVoices(filepath.Join(local, "voices.json"), env("ECHOEAR_TTS_VOICE", emmaVoice)),
 		virtual: loadVirtual(filepath.Join(local, "virtual_clients.json")), history: loadChatHistory(filepath.Join(local, "chat_events.json")),
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
 	b.ws = newWSHub(b)
@@ -96,14 +97,10 @@ func run() error {
 	go func() {
 		ctx, cancel := context.WithTimeout(root, ttsWait)
 		defer cancel()
-		_, _ = b.clips.get(ctx, worker, "Sent to everyone!")
+		_, _ = b.clips.get(ctx, worker, b.voices.fallback, "Sent to everyone!")
 		others, _ := b.peers.snapshot("")
-		names := map[string]bool{}
 		for _, p := range others {
-			if !names[p.Character] {
-				names[p.Character] = true
-				b.warmCharacter(ctx, p.Character)
-			}
+			b.warmCharacter(ctx, b.voiceFor(p), p.Character)
 		}
 	}()
 	server := &http.Server{Handler: b, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,

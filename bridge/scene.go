@@ -228,12 +228,13 @@ func catScene(character string, pose catPose) sceneView {
 	return s
 }
 
-func drawerScene(character string, peers []peer) sceneView {
+func drawerScene(character, voice string, peers []peer) sceneView {
 	p := catPalette(character)
 	s := sceneView{bg: "#251C3B", nodes: []object{
 		label("drawer-title", 180, 57, 2, "Text", "#FFFAEE"),
 		comicButton("cat", 84, 86, 91, 36, "Cat", p.face), comicButton("new", 185, 86, 91, 36, "New", p.accent),
-	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "new": {"new", ""}}}
+		comicButton("voice", 90, 300, 180, 36, "Voice: "+voiceNames[voice], p.accent),
+	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "new": {"new", ""}, "voice": {"voice", ""}}}
 	for i, who := range peers[:min(4, len(peers))] {
 		id := "msg-" + strconv.Itoa(i)
 		s.nodes = append(s.nodes, comicButton(id, 70, 133+i*41, 220, 35, "Msg "+truncate(who.Character, 22), p.face))

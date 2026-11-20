@@ -39,25 +39,36 @@ def main(model, voices):
     session = ort.InferenceSession(model, sess_options=options,
                                    providers=["CPUExecutionProvider"])
     kokoro = Kokoro.from_session(session, voices)
+    available = set(kokoro.get_voices())
+    default_voice = "bf_emma"
 
-    def speak(text):
-        samples, rate = kokoro.create(text, voice="af_heart", speed=1.02, lang="en-us")
+    def speak(voice, text):
+        if voice not in available:
+            voice = default_voice
+        lang = "en-gb" if voice.startswith("b") else "en-us"
+        samples, rate = kokoro.create(text, voice=voice, speed=1.02, lang=lang)
         if samples.ndim != 1 or not 0 < samples.size <= 1_572_864:
             raise ValueError("Invalid synthesized audio length")
         return rate, memoryview(np.ascontiguousarray(samples, dtype="<f4")).cast("B")
 
-    speak("Hello!")
+    speak(default_voice, "Hello!")
     source = sys.stdin.buffer
-    while header := source.read(4):
+
+    def field(header, maximum):
         size, = struct.unpack("<I", header)
-        if size > 4096:
-            raise ValueError("Oversized request")
-        text = source.read(size)
-        if len(text) != size:
-            break
+        if size > maximum:
+            raise ValueError("Oversized request field")
+        value = source.read(size)
+        if len(value) != size:
+            raise EOFError("Incomplete request field")
+        return value
+
+    while header := source.read(4):
+        voice = field(header, 32)
+        text = field(source.read(4), 4096)
         status = 0
         try:
-            rate, payload = speak(text.decode("utf-8")) if text else (0, b"")
+            rate, payload = speak(voice.decode("utf-8"), text.decode("utf-8")) if text else (0, b"")
         except Exception as exc:
             rate, payload, status = 0, type(exc).__name__.encode("ascii"), 1
         out.write(struct.pack("<BII", status, rate, len(payload)))

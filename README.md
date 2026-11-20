@@ -67,7 +67,8 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
   detection stops recording at silence; tap or pet again to stop early or interrupt speech.
 - Slide across the head pads to change volume, or hold a pad for one step.
   The display dims after 120 seconds idle unless a diagram is open; tap or pet to wake.
-- **Text** opens the peer drawer, where **New** resets the conversation. **Cat** closes a diagram.
+- **Text** opens the peer drawer, where **New** starts a fresh conversation and
+  **Voice** switches between Emma and Fable. **Cat** closes a diagram.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
@@ -79,8 +80,11 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 Open `http://<host-lan-ip>:8765/app` on a trusted LAN and enter the bridge
 token. Select a physical EchoEar to mirror and control it, or use
 **New Virtual Cat** to create a named client that persists across restarts.
-The scrollable Chat panel loads recent messages with
-`GET /api/devices/{id}/messages` and updates live over `/ws`.
+The Chat panel loads the cat's conversation history across sessions and
+updates live over `/ws`. Use **Voice** under the screen for one-click Emma or
+Fable, or select another UK voice. The choice is saved per device in `voices.json`.
+Mint defaults to Fable. Other cats default to Emma unless `ECHOEAR_TTS_VOICE`
+sets a different fallback (including `af_heart` for US English).
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
 Microphone access requires HTTPS or localhost. For a remote phone, install
@@ -125,12 +129,13 @@ while OpenCode streams its reply over SSE.
 | `GET /health` | Hex, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
-| `GET /api/devices` | `devices` with `device_id`, `character`, `ip`, `online` |
-| `GET /api/devices/{id}/messages` | Recent chat messages and bridge events for a device |
+| `GET /api/devices` | `devices` with `device_id`, `character`, `ip`, `online`, `voice` |
+| `GET /api/devices/{id}/messages` | Chronological chat across sessions and bridge events for a device |
+| `POST /api/devices/{id}/voice` | `{"voice":"bf_emma"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
 | `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
 | `POST /api/intercom` | Audio and `X-Target` (device ID or name) → transcript and delivery result |
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
-| `POST /api/tts` | `{"text":"Hello!"}` → complete PCM clip |
+| `POST /api/tts` | `{"text":"Hello!"}`, optional `device_id` → complete PCM clip using that device's voice |
 | `POST /api/reset` | `{"device_id":"my-echoear"}` → forget conversation mapping |
 | `GET /ota/version.json`, `GET /ota/latest.bin` | Build manifest or `firmware/build/echoear.bin` with SHA-256 |
 

@@ -330,8 +330,9 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			}
 		}
 		messageID, messages := messagesDevice(path)
+		voiceID, voice := voiceDevice(path)
 		get := r.Method == http.MethodGet && (path == "/ws" || path == "/api/scope" || messages)
-		post := r.Method == http.MethodPost && (path == "/api/chat" || path == "/api/reset")
+		post := r.Method == http.MethodPost && (path == "/api/chat" || path == "/api/reset" || voice)
 		if !get && !post {
 			sendError(w, problem(404, "Not found"))
 			return
@@ -342,17 +343,25 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 		}
 		switch {
 		case path == "/api/scope":
-			sendJSON(w, 200, object{"scoped": true, "device_id": v.ID, "character": v.Character, "theme": v.Theme})
+			sendJSON(w, 200, object{"scoped": true, "device_id": v.ID, "character": v.Character, "theme": v.Theme,
+				"voice": b.voices.get(v.ID, v.Theme)})
 		case path == "/ws" && b.ws != nil:
 			if err := b.ws.serveScope(w, r, &v); err != nil {
 				sendError(w, err)
 			}
-		case messages:
+		case get && messages:
 			if messageID != v.ID {
 				sendError(w, problem(403, "Device out of scope"))
 				return
 			}
 			value, err := b.messages(r.Context(), messageID)
+			sendResult(w, value, err)
+		case post && voice:
+			if voiceID != v.ID {
+				sendError(w, problem(403, "Device out of scope"))
+				return
+			}
+			value, err := b.voiceAPI(r, voiceID)
 			sendResult(w, value, err)
 		case post:
 			value, err := b.chatAPI(r, path, v.ID)

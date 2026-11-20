@@ -85,8 +85,11 @@ async function authorize(token) {
       credentials("That token wasn’t accepted. Check it and try again.");
       return;
     }
-    const scope = res.ok ? await res.json() : null;
-    if (res.status !== 404 && (!scope?.scoped || !scope.device_id)) throw new Error("Unexpected scope response");
+    const profile = res.ok ? await res.json() : null;
+    if (res.status !== 404 && (typeof profile?.scoped !== "boolean" || profile.scoped && !profile.device_id)) {
+      throw new Error("Unexpected scope response");
+    }
+    const scope = profile?.scoped ? profile : null;
     stop();
     setLocal("echoear-token", token);
     app = {token, scope, devices:[], deviceVersion:0, sidebar:!scope && wide.matches, tunnel:null};
@@ -409,6 +412,7 @@ function select(d, quick = false) {
   $("target").value = "";
   say("chat-note", "");
   say("tunnel-note", "");
+  say("voice-note", "");
   renderCurrent();
   renderDevices();
   renderTranscript(true);
@@ -428,6 +432,7 @@ function renderCurrent() {
   say("chat-mode", !d ? "" : view.virtual ? active ? (modeLabel[view.mode] || "Idle") : "Connecting" :
     isLive(d) ? mode || "Live WS" : d.online ? "HTTP" : "Offline");
   $("screen-controls").hidden = !ready;
+  renderVoice(d, view?.voicePending);
   $("phone-controls").hidden = !view?.virtual;
   const micAvailable = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
   $("talk").disabled = !active || !micAvailable;
@@ -440,6 +445,40 @@ function renderCurrent() {
   $("reset").disabled = !d || view.virtual && !active || !!view?.resetting || !!view?.sending;
   $("refresh").disabled = !d || view.quick && !active || !!view?.loading || !!view?.resetting;
 }
+
+function renderVoice(device, pending) {
+  $("voice-controls").hidden = !device;
+  const voice = pending || device?.voice || "bf_emma";
+  for (const [id, option] of [["voice-emma", "bf_emma"], ["voice-fable", "bm_fable"]]) {
+    $(id).disabled = !!pending;
+    $(id).setAttribute("aria-pressed", String(voice === option));
+  }
+  $("voice-select").disabled = !!pending;
+  $("voice-select").value = voice;
+}
+
+async function setVoice(voice) {
+  const cat = view, current = app;
+  if (!cat?.id || cat.voicePending || cat.device.voice === voice) return;
+  cat.voicePending = voice;
+  say("voice-note", "");
+  renderVoice(cat.device, voice);
+  try {
+    const result = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/voice`, {method:"POST", body:{voice}});
+    cat.device.voice = result.voice;
+    current.deviceVersion++;
+    const device = current.devices.find(d => d.device_id === cat.id);
+    if (device) device.voice = result.voice;
+  } catch {
+    if (view === cat) say("voice-note", "Could not save voice.");
+  } finally {
+    cat.voicePending = null;
+    if (view === cat) renderVoice(cat.device);
+  }
+}
+$("voice-emma").onclick = () => setVoice("bf_emma");
+$("voice-fable").onclick = () => setVoice("bm_fable");
+$("voice-select").onchange = e => setVoice(e.target.value);
 
 function disconnect() {
   clearTimeout(retry);

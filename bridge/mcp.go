@@ -678,7 +678,7 @@ func (b *bridge) mcpSpeak(ctx context.Context, who peer, text string) (object, e
 	h.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, ttsWait)
 	defer cancel()
-	pcm, err := b.worker.synthesize(ctx, clean)
+	pcm, err := b.worker.synthesize(ctx, b.voiceFor(who), clean)
 	if err != nil {
 		return nil, problem(502, "TTS synthesis failed")
 	}

@@ -145,6 +145,10 @@ label, legend { font-size: .8rem; color: var(--muted); }
 .screen-status { text-align: center; margin-top: .75rem; }
 .volume { width: min(100%, 22rem); margin-top: .55rem; }
 .volume output { min-width: 3ch; text-align: right; font-size: .82rem; font-variant-numeric: tabular-nums; }
+.voice-controls { width: min(100%, 22rem); margin-top: .55rem; gap: .35rem; }
+.voice-controls [aria-pressed="true"] { border-color: var(--cat); color: var(--cat); }
+.voice-controls .note { flex-basis: 100%; margin: 0; }
+.voice-controls .note:empty { display: none; }
 .chat-panel {
   display: grid;
   grid-template-rows: auto minmax(10rem, 1fr) auto;

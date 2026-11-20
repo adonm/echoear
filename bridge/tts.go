@@ -24,9 +24,9 @@ const ttsWait = 30 * time.Second
 var errTTS = errors.New("TTS stream failed")
 
 type ttsRequest struct {
-	ctx  context.Context
-	text string
-	done chan ttsResult
+	ctx         context.Context
+	voice, text string
+	done        chan ttsResult
 }
 
 type ttsResult struct {
@@ -96,16 +96,23 @@ func (p *workerProcess) stop() {
 	p.out.Close()
 }
 
+func ttsFrame(voice, text string) []byte {
+	if voiceNames[voice] == "" {
+		voice = emmaVoice
+	}
+	request := make([]byte, 0, 8+len(voice)+len(text))
+	request = append(le.AppendUint32(request, uint32(len(voice))), voice...)
+	return append(le.AppendUint32(request, uint32(len(text))), text...)
+}
+
 // call reports whether the process is unusable, distinct from an inference error.
-func (p *workerProcess) call(ctx context.Context, text string) (ttsResult, bool) {
+func (p *workerProcess) call(ctx context.Context, voice, text string) (ttsResult, bool) {
 	if err := ctx.Err(); err != nil {
 		return ttsResult{err: err}, false
 	}
 	stop := context.AfterFunc(ctx, func() { _ = p.cmd.Process.Kill() })
 	defer stop()
-	request := make([]byte, 4, 4+len(text))
-	le.PutUint32(request, uint32(len(text)))
-	if _, err := p.in.Write(append(request, text...)); err != nil {
+	if _, err := p.in.Write(ttsFrame(voice, text)); err != nil {
 		return ttsResult{err: errTTS}, true
 	}
 	var header [9]byte
@@ -141,7 +148,7 @@ func (w *synthWorker) run(ctx context.Context) {
 		p, err := w.start()
 		if err == nil {
 			timeout, cancel := context.WithTimeout(ctx, ttsWait)
-			probe, _ := p.call(timeout, "")
+			probe, _ := p.call(timeout, emmaVoice, "")
 			cancel()
 			err = probe.err
 			if err == nil {
@@ -160,7 +167,7 @@ func (w *synthWorker) run(ctx context.Context) {
 							continue
 						}
 						turn, cancel := context.WithTimeout(ctx, ttsWait)
-						result, broken := p.call(turn, req.text)
+						result, broken := p.call(turn, req.voice, req.text)
 						cancel()
 						req.done <- result
 						if broken {
@@ -186,8 +193,8 @@ func (w *synthWorker) run(ctx context.Context) {
 	}
 }
 
-func (w *synthWorker) synthesize(ctx context.Context, text string) ([]byte, error) {
-	req := ttsRequest{ctx, text, make(chan ttsResult, 1)}
+func (w *synthWorker) synthesize(ctx context.Context, voice, text string) ([]byte, error) {
+	req := ttsRequest{ctx, voice, text, make(chan ttsResult, 1)}
 	select {
 	case w.requests <- req:
 	case <-ctx.Done():
@@ -205,9 +212,11 @@ func (w *synthWorker) synthesize(ctx context.Context, text string) ([]byte, erro
 
 type speechClips struct {
 	mu    sync.Mutex
-	clips map[string]*clip
-	order []string
+	clips map[clipKey]*clip
+	order []clipKey
 }
+
+type clipKey struct{ voice, text string }
 
 type clip struct {
 	done chan struct{}
@@ -215,9 +224,9 @@ type clip struct {
 	err  error
 }
 
-func (c *speechClips) peek(text string) []byte {
+func (c *speechClips) peek(voice, text string) []byte {
 	c.mu.Lock()
-	item := c.clips[text]
+	item := c.clips[clipKey{voice, text}]
 	c.mu.Unlock()
 	if item != nil {
 		select {
@@ -231,12 +240,13 @@ func (c *speechClips) peek(text string) []byte {
 	return nil
 }
 
-func (c *speechClips) get(ctx context.Context, w *synthWorker, text string) ([]byte, error) {
+func (c *speechClips) get(ctx context.Context, w *synthWorker, voice, text string) ([]byte, error) {
+	key := clipKey{voice, text}
 	c.mu.Lock()
 	if c.clips == nil {
-		c.clips = make(map[string]*clip)
+		c.clips = make(map[clipKey]*clip)
 	}
-	if existing := c.clips[text]; existing != nil {
+	if existing := c.clips[key]; existing != nil {
 		c.mu.Unlock()
 		select {
 		case <-existing.done:
@@ -250,16 +260,16 @@ func (c *speechClips) get(ctx context.Context, w *synthWorker, text string) ([]b
 		delete(c.clips, c.order[0])
 		c.order = c.order[1:]
 	}
-	c.clips[text] = item
-	c.order = append(c.order, text)
+	c.clips[key] = item
+	c.order = append(c.order, key)
 	c.mu.Unlock()
-	item.pcm, item.err = w.synthesize(ctx, text)
+	item.pcm, item.err = w.synthesize(ctx, voice, text)
 	if item.err != nil {
 		c.mu.Lock()
-		if c.clips[text] == item {
-			delete(c.clips, text)
-			for i, key := range c.order {
-				if key == text {
+		if c.clips[key] == item {
+			delete(c.clips, key)
+			for i, ordered := range c.order {
+				if ordered == key {
 					c.order = append(c.order[:i], c.order[i+1:]...)
 					break
 				}
@@ -453,13 +463,13 @@ type speechTurn struct {
 	length int
 }
 
-func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorker) *speechTurn {
+func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorker, voice string) *speechTurn {
 	t := &speechTurn{stream: newAudioStream(), cancel: cancel, queue: make(chan string, maxText)}
 	go func() {
 		defer cancel()
 		first := true
 		for s := range t.queue {
-			pcm, err := w.synthesize(ctx, s)
+			pcm, err := w.synthesize(ctx, voice, s)
 			if err != nil {
 				t.stream.finish(errTTS)
 				return

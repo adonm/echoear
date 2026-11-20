@@ -106,6 +106,86 @@ func (s *store[T]) saveLocked(key string, value T, remove bool) error {
 	return nil
 }
 
+const (
+	emmaVoice  = "bf_emma"
+	fableVoice = "bm_fable"
+	heartVoice = "af_heart"
+)
+
+var voiceNames = map[string]string{
+	emmaVoice: "Emma", fableVoice: "Fable", heartVoice: "Heart",
+	"bf_alice": "Alice", "bf_isabella": "Isabella", "bf_lily": "Lily",
+	"bm_george": "George", "bm_daniel": "Daniel", "bm_lewis": "Lewis",
+}
+
+type deviceVoices struct {
+	*store[string]
+	fallback string
+}
+
+func loadVoices(path, fallback string) deviceVoices {
+	if voiceNames[fallback] == "" {
+		fallback = emmaVoice
+	}
+	return deviceVoices{loadStore(path, func(id, voice string) bool {
+		return id == strings.ToLower(id) && voiceNames[voice] != ""
+	}), fallback}
+}
+
+func (v deviceVoices) allowed(voice string) bool {
+	return voiceNames[voice] != "" && (voice != heartVoice || v.fallback == heartVoice)
+}
+
+func (v deviceVoices) defaultFor(id, theme string) string {
+	if id == "echoear-2cac" || theme == "mint" {
+		return fableVoice
+	}
+	if v.fallback != "" {
+		return v.fallback
+	}
+	return emmaVoice
+}
+
+func (v deviceVoices) get(id, theme string) string {
+	id = strings.ToLower(id)
+	if v.store != nil {
+		v.mu.Lock()
+		voice := v.data[id]
+		v.mu.Unlock()
+		if v.allowed(voice) {
+			return voice
+		}
+	}
+	return v.defaultFor(id, theme)
+}
+
+func (v deviceVoices) save(id, voice string) error {
+	if v.store == nil {
+		return problem(503, "Voice settings unavailable")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.saveLocked(strings.ToLower(id), voice, voice == "")
+}
+
+func (v deviceVoices) toggle(id, theme string) error {
+	if v.store == nil {
+		return problem(503, "Voice settings unavailable")
+	}
+	id = strings.ToLower(id)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	current := v.data[id]
+	if !v.allowed(current) {
+		current = v.defaultFor(id, theme)
+	}
+	next := emmaVoice
+	if current == emmaVoice {
+		next = fableVoice
+	}
+	return v.saveLocked(id, next, false)
+}
+
 func lanIP(value string, loopback bool) (string, error) {
 	ip, err := netip.ParseAddr(value)
 	if err != nil {

@@ -486,14 +486,15 @@ func (h *wsHub) speakLocal(d *wsDevice, text string) {
 	if worker == nil || !worker.ready.Load() {
 		return
 	}
+	voice := h.b.voiceFor(d.who)
 	stream := newAudioStream()
 	playback := h.play(d, d.client.ctx, stream)
 	go func() {
 		ctx, cancel := context.WithTimeout(playback, ttsWait)
 		defer cancel()
-		pcm := h.b.clips.peek(text)
+		pcm := h.b.clips.peek(voice, text)
 		if pcm == nil {
-			pcm, _ = worker.synthesize(ctx, text)
+			pcm, _ = worker.synthesize(ctx, voice, text)
 		}
 		if !stream.append(pcm) {
 			stream.finish(errTTS)

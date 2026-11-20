@@ -27,6 +27,7 @@ type bridge struct {
 	hex      hexClient
 	oc       *openCode
 	worker   *synthWorker
+	voices   deviceVoices
 	clips    speechClips
 	audio    audioCache
 	chime    []byte
@@ -158,9 +159,48 @@ func deviceID(r *http.Request, obj object, required bool) (string, error) {
 	return id, nil
 }
 
-func (b *bridge) warmCharacter(ctx context.Context, character string) {
+func (b *bridge) voiceFor(who peer) string {
+	theme := deviceTheme(who.Character)
+	if v, ok := b.virtualByID(strings.ToLower(who.DeviceID)); ok {
+		theme = v.Theme
+	}
+	return b.voices.get(who.DeviceID, theme)
+}
+
+func voiceDevice(path string) (string, bool) {
+	suffix, ok := strings.CutPrefix(path, "/api/devices/")
+	if !ok {
+		return "", false
+	}
+	id, ok := strings.CutSuffix(suffix, "/voice")
+	return id, ok && deviceIDRE.MatchString(id)
+}
+
+func (b *bridge) voiceAPI(r *http.Request, id string) (any, error) {
+	obj, err := jsonBody(r)
+	if err != nil {
+		return nil, err
+	}
+	voice := str(obj["voice"])
+	if !b.voices.allowed(voice) {
+		return nil, problem(400, "Unsupported voice")
+	}
+	if err := b.voices.save(id, voice); err != nil {
+		return nil, err
+	}
+	if b.ws != nil {
+		b.ws.mu.Lock()
+		if d := b.ws.devices[strings.ToLower(id)]; d != nil && d.drawer {
+			b.ws.render(d, time.Now(), false)
+		}
+		b.ws.mu.Unlock()
+	}
+	return object{"device_id": id, "voice": voice}, nil
+}
+
+func (b *bridge) warmCharacter(ctx context.Context, voice, character string) {
 	for _, intro := range []string{"From ", "Message from ", "Sent to "} {
-		if _, err := b.clips.get(ctx, b.worker, intro+character+"!"); err != nil {
+		if _, err := b.clips.get(ctx, b.worker, voice, intro+character+"!"); err != nil {
 			return
 		}
 	}
@@ -223,7 +263,7 @@ func (b *bridge) identity(r *http.Request, obj object, register bool) (peer, err
 		go func() {
 			ctx, cancel := context.WithTimeout(b.root, ttsWait)
 			defer cancel()
-			b.warmCharacter(ctx, character)
+			b.warmCharacter(ctx, b.voiceFor(p), character)
 		}()
 	}
 	return p, nil
@@ -297,7 +337,7 @@ func (b *bridge) postPeer(ctx context.Context, who peer, path, kind string, body
 	return res.StatusCode >= 200 && res.StatusCode < 300
 }
 
-func (b *bridge) deliverHTTP(ctx context.Context, sender peer, recipients []peer, text string, raw []byte) delivery {
+func (b *bridge) deliverHTTP(ctx context.Context, sender peer, recipients []peer, voice, text string, raw []byte) delivery {
 	out := delivery{sent: []string{}, delivered: []string{}, failed: []string{}}
 	if len(recipients) == 0 {
 		out.err = "peer_not_found"
@@ -318,7 +358,7 @@ func (b *bridge) deliverHTTP(ctx context.Context, sender peer, recipients []peer
 	if raw != nil {
 		label = "From "
 	}
-	intro, err := b.clips.get(ctx, b.worker, label+sender.Character+"!")
+	intro, err := b.clips.get(ctx, b.worker, voice, label+sender.Character+"!")
 	if err != nil {
 		return fail("audio_unavailable")
 	}
@@ -328,7 +368,7 @@ func (b *bridge) deliverHTTP(ctx context.Context, sender peer, recipients []peer
 		if err != nil {
 			return fail("audio_unavailable")
 		}
-		message, err = b.worker.synthesize(ctx, clean)
+		message, err = b.worker.synthesize(ctx, voice, clean)
 		if err != nil {
 			return fail("audio_unavailable")
 		}
@@ -398,7 +438,7 @@ func (b *bridge) relay(ctx context.Context, sender peer, others []peer, target, 
 		SentTo: &d.sent, DeliveredTo: &d.delivered, FailedTo: &d.failed, Error: d.err}
 	start := time.Now()
 	if b.worker != nil && b.worker.ready.Load() {
-		if pcm, err := b.clips.get(ctx, b.worker, reply); err == nil {
+		if pcm, err := b.clips.get(ctx, b.worker, b.voiceFor(sender), reply); err == nil {
 			s := newAudioStream()
 			s.append(pcm)
 			s.finish(nil)
@@ -488,10 +528,11 @@ type turnOptions struct {
 func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, others []peer, text string, options turnOptions) (generatedReply, error) {
 	publish := options.publish
 	agentSpoke := func() bool { return options.agentSpoke != nil && options.agentSpoke() }
+	voice := b.voiceFor(sender)
 	makeSpeech := func() *speechTurn {
 		deadline, _ := ctx.Deadline()
 		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
-		return newSpeechTurn(audioCtx, cancel, b.worker)
+		return newSpeechTurn(audioCtx, cancel, b.worker, voice)
 	}
 	var eager *speechTurn
 	publishEager := func() {
@@ -638,6 +679,8 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		case path == "/api/devices":
 			devices, err := b.deviceList()
 			return object{"devices": devices}, err
+		case path == "/api/scope":
+			return object{"scoped": false}, nil
 		case strings.HasSuffix(path, "/messages"):
 			if id, ok := messagesDevice(path); ok {
 				return b.messages(ctx, id)
@@ -648,6 +691,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return b.ota.serve(w, path == "/ota/version.json")
 		}
 	case http.MethodPost:
+		if id, ok := voiceDevice(path); ok {
+			return b.voiceAPI(r, id)
+		}
 		ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 		defer cancel()
 		if path == "/api/voice" || path == "/api/intercom" {
@@ -681,9 +727,15 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 				if b.worker == nil || !b.worker.ready.Load() {
 					return nil, problem(503, "TTS unavailable")
 				}
+				id, err := deviceID(r, obj, false)
+				if err != nil {
+					return nil, err
+				}
+				who, _ := b.lookupDevice(id)
+				who.DeviceID = id
 				ctx, cancel := context.WithTimeout(ctx, ttsWait)
 				defer cancel()
-				pcm, err := b.worker.synthesize(ctx, text)
+				pcm, err := b.worker.synthesize(ctx, b.voiceFor(who), text)
 				if err != nil {
 					return nil, problem(502, "TTS synthesis failed")
 				}

@@ -74,6 +74,10 @@ func (b *bridge) virtualAPI(w http.ResponseWriter, r *http.Request, path string)
 		if _, ok := catPalettes[theme]; !ok {
 			return nil, problem(400, "Expected theme cake, mint, plum, or sunny")
 		}
+		voice := str(obj["voice"])
+		if _, supplied := obj["voice"]; supplied && !b.voices.allowed(voice) {
+			return nil, problem(400, "Unsupported voice")
+		}
 		b.virtual.mu.Lock()
 		v := virtualClient{Character: name, Theme: theme, CreatedAt: time.Now().UTC()}
 		for {
@@ -83,6 +87,13 @@ func (b *bridge) virtualAPI(w http.ResponseWriter, r *http.Request, path string)
 			}
 		}
 		err = b.virtual.saveLocked(v.ID, v, false)
+		if err == nil && voice != "" {
+			if err = b.voices.save(v.ID, voice); err != nil {
+				if rollback := b.virtual.saveLocked(v.ID, virtualClient{}, true); rollback != nil {
+					err = rollback
+				}
+			}
+		}
 		b.virtual.mu.Unlock()
 		if err != nil {
 			return nil, err
@@ -127,7 +138,7 @@ func (b *bridge) publicVirtual(v virtualClient) object {
 		b.ws.mu.Unlock()
 	}
 	out := object{"id": v.ID, "character": v.Character, "theme": v.Theme, "created_at": v.CreatedAt,
-		"online": connected, "ws_connected": connected}
+		"online": connected, "ws_connected": connected, "voice": b.voices.get(v.ID, v.Theme)}
 	if details := b.tunnels.info(v.ID); details != nil {
 		out["tunnel"] = details
 	}
@@ -171,6 +182,7 @@ func (b *bridge) deviceList() ([]object, error) {
 		if v, ok := clients[id]; ok {
 			entry["character"], entry["theme"] = v.Character, v.Theme
 		}
+		entry["voice"] = b.voices.get(id, str(entry["theme"]))
 		if details := b.tunnels.info(id); details != nil {
 			entry["tunnel"] = details
 		}

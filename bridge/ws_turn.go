@@ -185,7 +185,8 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 			return
 		}
 		recipients := targets(others, target)
-		receipts, legacy := h.deliverOnline(d.who, recipients, "", pcm)
+		voice := h.b.voiceFor(d.who)
+		receipts, legacy := h.deliverOnline(d.who, recipients, voice, "", pcm)
 		// Connected peers can play the original clip before Hex has generated a caption.
 		if len(receipts) != 0 && len(legacy) == 0 {
 			go func() {
@@ -207,7 +208,7 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 			transcript, _ = h.b.hex.transcribe(ctx, pcm, pcmType)
 			h.caption(receipts, d.who, transcript)
 		}
-		res := h.b.deliverHTTP(ctx, d.who, legacy, transcript, pcm)
+		res := h.b.deliverHTTP(ctx, d.who, legacy, voice, transcript, pcm)
 		for _, r := range receipts {
 			res.sent = append(res.sent, r.device.who.DeviceID)
 		}
@@ -301,11 +302,12 @@ func (h *wsHub) sayTurn(ctx context.Context, d *wsDevice, id uint64, text string
 	if w != nil && w.ready.Load() {
 		stream := newAudioStream()
 		h.publish(d, id, ctx, stream)
-		pcm := h.b.clips.peek(text)
+		voice := h.b.voiceFor(d.who)
+		pcm := h.b.clips.peek(voice, text)
 		if pcm == nil {
 			clean, err := spokenText(text)
 			if err == nil {
-				pcm, _ = w.synthesize(ctx, clean)
+				pcm, _ = w.synthesize(ctx, voice, clean)
 			}
 		}
 		if !stream.append(pcm) {
@@ -426,7 +428,7 @@ type wsReceipt struct {
 	view   *sceneView
 }
 
-func (h *wsHub) deliverOnline(sender peer, recipients []peer, text string, pcm []byte) ([]wsReceipt, []peer) {
+func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string, pcm []byte) ([]wsReceipt, []peer) {
 	h.mu.Lock()
 	var connected []*wsDevice
 	legacy := make([]peer, 0, len(recipients))
@@ -447,7 +449,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, text string, pcm [
 	}
 	stream := newAudioStream()
 	if pcm != nil {
-		intro := h.b.clips.peek("From " + sender.Character + "!")
+		intro := h.b.clips.peek(voice, "From "+sender.Character+"!")
 		if len(intro)+len(pcm) <= maxPeerPCM && intro != nil {
 			stream.append(intro)
 		}
@@ -482,12 +484,12 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, text string, pcm [
 	}
 	h.mu.Unlock()
 	if pcm == nil && len(receipts) > 0 {
-		go h.speakIntercom(stream, sender, text)
+		go h.speakIntercom(stream, sender, voice, text)
 	}
 	return receipts, legacy
 }
 
-func (h *wsHub) speakIntercom(stream *AudioStream, sender peer, text string) {
+func (h *wsHub) speakIntercom(stream *AudioStream, sender peer, voice, text string) {
 	w := h.b.worker
 	if w == nil || !w.ready.Load() {
 		stream.finish(nil) // The card is still delivered when TTS is unavailable.
@@ -495,12 +497,12 @@ func (h *wsHub) speakIntercom(stream *AudioStream, sender peer, text string) {
 	}
 	ctx, cancel := context.WithTimeout(h.b.root, ttsWait)
 	defer cancel()
-	intro, _ := h.b.clips.get(ctx, w, "Message from "+sender.Character+"!")
+	intro, _ := h.b.clips.get(ctx, w, voice, "Message from "+sender.Character+"!")
 	if len(intro) > 0 {
 		stream.append(intro)
 	}
 	for _, s := range SplitSentences(text) {
-		pcm, err := w.synthesize(ctx, s)
+		pcm, err := w.synthesize(ctx, voice, s)
 		if err != nil || !stream.append(pcm) {
 			stream.finish(errTTS)
 			return
@@ -526,12 +528,13 @@ func (h *wsHub) caption(receipts []wsReceipt, sender peer, text string) {
 
 func (b *bridge) deliver(ctx context.Context, sender peer, recipients []peer, text string, raw []byte) (result delivery) {
 	defer func() { b.recordIntercom(sender, result.sent, text) }()
+	voice := b.voiceFor(sender)
 	if b.ws == nil || len(recipients) == 0 {
-		return b.deliverHTTP(ctx, sender, recipients, text, raw)
+		return b.deliverHTTP(ctx, sender, recipients, voice, text, raw)
 	}
-	ws, rest := b.ws.deliverOnline(sender, recipients, text, raw)
+	ws, rest := b.ws.deliverOnline(sender, recipients, voice, text, raw)
 	if len(rest) == len(recipients) {
-		return b.deliverHTTP(ctx, sender, recipients, text, raw)
+		return b.deliverHTTP(ctx, sender, recipients, voice, text, raw)
 	}
 	sent := make(map[string]bool, len(recipients))
 	for _, r := range ws {
@@ -539,7 +542,7 @@ func (b *bridge) deliver(ctx context.Context, sender peer, recipients []peer, te
 	}
 	out := delivery{sent: []string{}, delivered: []string{}, failed: []string{}}
 	if len(rest) != 0 {
-		fallback := b.deliverHTTP(ctx, sender, rest, text, raw)
+		fallback := b.deliverHTTP(ctx, sender, rest, voice, text, raw)
 		for _, id := range fallback.sent {
 			sent[id] = true
 		}
