@@ -6,6 +6,8 @@ import {loadSaved, loadSavedCats, loadTimers} from "./library.js";
 import {clearPhotos, stagePhotos} from "./photos.js";
 import {send, state} from "./state.js";
 
+let screenHits = [];
+
 function updateStatus(text) {
   say("screen-status", text);
   say("screen-description", text);
@@ -14,6 +16,7 @@ function updateStatus(text) {
 function clearScene() {
   state.rev = 0;
   state.pointer = null;
+  screenHits = [];
   nodes.replaceChildren();
   clearPhotos();
   $("canvas-bg").setAttribute("fill", "#202432");
@@ -214,7 +217,10 @@ function command(msg) {
       if (svg.localName !== "svg" || svg.namespaceURI !== svgNS || svg.getAttribute("viewBox") !== "0 0 360 360") return;
       const focusedID = nodes.contains(document.activeElement) && document.activeElement.dataset.id;
       const imported = document.importNode(svg, true);
-      const controls = [...imported.querySelectorAll("[data-id]")].filter(el => !el.closest("defs"));
+      const selector = "[data-id][data-echoear-hit]";
+      const controls = [...imported.querySelectorAll(selector)];
+      if (imported.matches(selector)) controls.unshift(imported);
+      screenHits = controls.map(control => [control.dataset.id, ...hitBounds(control)]).reverse();
       for (const control of controls) {
         control.setAttribute("tabindex", "0");
         control.setAttribute("role", "button");
@@ -223,6 +229,9 @@ function command(msg) {
         }
       }
       stagePhotos(imported, state.app.token);
+      const mask = $("screen-mask");
+      if (state.view.device.shape === "rect") mask.removeAttribute("clip-path");
+      else mask.setAttribute("clip-path", "url(#round-screen)");
       nodes.replaceChildren(imported);
       if (focusedID) (controls.find(el => el.dataset.id === focusedID) || controls[0])?.focus({preventScroll:true});
       state.rev = msg.rev;
@@ -286,9 +295,12 @@ function xy(e) {
   const int = v => Math.max(0,Math.min(359,Math.round(v)));
   return {x:int(p.x), y:int(p.y)};
 }
+function hitBounds(control) { return control.dataset.echoearHit.split(" ").map(Number); }
+
 screen.addEventListener("pointerdown", e => {
   if (e.button !== 0 || state.pointer != null || !state.rev) return;
-  const target = e.target.closest("[data-id]")?.dataset.id;
+  const {x, y} = xy(e);
+  const target = screenHits.find(([, x1, y1, x2, y2]) => x >= x1 && x <= x2 && y >= y1 && y <= y2)?.[0];
   state.pointer = {id:e.pointerId, target, x:e.clientX, y:e.clientY, last:-Infinity, dragged:false};
   screen.setPointerCapture(e.pointerId);
 });
@@ -318,8 +330,8 @@ screen.addEventListener("keydown", e => {
   e.preventDefault();
   if (e.repeat) return;
   if (state.view.virtual) audioReady();
-  const {x, y, width, height} = control.getBoundingClientRect();
-  send({ev:"tap",id:control.dataset.id,...xy({clientX:x+width/2,clientY:y+height/2})});
+  const [x1, y1, x2, y2] = hitBounds(control);
+  send({ev:"tap",id:control.dataset.id,x:Math.round((x1+x2)/2),y:Math.round((y1+y2)/2)});
 });
 
 export {canStartCall, disconnect, renderCurrent, select, startPeerCall, updateCat};

@@ -67,6 +67,17 @@ type svgScreen struct {
 	render      time.Duration
 }
 
+// A prepared scene owns a normalized SVG tree and its topmost-first controls.
+// Neither backend mutates it.
+type preparedScene struct {
+	root       *svgNode
+	svg        string
+	hits       []hitBox
+	background imagecolor.Color
+}
+
+func (s preparedScene) toBrowserSVG() string { return s.svg }
+
 type screenCacheKey struct {
 	hash     [sha256.Size]byte
 	geometry screenGeometry
@@ -90,10 +101,7 @@ func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, err
 
 func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
 	start := time.Now()
-	// Sum256 only reads the input. View the immutable string as bytes so
-	// hashing the SVG does not allocate a copy on the cache hit path.
-	hash := sha256.Sum256(unsafe.Slice(unsafe.StringData(raw), len(raw)))
-	key := screenCacheKey{hash, geometry, exit}
+	key := screenCacheKey{svgHash(raw), geometry, exit}
 	c.mu.Lock()
 	screen, ok := c.entries[key]
 	if ok {
@@ -128,18 +136,23 @@ func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svg
 	return screen, nil
 }
 
+func svgHash(raw string) [sha256.Size]byte {
+	// Sum256 only reads the input; hashing the immutable string needs no copy.
+	return sha256.Sum256(unsafe.Slice(unsafe.StringData(raw), len(raw)))
+}
+
 func buildScreenUncached(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
 	return buildScreenWithPhotos(raw, exit, geometry, nil)
 }
 
 func buildScreenWithPhotos(raw string, exit bool, geometry screenGeometry, lookup photoLookup) (svgScreen, error) {
-	root, hits, err := prepareSVG(raw, exit)
+	scene, err := prepareScene(raw, exit)
 	if err != nil {
 		return svgScreen{}, err
 	}
-	screen := svgScreen{raw: raw, source: svgString(root), hits: hits}
+	screen := svgScreen{raw: raw, source: scene.toBrowserSVG(), hits: scene.hits}
 	if geometry.width != 0 {
-		screen.fb, err = rasterScreen(root, screen.source, geometry, lookup)
+		screen.fb, err = scene.toRGB565(geometry, lookup)
 	}
 	return screen, err
 }
@@ -168,6 +181,13 @@ type svgNode struct {
 	tag, text string
 	attr      map[string]string
 	children  []*svgNode
+}
+
+func (n *svgNode) asGroup() *svgNode {
+	n.tag = "g"
+	delete(n.attr, "viewBox")
+	delete(n.attr, "xmlns")
+	return n
 }
 
 var (
@@ -505,15 +525,18 @@ func (n *svgNode) bounds() (svgBounds, bool) {
 
 // Outlining text at its original z-order gives browser and board identical Go
 // font metrics without requiring a font download or a separate text renderer.
-func outlineText(n *svgNode, inherited map[string]string) (svgBounds, bool) {
+type svgTextStyle [4]string
+
+var svgTextAttrs = [...]string{"font-size", "font-weight", "font-family", "text-anchor"}
+
+func outlineText(n *svgNode, style svgTextStyle) (svgBounds, bool) {
 	f := regularSVGFont
-	weight := inherited["font-weight"]
-	if inherited["font-family"] == "monospace" {
+	size, weight, family, anchor := svgNum(style[0]), style[1], style[2], style[3]
+	if family == "monospace" {
 		f = monoSVGFont
 	} else if weight == "bold" || svgNum(weight) >= 600 {
 		f = boldSVGFont
 	}
-	size := svgNum(inherited["font-size"])
 	if size == 0 {
 		size = 16
 	}
@@ -541,7 +564,7 @@ func outlineText(n *svgNode, inherited map[string]string) (svgBounds, bool) {
 		}
 		start := x
 		w := float64(width) / 64
-		switch inherited["text-anchor"] {
+		switch anchor {
 		case "middle":
 			start -= w / 2
 		case "end":
@@ -577,52 +600,45 @@ func outlineText(n *svgNode, inherited map[string]string) (svgBounds, bool) {
 	return b, b.x2 > b.x1
 }
 
-func prepareSVG(raw string, exit bool) (*svgNode, []hitBox, error) {
+func prepareScene(raw string, exit bool) (preparedScene, error) {
 	root, err := parseSVG(raw)
 	if err != nil {
-		return nil, nil, err
-	}
-	if exit {
-		// Match only rendered, hittable elements, not IDs hidden in definitions or comments.
-		var hasExit func(*svgNode) bool
-		hasExit = func(n *svgNode) bool {
-			_, hasBounds := n.bounds()
-			return n.tag != "defs" && (n.attr["data-id"] == exitNode && (hasBounds || n.tag == "text" && strings.TrimSpace(n.text) != "") ||
-				slices.ContainsFunc(n.children, hasExit))
-		}
-		if !hasExit(root) {
-			pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,300,86,36"><rect x="137" y="300" width="86" height="36" rx="18" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="324" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Cat</text></g></svg>`)
-			root.children = append(root.children, pill.children...)
-		}
+		return preparedScene{}, err
 	}
 	var hits []hitBox
-	var walk func(*svgNode, rasterx.Matrix2D, map[string]string, bool) error
-	walk = func(n *svgNode, m rasterx.Matrix2D, style map[string]string, defs bool) error {
-		defs = defs || n.tag == "defs" || n.tag == "linearGradient" || n.tag == "radialGradient"
-		local, _ := svgMatrix(n.attr["transform"])
-		m = m.Mult(local)
-		if !boundedSVGMatrix(m) {
-			return fmt.Errorf("SVG combined transform is too large")
+	hasExit := false
+	var walk func(*svgNode, rasterx.Matrix2D, svgTextStyle, bool) error
+	walk = func(n *svgNode, m rasterx.Matrix2D, style svgTextStyle, defs bool) error {
+		defs = defs || n.tag == "defs" || n.tag == "linearGradient" || n.tag == "radialGradient" || n.tag == "stop"
+		if raw := n.attr["transform"]; raw != "" {
+			local, _ := svgMatrix(raw)
+			m = m.Mult(local)
+			if !boundedSVGMatrix(m) {
+				return fmt.Errorf("SVG combined transform is too large")
+			}
 		}
 		if n.attr["id"] != "" && !strings.HasPrefix(n.attr["id"], "echoear-paint-") {
 			n.attr["id"] = "echoear-paint-" + n.attr["id"]
 		}
 		for _, k := range []string{"fill", "stroke"} {
-			if parts := svgRef.FindStringSubmatch(n.attr[k]); parts != nil && !strings.HasPrefix(parts[1], "echoear-paint-") {
-				n.attr[k] = "url(#echoear-paint-" + parts[1] + ")"
+			if ref := n.attr[k]; strings.HasPrefix(ref, "url(#") && !strings.HasPrefix(ref, "url(#echoear-paint-") {
+				n.attr[k] = "url(#echoear-paint-" + ref[5:]
 			}
 		}
-		next := make(map[string]string, 3)
-		for _, k := range []string{"font-size", "font-weight", "font-family", "text-anchor"} {
-			next[k] = style[k]
+		for i, k := range svgTextAttrs {
 			if v := n.attr[k]; v != "" {
-				next[k] = v
+				style[i] = v
+				delete(n.attr, k)
 			}
-			delete(n.attr, k)
 		}
-		b, ok := n.bounds()
+		id := n.attr["data-id"]
+		var b svgBounds
+		var ok bool
+		if id != "" && !defs {
+			b, ok = n.bounds()
+		}
 		if n.tag == "text" {
-			metrics, measured := outlineText(n, next)
+			metrics, measured := outlineText(n, style)
 			if !ok {
 				b, ok = metrics, measured
 			}
@@ -630,27 +646,49 @@ func prepareSVG(raw string, exit bool) (*svgNode, []hitBox, error) {
 				return fmt.Errorf("SVG text outlines too large")
 			}
 		}
-		if id := n.attr["data-id"]; !defs && id != "" && ok {
+		if !defs && id != "" && ok {
 			out := svgBounds{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
 			for _, p := range [][2]float64{{b.x1, b.y1}, {b.x2, b.y1}, {b.x1, b.y2}, {b.x2, b.y2}} {
 				x, y := m.Transform(p[0], p[1])
 				out = svgBounds{min(x, out.x1), min(y, out.y1), max(x, out.x2), max(y, out.y2)}
 			}
-			hits = append(hits, hitBox{id, max(0, int(math.Floor(out.x1))-8), max(0, int(math.Floor(out.y1))-8),
-				min(359, int(math.Ceil(out.x2))+8), min(359, int(math.Ceil(out.y2))+8)})
+			const last = screenSize - 1
+			h := hitBox{id, max(0, int(math.Floor(out.x1))-8), max(0, int(math.Floor(out.y1))-8),
+				min(last, int(math.Ceil(out.x2))+8), min(last, int(math.Ceil(out.y2))+8)}
+			if h.x1 <= h.x2 && h.y1 <= h.y2 {
+				hits = append(hits, h)
+				hasExit = hasExit || id == exitNode
+				// The browser uses these logical bounds, not DOM geometry, for pointer and keyboard input.
+				n.attr["data-echoear-hit"] = fmt.Sprintf("%d %d %d %d", h.x1, h.y1, h.x2, h.y2)
+			}
+		}
+		if n.attr["data-echoear-hit"] == "" {
+			delete(n.attr, "data-id")
 		}
 		for _, child := range n.children {
-			if err := walk(child, m, next, defs); err != nil {
+			if err := walk(child, m, style, defs); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := walk(root, rasterx.Identity, nil, false); err != nil {
-		return nil, nil, err
+	if err := walk(root, rasterx.Identity, svgTextStyle{}, false); err != nil {
+		return preparedScene{}, err
+	}
+	background := root.background()
+	if exit && !hasExit {
+		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,300,86,36"><rect x="137" y="300" width="86" height="36" rx="18" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="324" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Cat</text></g></svg>`)
+		_ = walk(pill, rasterx.Identity, svgTextStyle{}, false)
+		if root.attr["transform"] != "" || root.attr["opacity"] != "" {
+			// Keep the bridge's escape hatch outside the author's transform/opacity.
+			pill.children = append([]*svgNode{root.asGroup()}, pill.children...)
+			root = pill
+		} else {
+			root.children = append(root.children, pill.children...)
+		}
 	}
 	slices.Reverse(hits)
-	return root, hits, nil
+	return preparedScene{root, svgString(root), hits, background}, nil
 }
 
 // A leading, solid full-viewBox rectangle is the SVG canvas background.
@@ -684,7 +722,25 @@ func (root *svgNode) background() imagecolor.Color {
 	return imagecolor.Black
 }
 
-func rasterScreen(root *svgNode, source string, screen screenGeometry, lookup photoLookup) (fb []uint16, err error) {
+type screenScanner struct {
+	*rasterx.ScannerGV
+	dst *image.RGBA
+}
+
+func (s screenScanner) Draw() {
+	// ScannerGV composites the whole destination each time. Shrink the
+	// destination without moving its origin: the coverage mask and gradient
+	// coordinates still belong to the original canvas.
+	extent := s.GetPathExtent()
+	dst := *s.dst
+	dst.Rect.Max = image.Pt(min(dst.Rect.Max.X, extent.Max.X.Ceil()+1), min(dst.Rect.Max.Y, extent.Max.Y.Ceil()+1))
+	if !dst.Rect.Empty() {
+		s.Dest = &dst
+		s.ScannerGV.Draw()
+	}
+}
+
+func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) (fb []uint16, err error) {
 	// oksvg and rasterx are also fed untrusted geometry.
 	defer func() {
 		if recover() != nil {
@@ -696,7 +752,7 @@ func rasterScreen(root *svgNode, source string, screen screenGeometry, lookup ph
 	x, y := float64(w-side)/2, float64(h-side)/2
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(img, img.Bounds(), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
-	scan := rasterx.NewScannerGV(w, h, img, img.Bounds())
+	scan := screenScanner{rasterx.NewScannerGV(w, h, img, img.Bounds()), img}
 	clip := image.Rect(int(x), int(y), int(math.Ceil(x+float64(side))), int(math.Ceil(y+float64(side))))
 	drawSVG := func(svg string) error {
 		icon, err := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.StrictErrorMode)
@@ -707,17 +763,17 @@ func rasterScreen(root *svgNode, source string, screen screenGeometry, lookup ph
 		icon.Draw(rasterx.NewDasher(w, h, scan), 1)
 		return nil
 	}
-	if !strings.Contains(source, "<image ") {
-		err = drawSVG(source)
+	if !strings.Contains(s.svg, "<image ") {
+		err = drawSVG(s.svg)
 	} else {
 		scale := float64(side) / screenSize
-		err = rasterPhotos(root, img, rasterx.Identity.Translate(x, y).Scale(scale, scale), lookup, drawSVG)
+		err = rasterPhotos(s.root, img, rasterx.Identity.Translate(x, y).Scale(scale, scale), lookup, drawSVG)
 	}
 	if err != nil {
 		return nil, err
 	}
 	fb = make([]uint16, w*h)
-	br, bgc, bb, _ := root.background().RGBA()
+	br, bgc, bb, _ := s.background.RGBA()
 	bar := uint16(br>>11)<<11 | uint16(bgc>>10)<<5 | uint16(bb>>11)
 	for y := range h {
 		for x := range w {

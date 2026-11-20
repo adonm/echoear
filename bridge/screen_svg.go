@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -424,7 +425,7 @@ func sanitizeFaceSVG(raw string) (string, error) {
 	// Validate all poses together with chrome, including the compositor's depth
 	// and node overhead, so no accepted face can crowd out the system controls.
 	chrome := catChrome(blankCat(), catPose{mood: "listening", battery: 100, charge: true, meter: true})
-	if _, _, err := renderSVG(chrome.svg(svgString(wrapFaceLayer(root)))); err != nil {
+	if _, _, err := renderSVG(chrome.svg(svgString(root.asGroup()))); err != nil {
 		return "", problem(400, err.Error())
 	}
 	return clean, nil
@@ -503,15 +504,8 @@ func faceLayer(root *svgNode, pose string) *svgNode {
 		return n
 	}
 	if root = filter(root); root != nil {
-		return wrapFaceLayer(root)
+		return root.asGroup()
 	}
-	return root
-}
-
-func wrapFaceLayer(root *svgNode) *svgNode {
-	root.tag = "g"
-	delete(root.attr, "viewBox")
-	delete(root.attr, "xmlns")
 	return root
 }
 
@@ -519,13 +513,58 @@ func catSVG(cat catState, pose catPose) string {
 	return catChrome(cat, pose).svg(catArt(cat, pose))
 }
 
-func catArt(cat catState, pose catPose) string {
-	root, err := parseFaceSVG(cat.FaceSVG)
+type faceLayerKey struct {
+	hash [32]byte
+	pose string
+}
+
+const faceLayerCacheSize = 64
+
+type faceLayerCache struct {
+	mu      sync.Mutex
+	entries map[faceLayerKey]string
+	order   [faceLayerCacheSize]faceLayerKey
+	next    int
+}
+
+var faceLayers faceLayerCache
+
+func (c *faceLayerCache) layer(raw, pose string) (string, error) {
+	key := faceLayerKey{svgHash(raw), pose}
+	c.mu.Lock()
+	if layer, ok := c.entries[key]; ok {
+		c.mu.Unlock()
+		return layer, nil
+	}
+	c.mu.Unlock()
+
+	root, err := parseFaceSVG(raw)
 	if err != nil {
-		root, _ = parseFaceSVG(cat.defaultFace())
+		return "", err
 	}
-	if layer := faceLayer(root, pose.facePose()); layer != nil {
-		return svgString(layer)
+	var art string
+	if n := faceLayer(root, pose); n != nil {
+		art = svgString(n)
 	}
-	return ""
+	c.mu.Lock()
+	if _, ok := c.entries[key]; !ok {
+		if c.entries == nil {
+			c.entries = make(map[faceLayerKey]string, faceLayerCacheSize)
+		}
+		delete(c.entries, c.order[c.next])
+		c.order[c.next] = key
+		c.next = (c.next + 1) % len(c.order)
+		c.entries[key] = art
+	}
+	c.mu.Unlock()
+	return art, nil
+}
+
+func catArt(cat catState, pose catPose) string {
+	p := pose.facePose()
+	art, err := faceLayers.layer(cat.FaceSVG, p)
+	if err != nil {
+		art, _ = faceLayers.layer(cat.defaultFace(), p)
+	}
+	return art
 }

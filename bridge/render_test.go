@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/xml"
+	"fmt"
 	"image"
 	"slices"
 	"strconv"
@@ -9,6 +12,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/srwiley/oksvg"
+	"github.com/srwiley/rasterx"
 )
 
 func facePoseSVGs() []string {
@@ -291,6 +297,118 @@ func TestSVGSingleArgumentScalePreservesRasterHeight(t *testing.T) {
 	}
 }
 
+func TestScreenScannerPreservesPixels(t *testing.T) {
+	const art = `<svg><defs><linearGradient id="paint"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs>
+		<rect x="-10" y="-4" width="145.2" height="40.6" fill="url(#paint)"/>
+		<circle cx="12.5" cy="18" r="10.8" fill="lime" opacity=".5"/>
+		<path d="M310.5 130.2 L330.3 340.4 L312 315 Z" stroke="blue" stroke-width="3" fill="red"/>
+		<rect x="400" y="400" width="20" height="20" fill="red"/></svg>`
+	scene, err := prepareScene(art, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	icon, err := oksvg.ReadIconStream(strings.NewReader(scene.toBrowserSVG()), oksvg.StrictErrorMode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, got := image.NewRGBA(image.Rect(0, 0, 320, 240)), image.NewRGBA(image.Rect(0, 0, 320, 240))
+	icon.SetTarget(40, 0, 240, 240)
+	icon.Draw(rasterx.NewDasher(320, 240, rasterx.NewScannerGV(320, 240, ref, ref.Bounds())), 1)
+	icon.Draw(rasterx.NewDasher(320, 240, screenScanner{rasterx.NewScannerGV(320, 240, got, got.Bounds()), got}), 1)
+	if !bytes.Equal(got.Pix, ref.Pix) {
+		t.Fatal("bounded compositing changed pixels")
+	}
+}
+
+func TestPreparedSceneBrowserControlsMatchHits(t *testing.T) {
+	const raw = `<svg transform="translate(20 10)">
+		<defs><linearGradient id="paint" data-id="hidden" data-hit="0 0 200 200"/></defs>
+		<g data-id="no-bounds"><path data-id="no-hit" d="M0 0L3 4"/></g>
+		<g data-id="back" data-hit="15 20 30 35" data-echoear-hit="0 0 359 359">
+			<circle data-id="front" cx="25" cy="30" r="5"/>
+		</g>
+		<rect data-id="echoear-exit" x="700" y="700" width="5" height="5"/>
+	</svg>`
+	scene, err := prepareScene(raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := xml.NewDecoder(strings.NewReader(scene.toBrowserSVG()))
+	var browser []hitBox
+	for token, err := dec.Token(); err == nil; token, err = dec.Token() {
+		if el, ok := token.(xml.StartElement); ok {
+			var id, bounds string
+			for _, attr := range el.Attr {
+				switch attr.Name.Local {
+				case "data-id":
+					id = attr.Value
+				case "data-echoear-hit":
+					bounds = attr.Value
+				}
+			}
+			if id != "" {
+				h := hitBox{id: id}
+				if _, err := fmt.Sscan(bounds, &h.x1, &h.y1, &h.x2, &h.y2); err != nil {
+					t.Fatal(id, err)
+				}
+				browser = append(browser, h)
+			}
+		}
+	}
+	slices.Reverse(browser)
+	if len(browser) != 3 || !slices.Equal(browser, scene.hits) || hitID(scene.hits, 45, 40) != "front" || hitID(scene.hits, 180, 318) != exitNode {
+		t.Fatalf("browser %v; hit targets %v", browser, scene.hits)
+	}
+}
+
+func TestFaceLayersCacheByArtAndPose(t *testing.T) {
+	var cache faceLayerCache
+	const raw = `<svg><g data-pose="idle"><rect fill="red"/></g><g data-pose="blink"><rect fill="blue"/></g></svg>`
+	for i, tc := range []struct{ raw, pose, color string }{
+		{raw, "idle", "red"}, {raw, "blink", "blue"}, {strings.ReplaceAll(raw, "red", "green"), "idle", "green"}, {raw, "idle", "red"},
+	} {
+		art, err := cache.layer(tc.raw, tc.pose)
+		if err != nil || !strings.Contains(art, `fill="`+tc.color+`"`) || strings.Count(art, "<rect") != 1 || len(cache.entries) != min(3, i+1) {
+			t.Fatalf("%+v: %q, %v, %d cached entries", tc, art, err, len(cache.entries))
+		}
+	}
+	for i := range faceLayerCacheSize {
+		if _, err := cache.layer(raw+"<!--"+strconv.Itoa(i)+"-->", "idle"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, present := cache.entries[faceLayerKey{svgHash(raw), "idle"}]; present || len(cache.entries) != faceLayerCacheSize {
+		t.Fatal("face layer cache failed to evict old entries")
+	}
+}
+
+func BenchmarkRenderSVG(b *testing.B) {
+	cat := blankCat()
+	poses := [...]catPose{{mood: "idle", battery: 80}, {mood: "idle", battery: 80, blink: true},
+		{mood: "speaking", battery: 80}, {mood: "sleepy", battery: 80}}
+	b.Run("uncached", func(b *testing.B) {
+		for i := range b.N {
+			if _, err := buildScreenUncached(catSVG(cat, poses[i%len(poses)]), false, roundScreen); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("cached", func(b *testing.B) {
+		var cache screenCache
+		for _, pose := range poses {
+			if _, err := cache.build(catSVG(cat, pose), false, roundScreen); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			if _, err := cache.build(catSVG(cat, poses[i%len(poses)]), false, roundScreen); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func BenchmarkFacePoseCache(b *testing.B) {
 	poses := facePoseSVGs()
 	for _, display := range []struct {
@@ -373,18 +491,18 @@ func TestSVGSanitization(t *testing.T) {
 <a href="javascript:bad()"><text x="180" y="180">bad</text></a><style>bad</style>
 <rect x="150" y="150" width="60" height="60" data-id="ok" onclick="bad()" style="bad" fill="url(https://evil.example)"/>
 </svg>`
-	root, hits, err := prepareSVG(input, true)
+	scene, err := prepareScene(input, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := svgString(root)
+	got := scene.toBrowserSVG()
 	for _, bad := range []string{"onload", "onclick", "style", "DOCTYPE", "href", "evil", "foreignObject", "<script", "javascript:"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("unsafe %q survived: %s", bad, got)
 		}
 	}
-	if hitID(hits, 180, 180) != "ok" || hitID(hits, 180, 318) != exitNode {
-		t.Fatal(hits)
+	if hitID(scene.hits, 180, 180) != "ok" || hitID(scene.hits, 180, 318) != exitNode {
+		t.Fatal(scene.hits)
 	}
 	for _, raw := range []string{`<svg><rect></svg>`, `<svg/><svg/>`, `<svg viewBox="0 0 10 10"/>`} {
 		if _, _, err := renderSVG(raw); err == nil {
