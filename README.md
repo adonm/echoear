@@ -3,22 +3,22 @@
 EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk tutor with interactive diagrams, intercom, and a browser mirror.
 
 ```text
-EchoEar <-- /ws: RGB565 frames, taps, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
+EchoEar <-- /ws: RGB565 frames, touch, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
                                               |-- Hex      (speech to text)
                                               |-- OpenCode :49375 (loopback, reply deltas over SSE)
                                               `-- Kokoro   (persistent FP32 worker)
 ```
 
-**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Firmware `v0.9.0` displays
+**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Firmware `v0.9.1` displays
 RGB565 updates from the bridge, reports touch coordinates and hardware telemetry,
 and draws a fallback face offline. The bridge runs app logic and renders the
 display; `/app` uses native SVG.
 
-**New in 0.9.0:** The bridge drops legacy scene, asset, and HTTP compatibility in
-favor of SVG and WebSocket. It caches face rasters by pose, sends the final
-recording audio on **Send**, and uses generation-tagged acknowledgments to stop
-interrupted speech without affecting the next reply. Micro-apps can resume saved
-state, handle browser drags, play named sounds, and launch from local timers.
+**New in 0.9.1:** Both boards support finger drags in micro-apps. Adaptive voice
+detection on hardware and in `/app` sends short utterances sooner and allows
+longer pauses in longer recordings. The bridge can speak the first sentence
+before OpenCode finishes, shares photos from `/app`, and backs up its database
+daily. The bridge and browser client are split into focused modules.
 
 ## Quickstart
 
@@ -81,9 +81,9 @@ state, handle browser drags, play named sounds, and launch from local timers.
 
 ## Controls and intercom
 
-- Tap the cat face and speak after the tone. Pause about 2 seconds to send
-  automatically, tap **Send** to finish early, or tap **Cancel** to discard the
-  recording. Tap the **Stop** pill to interrupt a reply.
+- Tap the cat face and speak after the tone. Pause 1.5 seconds to send
+  automatically, or 3 seconds once you've spoken for 4 seconds. Tap **Send**
+  to finish early, **Cancel** to discard, or **Stop** to interrupt a reply.
 - Head touch only pets, wakes, or interrupts the cat; it never changes volume.
   The display dims after 120 seconds idle.
 - The on-device **Menu** has large, high-contrast buttons with icons and labels:
@@ -110,8 +110,9 @@ and active conversation between devices. Use **Saved Cats** there to assign a
 profile to the selected device or delete the saved copy. Shared tunnel links
 can chat but cannot reset or reassign cats.
 The Chat panel loads the cat's conversation history across sessions and
-updates live over `/ws`. Use **Voice** under the screen for one-click Heart or
-Fable, or choose among Heart and all eight UK voices in the dropdown. The
+updates live over `/ws`. Use **Photo** to show an image on the selected cat's
+screen and leave a card in its chat. Use **Voice** under the screen for one-click
+Heart or Fable, or choose among Heart and all eight UK voices in the dropdown. The
 choice is saved per device in the bridge database. Mint defaults to Fable (`bm_fable`,
 UK English). Cake and other cats default to Heart (`af_heart`, US English)
 unless `ECHOEAR_TTS_VOICE` sets a different fallback.
@@ -120,8 +121,9 @@ countdown and a Cancel button. The LAN sidebar's **Saved Memory & Assets**
 section lets you inspect and delete saved keys and visuals.
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
-Microphone access requires HTTPS or localhost. On stop, the browser captures
-another 200 ms before flushing the final audio. For a remote phone, install
+Microphone access requires HTTPS or localhost and uses the same adaptive
+silence timing as the boards. On manual stop, the browser captures another
+200 ms before flushing the final audio. For a remote phone, install
 the [OpenTunnel CLI](https://opentunnel.xyz) on the bridge host. If it is
 outside the bridge service's `PATH` and `~/.local/bin`, set
 `ECHOEAR_OPENTUNNEL_BIN` to its path in `bridge.env`. Restart the bridge
@@ -196,16 +198,16 @@ redraws all players without restarting. App state must fit in 64 KB of JSON.
 `save_as` writes apps and drawings to Turso's `apps` table; `load` reopens
 them. `storeGet(key)` reads persisted state in `init(ctx)`
 and `render(state, player)`; `storeSet(key, value)` is available only in event
-hooks. On the web, use `onDrag` and `onUp` alongside `onTap` for sliders and
-drawing. `sfx(name)`, `sfxAll(name)`, and `emit.sfx` support `boing`, `pop`,
-`win`, `buzz`, `ding`, and `whoosh`. Set `timer.app` to a saved app name to
-launch it on the connected device when the reminder goes off. See the
-[agent guide](agents/echoear.md) for examples.
+hooks. Use `onDrag` and `onUp` alongside `onTap` for sliders and drawing in
+`/app` or on boards with firmware `0.9.1` or newer. `sfx(name)`, `sfxAll(name)`,
+and `emit.sfx` support `boing`, `pop`, `win`, `buzz`, `ding`, and `whoosh`.
+Set `timer.app` to a saved app name to launch it on the connected device when
+the reminder goes off. See the [agent guide](agents/echoear.md) for examples.
 
-**One Voice Rule:** Only final assistant prose is spoken as the reply, not
-tool output or intermediate text. The prompt starts with a short identity
-and source header, plus setup or personality hints when applicable. The agent
-uses `state` for live context.
+**One Voice Rule:** Only assistant prose is spoken as the reply, not tool
+output or reasoning. The bridge checks the streamed speech against the final
+reply. The prompt starts with a short identity and source header, plus setup
+or personality hints when applicable. The agent uses `state` for live context.
 
 ## Bridge data
 
@@ -214,6 +216,9 @@ in `~/.local/share/echoear/echoear.db` (or `$XDG_DATA_HOME/echoear/echoear.db`);
 `ECHOEAR_DB_PATH` overrides it. Keep the data directory private (0700, database
 0600). The first boot imports valid rows from the six legacy JSON files in that
 directory in one transaction and never modifies those backups.
+The bridge also writes private daily snapshots to `backups/echoear-YYYY-MM-DD.db`
+under its data directory, keeps the seven latest, and reports the latest in
+**Diagnostics**.
 Active cat designs and reusable profiles are stored in `cats` and `saved_cats`.
 Both the device and browser use one editable `face_svg` for a cat's appearance.
 The bridge renders shared artwork and the matching `data-pose` layer:
@@ -257,6 +262,7 @@ synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 | `POST /api/cats/reassign` | LAN-only `from_device_id`, `to_device_id`, and `mode` (`swap` or `move`) → transfer active cats, voices, and sessions |
 | `POST /api/devices/{id}/cat` | Update active cat fields or send `{"slug":"cake"}` to load a profile (LAN-only) |
 | `GET /api/devices/{id}/messages` | Canonical chronological chat for a device |
+| `POST /api/devices/{id}/photo`, `GET /api/photos/{id}` | Share a PNG, JPEG, or WebP up to 2 MiB, or fetch the stored square PNG |
 | `POST /api/devices/{id}/voice` | `{"voice":"af_heart"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
 | `POST /api/chat` | `{"text":"Explain a circle","device_id":"my-echoear"}` → accepted on a connected device; otherwise returns `reply`, `session_id`, and `audio_url` (LAN only) |
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
