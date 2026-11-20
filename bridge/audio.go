@@ -11,7 +11,7 @@ import (
 
 const (
 	sampleRate = 16000
-	maxPCM     = 2 << 20
+	maxPCM     = 4 << 20
 	maxText    = 640
 )
 

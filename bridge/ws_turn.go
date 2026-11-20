@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	micPrefix = 0x01
-	pcmPrefix = 0x02
-	pcmPacket = 16 << 10
+	micPrefix    = 0x01
+	pcmPrefix    = 0x02
+	pcmPacket    = 4 << 10
+	maxAudioLead = 8 * time.Second
 )
 
 func recordTarget(s string) (string, bool) {
@@ -345,66 +346,30 @@ func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *Aud
 	if !h.active(d) || d.turn != id || ctx.Err() != nil {
 		return
 	}
-	h.play(d, ctx, stream)
+	// The turn deadline bounds synthesis; it must not cut off paced playback
+	// of PCM that is already available. An interrupt still calls stopPlayback.
+	h.play(d, stream)
 }
 
-func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) context.Context {
+func (h *wsHub) play(d *wsDevice, stream *AudioStream) context.Context {
 	h.stopPlayback(d, true)
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(d.client.ctx)
 	d.stopAudio = cancel
 	id := d.audio
 	go func() {
 		defer cancel()
-		failed := false
-		for i := 0; ; i++ {
-			pcm, err := stream.chunk(ctx, i)
-			if len(pcm) == 0 || err != nil || ctx.Err() != nil {
-				failed = err != nil || ctx.Err() != nil
-				break
-			}
-			frames := make([]wsFrame, 0, (len(pcm)+pcmPacket-1)/pcmPacket)
-			for offset := 0; offset < len(pcm); offset += pcmPacket {
-				frames = append(frames, wsFrame{wsBinary,
-					append(append(make([]byte, 0, 1+min(pcmPacket, len(pcm)-offset)), pcmPrefix),
-						pcm[offset:min(offset+pcmPacket, len(pcm))]...)})
-			}
-			h.mu.Lock()
-			if !h.active(d) || d.audio != id || ctx.Err() != nil {
-				h.mu.Unlock()
-				failed = true
-				break
-			}
-			now := time.Now()
-			if !d.ttsStarted {
-				d.ttsStarted = true
-				d.audioUntil = now
-				h.push(d, object{"op": "tts", "state": "start", "audio": id}, false)
-				h.render(d, now, false)
-			}
-			if d.audioUntil.Before(now) {
-				d.audioUntil = now
-			}
-			d.audioUntil = d.audioUntil.Add(time.Duration(len(pcm)) * time.Second / (2 * sampleRate))
-			for _, f := range frames {
-				if !d.client.enqueue(f) {
-					break
-				}
-			}
-			h.mu.Unlock()
-		}
+		sent := h.streamPlayback(ctx, d, id, stream)
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.active(d) || d.audio != id {
 			return
 		}
 		d.stopAudio = nil
-		now := time.Now()
-		if failed || !d.ttsStarted {
-			h.stopPlayback(d, failed)
-			h.playbackDone(d, now)
+		if !sent {
+			h.stopPlayback(d, true)
+			h.playbackDone(d, time.Now())
 		} else {
-			h.push(d, object{"op": "tts", "state": "end", "audio": id}, false)
-			d.ttsStarted, d.awaitAck = false, true
+			d.ttsStarted = false
 		}
 		if !d.busy && d.cancel != nil {
 			d.cancel()
@@ -412,6 +377,73 @@ func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) cont
 		}
 	}()
 	return ctx
+}
+
+func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stream *AudioStream) bool {
+	control := func(state string) bool {
+		return d.client.enqueueWait(ctx, textFrame(object{"op": "tts", "state": state, "audio": id}))
+	}
+	var until time.Time
+	for i := 0; ; i++ {
+		pcm, err := stream.chunk(ctx, i)
+		if err != nil || ctx.Err() != nil {
+			return false
+		}
+		if len(pcm) == 0 {
+			break
+		}
+		if i == 0 {
+			h.mu.Lock()
+			if !h.active(d) || d.audio != id || ctx.Err() != nil {
+				h.mu.Unlock()
+				return false
+			}
+			d.ttsStarted = true
+			h.mu.Unlock()
+			if !control("start") {
+				return false
+			}
+			h.mu.Lock()
+			if h.active(d) && d.audio == id {
+				h.render(d, time.Now(), false)
+			}
+			h.mu.Unlock()
+		}
+		for len(pcm) > 0 {
+			n := min(pcmPacket, len(pcm))
+			duration := time.Duration(n) * time.Second / (2 * sampleRate)
+			if wait := time.Until(until.Add(duration).Add(-maxAudioLead)); !until.IsZero() && wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return false
+				}
+			}
+			packet := make([]byte, n+1)
+			packet[0] = pcmPrefix
+			copy(packet[1:], pcm[:n])
+			if !d.client.enqueueWait(ctx, wsFrame{wsBinary, packet}) {
+				return false
+			}
+			now := time.Now()
+			if until.Before(now) {
+				until = now
+			}
+			until = until.Add(duration)
+			pcm = pcm[n:]
+		}
+	}
+	h.mu.Lock()
+	if until.IsZero() || !h.active(d) || d.audio != id || ctx.Err() != nil {
+		h.mu.Unlock()
+		return false
+	}
+	// A fast client can acknowledge as soon as the end frame is queued.
+	d.audioUntil, d.awaitAck = until, true
+	h.mu.Unlock()
+	return control("end")
 }
 
 func (h *wsHub) stopPlayback(d *wsDevice, notify bool) {
@@ -500,7 +532,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 		h.push(d, object{"op": "chime", "kind": "intercom"}, false)
 		if d.client.ctx.Err() == nil {
 			receipts = append(receipts, wsReceipt{d, &view})
-			h.play(d, d.client.ctx, stream)
+			h.play(d, stream)
 		}
 	}
 	h.mu.Unlock()

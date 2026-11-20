@@ -42,8 +42,8 @@ class EchoMic extends AudioWorkletProcessor {
     } else {
       this.hear(rms);
     }
-    // End at 1.8 s of silence after speech, 25 s total, or 6 s without detection.
-    if (this.quiet >= 90 || this.frames >= 1250 || (!this.voiced && this.frames >= 300)) {
+    // End at 3 s of silence after speech, 60 s total, or 8 s without detection.
+    if (this.quiet >= 150 || this.frames >= 3000 || (!this.voiced && this.frames >= 400)) {
       this.finish("auto_end");
     }
   }

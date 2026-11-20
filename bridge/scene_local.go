@@ -932,7 +932,7 @@ func (h *wsHub) speakLocalAfter(d *wsDevice, text string, prefix []byte) {
 	if len(prefix) != 0 {
 		stream.append(prefix)
 	}
-	playback := h.play(d, d.client.ctx, stream)
+	playback := h.play(d, stream)
 	go func() {
 		ctx, cancel := context.WithTimeout(playback, ttsWait)
 		defer cancel()

@@ -37,30 +37,30 @@ function worklet(sampleRate) {
   return {mic, messages, frames, ended};
 }
 
-test("detects speech during calibration and honors hysteresis and 90 quiet frames", () => {
+test("detects speech during calibration and honors hysteresis and 150 quiet frames", () => {
   const {mic, frames, ended} = worklet(44100);
   frames(9, .02);
   frames(1, .1);
-  frames(89, .02);
+  frames(149, .02);
   frames(1, .03); // Above half the calibrated threshold (.05), but below onset.
-  frames(89, .02);
+  frames(149, .02);
   frames(1, .02, false);
   mic.port.onmessage({data:"flush"});
-  ended("auto_end", 190);
+  ended("auto_end", 310);
 });
 
-test("sends quiet recordings at 6 s and caps voiced recordings at 25 s", () => {
+test("sends quiet recordings at 8 s and caps voiced recordings at 60 s", () => {
   const quiet = worklet(48000);
   quiet.frames(10, .02);
-  quiet.frames(289, .04); // Below the ambient-based onset threshold.
+  quiet.frames(389, .04); // Below the ambient-based onset threshold.
   quiet.frames(1, .04, false);
-  quiet.ended("auto_end", 300);
+  quiet.ended("auto_end", 400);
 
   const voice = worklet(48000);
   voice.frames(10, 0);
-  voice.frames(1239, .1);
+  voice.frames(2989, .1);
   voice.frames(1, .1, false);
-  voice.ended("auto_end", 1250);
+  voice.ended("auto_end", 3000);
 });
 
 test("manual flush sends the partial PCM packet before ending", () => {

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -542,7 +543,7 @@ func TestWSRecordingLimits(t *testing.T) {
 				dev.json(t, object{"ev": "status", "volume": 42})
 				dev.until(t, hasWS("volume", `"level":42`))
 				b.ws.mu.Lock()
-				b.ws.devices[id].recAt = time.Now().Add(-66 * time.Second)
+				b.ws.devices[id].recAt = time.Now().Add(-91 * time.Second)
 				b.ws.mu.Unlock()
 			}
 			dev.until(t, hasWS("rec", `"action":"stop","op":"rec","target":""`))
@@ -615,6 +616,78 @@ func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	to.json(t, object{"ev": "rec_end", "cancelled": true})
 }
 
+func TestWSLongPlaybackWithBackpressure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const duration = 12 * time.Second
+		pcm := make([]byte, 12*sampleRate*2)
+		for i := 0; i < len(pcm); i += 2 {
+			binary.LittleEndian.PutUint16(pcm[i:], uint16(i/2))
+		}
+		stream := newAudioStream()
+		for chunk := range slices.Chunk(pcm, 3*sampleRate*2) {
+			if !stream.append(chunk) {
+				t.Fatal("could not build playback stream")
+			}
+		}
+		stream.finish(nil)
+
+		server, client := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		c := &wsClient{wire: &websocket{conn: server}, ctx: ctx, cancel: cancel, out: make(chan wsFrame, 12)}
+		dev := &testWS{client, bufio.NewReader(client)}
+		d := &wsDevice{client: c, key: "echoear-slow", screen: roundScreen, cat: blankCat()}
+		h := &wsHub{devices: map[string]*wsDevice{d.key: d}}
+		go c.write()
+		start := time.Now()
+		h.mu.Lock()
+		h.play(d, stream)
+		h.mu.Unlock()
+		// Pause reads until the playback goroutine is waiting for queue space.
+		synctest.Wait()
+		if c.drained == nil || c.ctx.Err() != nil {
+			t.Fatal("expected live playback to wait on a full audio queue")
+		}
+		if !h.mu.TryLock() {
+			t.Fatal("playback blocked the hub while waiting for the client")
+		}
+		h.push(d, object{"op": "volume", "level": 42}, false)
+		h.mu.Unlock()
+
+		var got []byte
+		var audio any
+		volume := false
+		for {
+			f := dev.read(t)
+			switch {
+			case hasWS("tts", `"state":"start"`)(f):
+				if audio != nil {
+					t.Fatal("unexpected second TTS start")
+				}
+				audio = testObject(t, f.data)["audio"]
+			case f.op == wsBinary:
+				if audio == nil || len(f.data) < 3 || len(f.data) > pcmPacket+1 || f.data[0] != pcmPrefix {
+					t.Fatal("invalid PCM frame or PCM arrived before TTS start")
+				}
+				got = append(got, f.data[1:]...)
+				time.Sleep(5 * time.Millisecond)
+			case hasWS("volume", `"level":42`)(f):
+				volume = true
+			case hasWS("tts", `"state":"end"`)(f):
+				if !volume || testObject(t, f.data)["audio"] != audio || !bytes.Equal(got, pcm) {
+					t.Fatalf("invalid TTS end: volume=%v, received %d of %d PCM bytes (must match in order)", volume, len(got), len(pcm))
+				}
+				if time.Since(start) < duration-maxAudioLead {
+					t.Fatal("playback was sent more than eight seconds ahead")
+				}
+				return
+			}
+		}
+	})
+}
+
 func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
 	b, base := wsHarness(t, nil)
 	const id = "phone-a123"
@@ -626,7 +699,7 @@ func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
 	stream.finish(nil)
 	b.ws.mu.Lock()
 	d := b.ws.devices[id]
-	b.ws.play(d, d.client.ctx, stream)
+	b.ws.play(d, stream)
 	b.ws.mu.Unlock()
 	phone.until(t, hasWS("mode", `"mode":"speaking"`))
 	frame := phone.until(t, hasWS("tts", `"state":"end"`))

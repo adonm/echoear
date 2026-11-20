@@ -1186,11 +1186,15 @@ function setVolume(n) {
   syncSpeaker();
 }
 function canPlay() {
-  return audio?.state === "running" && !muted && volume > 0;
+  return audio?.state === "running" && canBufferPCM();
+}
+function canBufferPCM() {
+  return audio && audio.state !== "closed" && !muted && volume > 0;
 }
 function syncSpeaker() {
   speakerUI();
-  if (!canPlay()) {
+  // A suspended context retains its clock and scheduled PCM until it resumes.
+  if (!canBufferPCM()) {
     clearPCM();
     ackIfDone();
   }
@@ -1221,14 +1225,15 @@ $("sound").onclick = async () => {
 };
 function playPCM(raw) {
   if (!(raw instanceof ArrayBuffer) || raw.byteLength < 3 || raw.byteLength % 2 !== 1 || new Uint8Array(raw)[0] !== 2) return;
-  if (!canPlay() || mic) return;
+  if (!canBufferPCM() || mic) return;
   const wire = new DataView(raw,1), count = wire.byteLength / 2;
   const buffer = audio.createBuffer(1,count,16000), samples = buffer.getChannelData(0);
   for (let i = 0; i < count; i++) samples[i] = wire.getInt16(i*2,true)/32768;
   const source = audio.createBufferSource();
   source.buffer = buffer;
   source.connect(gain);
-  if (playAt < audio.currentTime) playAt = audio.currentTime + .035;
+  const now = audio.currentTime;
+  if (playAt <= now) playAt = now + .035;
   source.start(playAt);
   playAt += buffer.duration;
   speaking.add(source);

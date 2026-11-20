@@ -293,11 +293,18 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	pcm := bytes.Repeat([]byte{12, 0}, 120)
 	conn.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm...)))
 	conn.json(t, object{"ev": "rec_end", "target": "echoear-private"})
-	got := physical.until(t, func(f wsFrame) bool { return f.op == wsBinary })
+	caption := hasWS("patch", "Voice to Cake.")
+	sawCaption := false
+	got := physical.until(t, func(f wsFrame) bool {
+		sawCaption = sawCaption || caption(f)
+		return f.op == wsBinary
+	})
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], pcm) {
 		t.Fatal("tunneled drawer did not deliver recorded PCM")
 	}
-	physical.until(t, hasWS("patch", "Voice to Cake."))
+	if !sawCaption {
+		physical.until(t, caption)
+	}
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
 	conn.until(t, hasWS("svg", "cat-ring"))

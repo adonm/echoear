@@ -42,10 +42,19 @@ func TestWSMelody(t *testing.T) {
 	pcm, _ := synthesizeMelody(notes)
 	check := func() {
 		t.Helper()
-		frame := c.until(t, func(f wsFrame) bool { return f.op == wsBinary })
-		if len(frame.data) == 0 || frame.data[0] != 0x02 || !bytes.Equal(frame.data[1:], pcm) {
-			t.Fatalf("bad PCM frame (%d bytes)", len(frame.data))
+		start := c.until(t, hasWS("tts", `"state":"start"`))
+		audio := testObject(t, start.data)["audio"]
+		var got []byte
+		end := c.until(t, func(f wsFrame) bool {
+			if f.op == wsBinary && len(f.data) > 1 && f.data[0] == pcmPrefix {
+				got = append(got, f.data[1:]...)
+			}
+			return hasWS("tts", `"state":"end"`)(f)
+		})
+		if testObject(t, end.data)["audio"] != audio || !bytes.Equal(got, pcm) {
+			t.Fatalf("bad melody playback (%d bytes)", len(got))
 		}
+		c.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
 	}
 	toolTest(t, base, "chime", object{"device_id": id}, true)
 	toolTest(t, base, "chime", object{"device_id": id, "notes": notes}, false)

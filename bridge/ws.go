@@ -52,14 +52,16 @@ type wsStatus struct {
 }
 
 type wsClient struct {
-	wire   *websocket
-	ctx    context.Context
-	cancel context.CancelFunc
-	out    chan wsFrame
-	role   string
-	watch  string
-	device *wsDevice
-	scope  *virtualClient
+	wire    *websocket
+	ctx     context.Context
+	cancel  context.CancelFunc
+	out     chan wsFrame
+	outMu   sync.Mutex
+	drained chan struct{}
+	role    string
+	watch   string
+	device  *wsDevice
+	scope   *virtualClient
 }
 
 type wsDevice struct {
@@ -132,8 +134,8 @@ func (d *wsDevice) sceneState() (sceneView, uint64) {
 	return d.scene, d.rev
 }
 
-// The hub lock orders state changes and outbound frames. Socket writes and
-// backend requests never run under it.
+// The hub lock orders state changes and control frames. Socket writes,
+// playback queue waits, and backend requests never run under it.
 type wsHub struct {
 	b          *bridge
 	mu         sync.Mutex
@@ -242,6 +244,12 @@ func (c *wsClient) write() {
 		select {
 		case <-c.ctx.Done():
 		case f := <-c.out:
+			c.outMu.Lock()
+			if c.drained != nil {
+				close(c.drained)
+				c.drained = nil
+			}
+			c.outMu.Unlock()
 			if c.wire.write(f) != nil {
 				return
 			}
@@ -255,6 +263,8 @@ func (c *wsClient) write() {
 }
 
 func (c *wsClient) enqueue(f wsFrame) bool {
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
 	if c.ctx.Err() != nil {
 		return false
 	}
@@ -265,6 +275,35 @@ func (c *wsClient) enqueue(f wsFrame) bool {
 		c.cancel()
 		c.wire.conn.Close()
 		return false
+	}
+}
+
+func (c *wsClient) enqueueWait(ctx context.Context, f wsFrame) bool {
+	for {
+		c.outMu.Lock()
+		if c.ctx.Err() != nil || ctx.Err() != nil {
+			c.outMu.Unlock()
+			return false
+		}
+		// Keep one FIFO, but leave room for display and interrupt controls
+		// rather than letting a burst of PCM fill it.
+		if len(c.out) < min(8, cap(c.out)) {
+			c.out <- f
+			c.outMu.Unlock()
+			return true
+		}
+		if c.drained == nil {
+			c.drained = make(chan struct{})
+		}
+		drained := c.drained
+		c.outMu.Unlock()
+		select {
+		case <-drained:
+		case <-c.ctx.Done():
+			return false
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
@@ -697,9 +736,9 @@ func (h *wsHub) animate(ctx context.Context) {
 			h.tickApps(now)
 			for _, d := range h.devices {
 				switch {
-				case !d.recAt.IsZero() && now.Sub(d.recAt) > 65*time.Second:
+				case !d.recAt.IsZero() && now.Sub(d.recAt) > 90*time.Second:
 					h.stopRecordingAtLimit(d, now)
-				case d.awaitAck && now.After(d.audioUntil.Add(4*time.Second)):
+				case d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)):
 					h.playbackDone(d, now)
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
 					h.setSleeping(d, true)
@@ -844,6 +883,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.stopPlayback(d, false)
 			h.playbackDone(d, now)
 		} else if ev.State == "done" && d.awaitAck {
+			d.ttsStarted = false
 			h.playbackDone(d, now)
 		}
 	}

@@ -78,7 +78,7 @@ func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (*websocket, error
 func (s *websocket) write(f wsFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	var h [10]byte
 	h[0] = 0x80 | f.op
 	n := 2

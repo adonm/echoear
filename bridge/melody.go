@@ -112,5 +112,5 @@ func (h *wsHub) playPCM(d *wsDevice, pcm []byte) {
 	stream := newAudioStream()
 	stream.append(pcm)
 	stream.finish(nil)
-	h.play(d, d.client.ctx, stream)
+	h.play(d, stream)
 }
