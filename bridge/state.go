@@ -125,7 +125,7 @@ type deviceVoices struct {
 
 func loadVoices(path, fallback string) deviceVoices {
 	if voiceNames[fallback] == "" {
-		fallback = emmaVoice
+		fallback = heartVoice
 	}
 	return deviceVoices{loadStore(path, func(id, voice string) bool {
 		return id == strings.ToLower(id) && voiceNames[voice] != ""
@@ -133,7 +133,7 @@ func loadVoices(path, fallback string) deviceVoices {
 }
 
 func (v deviceVoices) allowed(voice string) bool {
-	return voiceNames[voice] != "" && (voice != heartVoice || v.fallback == heartVoice)
+	return voiceNames[voice] != ""
 }
 
 func (v deviceVoices) defaultFor(id, theme string) string {
@@ -143,7 +143,7 @@ func (v deviceVoices) defaultFor(id, theme string) string {
 	if v.fallback != "" {
 		return v.fallback
 	}
-	return emmaVoice
+	return heartVoice
 }
 
 func (v deviceVoices) get(id, theme string) string {
@@ -179,8 +179,8 @@ func (v deviceVoices) toggle(id, theme string) error {
 	if !v.allowed(current) {
 		current = v.defaultFor(id, theme)
 	}
-	next := emmaVoice
-	if current == emmaVoice {
+	next := heartVoice
+	if current == heartVoice {
 		next = fableVoice
 	}
 	return v.saveLocked(id, next, false)

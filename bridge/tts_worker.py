@@ -40,7 +40,7 @@ def main(model, voices):
                                    providers=["CPUExecutionProvider"])
     kokoro = Kokoro.from_session(session, voices)
     available = set(kokoro.get_voices())
-    default_voice = "bf_emma"
+    default_voice = "af_heart"
 
     def speak(voice, text):
         if voice not in available:

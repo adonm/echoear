@@ -12,8 +12,8 @@ func TestTTSVoiceFrame(t *testing.T) {
 	for _, tc := range []struct{ voice, encoded string }{
 		{fableVoice, fableVoice},
 		{heartVoice, heartVoice},
-		{"unsupported", emmaVoice},
-		{"", emmaVoice},
+		{"unsupported", heartVoice},
+		{"", heartVoice},
 	} {
 		const text = "Café"
 		want := []byte(string(rune(len(tc.encoded))) + "\x00\x00\x00" + tc.encoded + "\x05\x00\x00\x00" + text)
@@ -48,19 +48,19 @@ func TestDeviceVoiceDefaults(t *testing.T) {
 		device, character string
 		want              string
 	}{
-		{"echoear-33d8", "Cake", emmaVoice},
+		{"echoear-33d8", "Cake", heartVoice},
 		{"ECHOEAR-2CAC", "Other", fableVoice},
 		{"echoear-other", "Mint", fableVoice},
 		{"virt-01234567", "Green Cat", fableVoice},
-		{"virt-1234abcd", "Greg", emmaVoice},
+		{"virt-1234abcd", "Greg", heartVoice},
 	} {
 		if got := b.voiceFor(peer{DeviceID: tc.device, Character: tc.character}); got != tc.want {
 			t.Errorf("%s: got voice %q, want %q", tc.device, got, tc.want)
 		}
 	}
-	configured := loadVoices(b.voices.path, heartVoice)
-	if b.voices.allowed(heartVoice) || !configured.allowed(heartVoice) ||
-		configured.get("echoear-33d8", "cake") != heartVoice ||
+	configured := loadVoices(b.voices.path, emmaVoice)
+	if !configured.allowed(heartVoice) ||
+		configured.get("echoear-33d8", "cake") != emmaVoice ||
 		configured.get("echoear-2cac", "mint") != fableVoice {
 		t.Fatal("explicit fallback voice or the Mint default was not respected")
 	}
@@ -79,9 +79,10 @@ func TestDeviceVoiceAPI(t *testing.T) {
 	}
 	path := "/api/devices/ECHOEAR-33D8/voice"
 	testRequest(t, "POST", base+path, "", object{"voice": fableVoice}, 401)
-	for _, voice := range []any{"bad", heartVoice, 1, nil} {
+	for _, voice := range []any{"bad", 1, nil} {
 		testRequest(t, "POST", base+path, "unit", object{"voice": voice}, 400)
 	}
+	testRequest(t, "POST", base+path, "unit", object{"voice": heartVoice}, 200)
 	got := testObject(t, testRequest(t, "POST", base+path, "unit", object{"voice": fableVoice}, 200))
 	if got["device_id"] != "ECHOEAR-33D8" || got["voice"] != fableVoice {
 		t.Fatalf("unexpected update response: %v", got)
@@ -112,34 +113,34 @@ func TestDeviceVoiceAPI(t *testing.T) {
 	testRequest(t, "POST", scoped.URL+"/api/devices/echoear-33d8/voice", "scoped-test", object{"voice": emmaVoice}, 403)
 	testRequest(t, "POST", scoped.URL+"/api/devices/virt-1234abcd/voice", "scoped-test", object{"voice": emmaVoice}, 403)
 	testRequest(t, "GET", scoped.URL+path, "scoped-test", nil, 404)
-	testRequest(t, "POST", scoped.URL+path, "scoped-test", object{"voice": "bf_alice"}, 200)
+	testRequest(t, "POST", scoped.URL+path, "scoped-test", object{"voice": heartVoice}, 200)
 	scope := testObject(t, testRequest(t, "GET", scoped.URL+"/api/scope", "scoped-test", nil, 200))
-	if scope["voice"] != "bf_alice" || b.voices.get("echoear-33d8", "cake") != fableVoice {
+	if scope["voice"] != heartVoice || b.voices.get("echoear-33d8", "cake") != fableVoice {
 		t.Fatal("scoped update did not stay on the scoped cat")
 	}
 }
 
 func TestDrawerVoiceToggle(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.voices = loadVoices(filepath.Join(dir, "voices.json"), emmaVoice)
+		b.voices = loadVoices(filepath.Join(dir, "voices.json"), heartVoice)
 	})
 	const id = "echoear-33d8"
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, id, "Cake")
 	c.json(t, object{"ev": "tap", "id": "text", "x": 180, "y": 300})
-	c.until(t, hasWS("patch", "Voice: Emma"))
+	c.until(t, hasWS("patch", "Voice: Heart"))
 	toggle := func(label, voice string) {
 		t.Helper()
 		c.json(t, object{"ev": "tap", "id": "voice", "x": 180, "y": 317})
 		c.until(t, hasWS("chime", `"kind":"tap"`))
 		c.until(t, hasWS("patch", "Voice: "+label))
-		if reloaded := loadVoices(b.voices.path, emmaVoice); reloaded.get(id, "cake") != voice {
+		if reloaded := loadVoices(b.voices.path, heartVoice); reloaded.get(id, "cake") != voice {
 			t.Errorf("drawer did not persist %s", label)
 		}
 	}
 	toggle("Fable", fableVoice)
-	toggle("Emma", emmaVoice)
+	toggle("Heart", heartVoice)
 	testRequest(t, "POST", base+"/api/devices/"+id+"/voice", "unit", object{"voice": "bf_alice"}, 200)
 	c.until(t, hasWS("patch", "Voice: Alice"))
-	toggle("Emma", emmaVoice)
+	toggle("Heart", heartVoice)
 }

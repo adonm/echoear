@@ -98,7 +98,7 @@ func (p *workerProcess) stop() {
 
 func ttsFrame(voice, text string) []byte {
 	if voiceNames[voice] == "" {
-		voice = emmaVoice
+		voice = heartVoice
 	}
 	request := make([]byte, 0, 8+len(voice)+len(text))
 	request = append(le.AppendUint32(request, uint32(len(voice))), voice...)
@@ -148,7 +148,7 @@ func (w *synthWorker) run(ctx context.Context) {
 		p, err := w.start()
 		if err == nil {
 			timeout, cancel := context.WithTimeout(ctx, ttsWait)
-			probe, _ := p.call(timeout, emmaVoice, "")
+			probe, _ := p.call(timeout, heartVoice, "")
 			cancel()
 			err = probe.err
 			if err == nil {

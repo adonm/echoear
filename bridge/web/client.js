@@ -448,8 +448,8 @@ function renderCurrent() {
 
 function renderVoice(device, pending) {
   $("voice-controls").hidden = !device;
-  const voice = pending || device?.voice || "bf_emma";
-  for (const [id, option] of [["voice-emma", "bf_emma"], ["voice-fable", "bm_fable"]]) {
+  const voice = pending || device?.voice || "af_heart";
+  for (const [id, option] of [["voice-heart", "af_heart"], ["voice-fable", "bm_fable"]]) {
     $(id).disabled = !!pending;
     $(id).setAttribute("aria-pressed", String(voice === option));
   }
@@ -476,7 +476,7 @@ async function setVoice(voice) {
     if (view === cat) renderVoice(cat.device);
   }
 }
-$("voice-emma").onclick = () => setVoice("bf_emma");
+$("voice-heart").onclick = () => setVoice("af_heart");
 $("voice-fable").onclick = () => setVoice("bm_fable");
 $("voice-select").onchange = e => setVoice(e.target.value);
 

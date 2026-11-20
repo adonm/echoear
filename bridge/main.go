@@ -85,7 +85,7 @@ func run() error {
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, peers: loadPeers(filepath.Join(local, "devices.json")),
 		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
-		voices:  loadVoices(filepath.Join(local, "voices.json"), env("ECHOEAR_TTS_VOICE", emmaVoice)),
+		voices:  loadVoices(filepath.Join(local, "voices.json"), env("ECHOEAR_TTS_VOICE", heartVoice)),
 		virtual: loadVirtual(filepath.Join(local, "virtual_clients.json")), history: loadChatHistory(filepath.Join(local, "chat_events.json")),
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
 	b.ws = newWSHub(b)
