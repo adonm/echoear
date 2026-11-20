@@ -25,12 +25,31 @@ python3 -m py_compile bridge/tts_worker.py
     "$GO_BIN" test -race ./...
 )
 
-vad_test=$(mktemp)
-trap 'rm -f -- "$vad_test"' EXIT
-gcc -std=c11 -Wall -Wextra -Werror -I firmware/main \
-    firmware/tests/vad_test.c firmware/main/vad.c -o "$vad_test"
-"$vad_test"
+host_tests=$(mktemp -d)
+trap 'rm -rf -- "$host_tests"' EXIT
+host_cc=(gcc -std=c11 -Wall -Wextra -Werror -I firmware/main)
+"${host_cc[@]}" firmware/tests/vad_test.c firmware/main/vad.c -o "$host_tests/vad"
+"$host_tests/vad"
 printf 'PASS host VAD tests\n'
+
+if command -v pkg-config >/dev/null && pkg-config --exists libcjson; then
+    read -r -a cjson <<< "$(pkg-config --cflags --libs libcjson)"
+else
+    if command -v podman >/dev/null; then
+        podman=(podman)
+    elif command -v host-spawn >/dev/null; then
+        podman=(host-spawn podman)
+    else
+        printf 'Graphics tests need libcjson development files or the local ESP-IDF image via Podman.\n' >&2
+        exit 1
+    fi
+    "${podman[@]}" run --pull=never --rm --entrypoint tar docker.io/espressif/idf:release-v5.5 \
+        -C /opt/esp/idf/components/json/cJSON -cf - cJSON.c cJSON.h | tar -xf - -C "$host_tests"
+    cjson=(-I "$host_tests" "$host_tests/cJSON.c")
+fi
+"${host_cc[@]}" firmware/tests/gfx_test.c firmware/main/{gfx,scene}.c \
+    "${cjson[@]}" -lm -o "$host_tests/gfx"
+"$host_tests/gfx"
 
 if [[ -n $(git ls-files -- ':(glob)**/sdkconfig.local' ':(glob)**/bridge.env') ]]; then
     printf 'sdkconfig.local and bridge.env must not be tracked\n' >&2

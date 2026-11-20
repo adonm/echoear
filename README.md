@@ -1,17 +1,18 @@
 # EchoEar
 
-EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk voice tutor with interactive diagrams and a cat-to-cat intercom.
+EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk tutor with interactive diagrams, intercom, and a browser mirror.
 
 ```text
-EchoEar <-- Wi-Fi PCM, replies, cards --> Go bridge :8765
+EchoEar <-- /ws: keyed scenes and PCM --> Go bridge :8765 <-- /app --> Browser
                                            |-- Hex      (speech to text)
                                            |-- OpenCode (reply deltas over SSE)
                                            `-- Kokoro   (persistent FP32 worker)
-Bridge :8765 -- intercom card and audio --> Recipient EchoEar :80
 ```
 
-**Target:** EchoEar / ESP-VoCat v1.2, ESP32-S3, 16 MB flash, 16 MB octal PSRAM,
-360×360 touchscreen, and a USB data cable for first flash.
+**Target:** EchoEar / ESP-VoCat v1.2 (ESP32-S3, 16 MB flash and 16 MB PSRAM).
+Phase 2 (`v0.7.0`) uses a 1.28 MB thin client: a pure-C 360×360 RGB565
+rasterizer replaces LVGL, applies keyed scene patches, and draws a fallback
+face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 
 ## Quickstart
 
@@ -55,34 +56,39 @@ Bridge :8765 -- intercom card and audio --> Recipient EchoEar :80
    environment or `bridge.env`. The board confirms the new image after display
    initialization and Wi-Fi DHCP; the script checks the running partition.
 
-5. Run `./scripts/check.sh` for `go vet`, race tests, and the host VAD test
-   (GCC required, ShellCheck optional). Run `./scripts/check.sh --live` to
-   also exercise the running bridge, Hex, OpenCode, and Kokoro.
+5. Run `./scripts/check.sh` for Go vet, race tests, and host VAD and graphics
+   tests (GCC, plus cJSON development files or the cached ESP-IDF image).
+   Add `--live` to exercise the running services; ShellCheck runs if installed.
 
 ## Controls and intercom
 
 - Tap the cat or pet its head, then speak after the tone. Voice activity
   detection stops recording at silence; tap or pet again to stop early or interrupt speech.
 - Slide across the head pads to change volume, or hold a pad for one step.
-  After 120 seconds idle the display dims, unless a diagram is open. Tap or pet
-  to wake. The battery pill shows charge.
-- **Text** opens the transcript; **New** resets the conversation. **Cat** closes a diagram.
+  The display dims after 120 seconds idle unless a diagram is open; tap or pet to wake.
+- **Text** opens the peer drawer; **New** resets the conversation. **Cat** closes a diagram.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
 - Ask for a composed message (“Send Mint a knock-knock joke”). The agent emits
   an `echoear-message` block; the bridge delivers a card and synthesized speech.
+- Open `http://<host-lan-ip>:8765/app` and enter the bridge token to mirror
+  and control a cat. **Join as Phone Cat** adds a virtual EchoEar for intercom.
+  The browser mic needs HTTPS or localhost; plain LAN HTTP still supports
+  the SVG mirror, text, and audio playback.
 
 ## API
 
-Send `X-EchoEar-Token` except for `/health` and `/status`. Audio is signed 16-bit
-little-endian mono PCM at 16 kHz; voice inputs also accept WAV, up to 2 MiB.
-The bridge starts sentence synthesis in a persistent FP32 Kokoro worker while
-OpenCode is still streaming the reply over SSE.
+HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
+The `/ws` hub sends keyed `scene` and `patch` JSON. Binary frames carry 16 kHz
+signed 16-bit little-endian mono PCM (`0x01` mic upload, `0x02` playback). HTTP voice
+inputs also accept WAV, up to 2 MiB. Kokoro starts synthesizing sentences
+while OpenCode streams its reply over SSE.
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
 | `GET /health` | Hex, OpenCode, and TTS readiness |
+| `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
 | `GET /api/devices` | `devices` with `device_id`, `character`, `ip`, `online` |
 | `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
@@ -97,8 +103,7 @@ Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body
 
 | Device · port 80 | Request → response |
 | --- | --- |
-| `GET /status` | Identity, firmware, partition, memory, battery, volume, sleeping, and `peer` (or `null`) |
-| `POST /display`, `POST /display/clear` | Raw screen object (8 KiB, 24 shapes max) or no body to clear |
+| `GET /status` | Identity, firmware, partition, memory, battery, volume, sleeping, and `ws_connected` |
 | `POST /speak` | Raw PCM (1.5 MiB max) → queued sample count or 409 if busy |
 | `POST /volume` | `{"level":65}` → saved volume (0–100) |
 | `POST /ota`, `POST /ota/upload` | Pull from bridge or upload `echoear.bin` as `application/octet-stream`; reboot on success |
@@ -121,8 +126,7 @@ bridge follow-up, or `reply_to` on a `btn` for a direct intercom recording.
 
 ## Networking
 
-Devices need TCP **8765** to the bridge; the bridge and update host need TCP
-**80** to the devices. Use Avahi (`avahi-resolve -n echoear-XXXX.local`) for
-mDNS. If the container cannot resolve `.local`, run the lookup via `host-spawn`
-or use the IP shown on the board. HTTP is unencrypted; use a trusted LAN and
-keep local configs and firmware images private.
+Devices and browsers need TCP **8765** to the bridge; direct OTA uses TCP
+**80** to the device. Use Avahi (`avahi-resolve -n echoear-XXXX.local`) for
+mDNS or the device IP if the container cannot resolve `.local`. HTTP and WS
+are unencrypted; use a trusted LAN and keep configs and firmware images private.
