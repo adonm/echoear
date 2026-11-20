@@ -3,70 +3,162 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#171525">
+  <meta name="theme-color" content="#151722">
   <title>EchoEar · Cat Club</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/app/style.css">
   <script src="/app/client.js" defer></script>
 </head>
 <body>
-  <main>
-    <header class="masthead">
-      <div>
-        <p class="eyebrow">ECHOEAR / LOCAL</p>
-        <h1>Cat Club<span>.</span></h1>
-      </div>
-      <button id="settings" type="button" class="quiet" aria-expanded="false" aria-controls="credentials">Bridge token</button>
-    </header>
-    <form id="credentials" class="panel" hidden>
-      <label for="token">Bridge token</label>
-      <div class="row">
-        <input id="token" type="password" required autocomplete="off" spellcheck="false">
-        <button type="submit">Connect</button>
-      </div>
-    </form>
-    <section class="panel" aria-labelledby="devices-heading">
-      <div class="row between wrap">
-        <h2 id="devices-heading">Nearby cats</h2>
-        <button id="join" type="button" class="accent">Join as Phone Cat</button>
-      </div>
-      <nav id="peers" class="row wrap peers" aria-label="EchoEar devices"></nav>
-      <p id="link-state" class="small" role="status">Connect to discover your cats.</p>
-    </section>
-    <section class="stage-panel" aria-label="EchoEar screen and controls">
+  <header class="masthead">
+    <div class="brand">
+      <span class="wordmark">EchoEar</span>
+      <h1>Cat Club<span>.</span></h1>
+    </div>
+    <div class="row header-actions">
+      <span id="link-state" class="connection" role="status">Not connected</span>
+      <button id="sidebar-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="sidebar" hidden>Devices</button>
+      <button id="settings" class="quiet" type="button">Bridge token</button>
+    </div>
+  </header>
+  <main id="workspace" class="workspace" data-sidebar="closed" hidden>
+    <aside id="sidebar" class="sidebar panel" aria-label="Manage EchoEar devices" hidden>
+      <section class="device-group" aria-labelledby="physical-heading">
+        <p class="eyebrow">On your network</p>
+        <h2 id="physical-heading">EchoEars</h2>
+        <nav id="physical" class="device-list" aria-label="Physical EchoEars"></nav>
+      </section>
+      <section class="device-group" aria-labelledby="virtual-heading">
+        <p class="eyebrow">In your browser</p>
+        <h2 id="virtual-heading">Virtual Cats</h2>
+        <nav id="virtual" class="device-list" aria-label="Virtual Cats"></nav>
+        <details id="new-cat">
+          <summary>+ New Virtual Cat</summary>
+          <form id="create-cat" class="new-cat-form">
+            <label for="character">Character name</label>
+            <input id="character" name="character" type="text" maxlength="40" required autocomplete="off" placeholder="e.g. Biscuit">
+            <fieldset>
+              <legend>Theme</legend>
+              <div class="swatches">
+                <label data-theme="cake"><input type="radio" name="theme" value="cake" checked><span>Cake</span></label>
+                <label data-theme="mint"><input type="radio" name="theme" value="mint"><span>Mint</span></label>
+                <label data-theme="plum"><input type="radio" name="theme" value="plum"><span>Plum</span></label>
+                <label data-theme="sunny"><input type="radio" name="theme" value="sunny"><span>Sunny</span></label>
+              </div>
+            </fieldset>
+            <button class="accent" type="submit">Create</button>
+          </form>
+        </details>
+        <button id="join" class="quiet phone-join" type="button">Join as Phone Cat</button>
+        <p id="device-note" class="note" role="status"></p>
+      </section>
+      <section class="device-group tunnel" aria-labelledby="tunnel-heading">
+        <p class="eyebrow">Share a Virtual Cat</p>
+        <h2 id="tunnel-heading">OpenTunnel</h2>
+        <p id="tunnel-status" class="small">Checking service…</p>
+        <p id="install-note" class="small" hidden>Install the CLI from <a href="https://opentunnel.xyz" target="_blank" rel="noopener noreferrer">opentunnel.xyz</a> to share a cat over HTTPS.</p>
+        <p id="tunnel-hint" class="small">Select a Virtual Cat to manage its link.</p>
+        <div id="tunnel-controls" hidden>
+          <h3 id="tunnel-cat"></h3>
+          <button id="tunnel-create" class="quiet" type="button">Create Tunnel</button>
+          <div id="share" hidden>
+            <label for="share-url">Private share link</label>
+            <input id="share-url" type="text" readonly spellcheck="false">
+            <div class="row wrap">
+              <button id="copy" class="quiet" type="button">Copy Share Link</button>
+              <a id="open-link" class="button quiet" target="_blank" rel="noopener noreferrer">Open <span aria-hidden="true">↗</span></a>
+            </div>
+          </div>
+          <button id="tunnel-close" class="quiet" type="button" hidden>Close Tunnel</button>
+          <div class="row wrap delete-row">
+            <button id="delete-cat" class="danger quiet" type="button">Delete</button>
+            <button id="delete-cancel" class="quiet" type="button" hidden>Keep cat</button>
+          </div>
+        </div>
+        <p id="tunnel-note" class="note" role="status"></p>
+      </section>
+    </aside>
+
+    <section id="face" class="face-panel panel" aria-labelledby="face-heading">
+      <header class="face-header">
+        <p class="eyebrow">01 / Live screen</p>
+        <h2 id="face-heading">Cat face</h2>
+      </header>
       <div class="stage">
-        <svg id="screen" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" aria-labelledby="screen-title screen-description">
+        <svg id="stage" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" aria-labelledby="screen-title screen-description">
           <title id="screen-title">EchoEar screen</title>
-          <desc id="screen-description">Select an online EchoEar or join as a Phone Cat.</desc>
+          <desc id="screen-description">No cat selected.</desc>
           <defs><clipPath id="round-screen"><circle cx="180" cy="180" r="180"/></clipPath></defs>
-          <g id="canvas" clip-path="url(#round-screen)">
-            <rect id="canvas-bg" width="360" height="360" fill="#251C3B"/>
-            <g id="nodes"></g>
-          </g>
+          <svg id="screen" viewBox="0 0 360 360" width="360" height="360">
+            <g clip-path="url(#round-screen)">
+              <rect id="canvas-bg" width="360" height="360" fill="#202432"/>
+              <g id="screen-placeholder" fill="none" stroke="#727b92" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M112 182v-51l43 27c16-5 34-5 50 0l43-27v51c0 39-27 63-68 63s-68-24-68-63Z"/>
+                <path d="M148 194h10m44 0h10m-36 21 4 4 4-4"/>
+              </g>
+              <g id="nodes"></g>
+            </g>
+          </svg>
         </svg>
       </div>
-      <p id="screen-status" class="small" role="status">No cat selected.</p>
-      <div id="controls" class="panel" hidden>
-        <form id="prompt" class="row">
-          <label class="sr-only" for="text">Quick text prompt</label>
-          <input id="text" maxlength="640" required placeholder="Ask your cat something…" autocomplete="off">
-          <button type="submit">Send</button>
-        </form>
-        <div class="row between wrap">
-          <label for="volume">Volume</label>
-          <input id="volume" type="range" min="0" max="100" value="80">
-          <output for="volume" id="volume-value">80%</output>
-        </div>
-        <div id="phone-controls" class="row wrap" hidden>
-          <label class="sr-only" for="target">Talk destination</label>
-          <select id="target"><option value="">Ask my cat</option></select>
-          <button id="talk" type="button" class="accent" aria-pressed="false">Talk</button>
-          <button id="cancel" type="button" class="quiet" hidden>Cancel recording</button>
-          <button id="sound" type="button" class="quiet">Enable sound</button>
-        </div>
-        <p id="mic-help" class="small" hidden>Microphone access needs HTTPS or localhost. You can still send text and play audio.</p>
+      <p id="screen-status" class="screen-status" role="status">No cat selected.</p>
+      <div id="screen-controls" class="row volume" hidden>
+        <label for="volume">Volume</label>
+        <input id="volume" type="range" min="0" max="100" value="80">
+        <output for="volume" id="volume-value">80%</output>
       </div>
     </section>
-    <noscript><p class="panel">JavaScript is required for the live screen and audio.</p></noscript>
+
+    <section id="chat" class="chat-panel panel" aria-labelledby="chat-heading">
+      <header class="chat-header">
+        <p class="eyebrow">02 / Conversation</p>
+        <div class="row chat-top wrap">
+          <div class="chat-identity">
+            <h2 id="chat-heading">Chat</h2>
+            <div class="row chat-cat"><span class="theme-dot" aria-hidden="true"></span><strong id="chat-name">Choose a cat</strong><span id="chat-mode" class="pill" hidden></span></div>
+          </div>
+          <div class="row chat-actions">
+            <button id="refresh" class="quiet" type="button" disabled>Refresh</button>
+            <button id="reset" class="quiet" type="button" disabled>New Chat</button>
+          </div>
+        </div>
+      </header>
+      <div id="transcript" tabindex="0" role="region" aria-label="Chat transcript">
+        <p id="empty-chat" class="empty-chat">Choose a cat to open its chat.</p>
+        <ol id="messages" class="messages"></ol>
+      </div>
+      <div class="composer">
+        <form id="prompt" class="row">
+          <label class="sr-only" for="text">Message</label>
+          <input id="text" maxlength="640" required placeholder="Say something to your cat…" autocomplete="off" disabled>
+          <button id="send" class="accent" type="submit" disabled>Send</button>
+        </form>
+        <div id="phone-controls" class="row wrap" hidden>
+          <button id="talk" type="button" class="quiet" aria-pressed="false" aria-describedby="mic-help">Mic · Talk</button>
+          <button id="cancel" type="button" class="quiet" hidden>Cancel recording</button>
+          <button id="sound" type="button" class="quiet">Enable speaker</button>
+          <label id="target-label" class="sr-only" for="target">Talk destination</label>
+          <select id="target"><option value="">Ask my cat</option></select>
+        </div>
+        <p id="mic-help" class="small" hidden></p>
+        <p id="chat-note" class="note" role="status"></p>
+      </div>
+    </section>
   </main>
+  <dialog id="credentials" aria-labelledby="token-heading">
+    <form id="token-form">
+      <p class="eyebrow">EchoEar / Private access</p>
+      <h2 id="token-heading">Connect to Cat Club</h2>
+      <p class="small">Enter your bridge token, or use the original share link for your cat.</p>
+      <label for="token">Bridge token</label>
+      <input id="token" type="password" required autocomplete="off" spellcheck="false">
+      <p id="auth-note" class="note" role="status"></p>
+      <div class="row">
+        <button id="connect" class="accent" type="submit">Connect</button>
+        <button id="token-cancel" class="quiet" type="button" hidden>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <noscript><p class="empty-chat">JavaScript is required for the live screen and audio.</p></noscript>
 </body>
 </html>

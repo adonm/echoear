@@ -1,179 +1,552 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const screen = $("screen"), nodes = $("nodes"), svgNS = "http://www.w3.org/2000/svg";
+const screen = $("stage"), nodes = $("nodes"), svgNS = "http://www.w3.org/2000/svg";
 const getLocal = key => { try { return localStorage.getItem(key) || ""; } catch { return ""; } };
 const setLocal = (key, val) => { try { localStorage.setItem(key, val); } catch {} };
 const params = new URL(location.href);
-let token = params.searchParams.get("token") || getLocal("echoear-token");
+const initialToken = params.searchParams.has("token") ? params.searchParams.get("token") : getLocal("echoear-token");
 if (params.searchParams.has("token")) {
   params.searchParams.delete("token");
   history.replaceState(null, "", params.pathname + params.search + params.hash);
-  setLocal("echoear-token", token);
+  setLocal("echoear-token", initialToken);
 }
 let phone = getLocal("echoear-phone");
 if (!/^phone-[0-9a-f]{4}$/.test(phone)) {
   phone = "phone-" + crypto.getRandomValues(new Uint16Array(1))[0].toString(16).padStart(4, "0");
   setLocal("echoear-phone", phone);
 }
-let ws, asPhone = false, selected = "", devices = [], reconnect = 0, timer;
-let rev = 0;
+const wide = matchMedia("(min-width: 921px)");
+const themeOf = d => ["cake", "mint", "plum", "sunny"].includes(d?.theme) ? d.theme : "cake";
+const isLive = d => !!(d?.ws_connected ?? d?.ws);
+const persisted = d => /^virt-[0-9a-f]{8}$/.test(d?.device_id || "");
+const node = (tag, cls, text) => {
+  const element = document.createElement(tag);
+  if (cls) element.className = cls;
+  if (text != null) element.textContent = text;
+  return element;
+};
+const say = (id, text) => {
+  const element = $(id);
+  if (element.textContent !== text) element.textContent = text;
+};
+let app, view, ws, watched, retry, poll, rev = 0, pointer;
 const keyed = new Map();
-const send = o => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); };
-const updateStatus = text => { $("screen-status").textContent = text; $("screen-description").textContent = text; };
-
-function settings(show) {
-  $("credentials").hidden = !show;
-  $("settings").setAttribute("aria-expanded", String(show));
-  if (show) $("token").focus();
+function send(event) {
+  if (ws?.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(event));
+  return true;
 }
-$("settings").onclick = () => settings($("credentials").hidden);
-$("credentials").onsubmit = e => {
-  e.preventDefault();
-  token = $("token").value.trim();
-  $("token").value = "";
-  if (token) {
+function updateStatus(text) {
+  say("screen-status", text);
+  say("screen-description", text);
+}
+
+function credentials(note = "") {
+  say("auth-note", note);
+  $("token-cancel").hidden = !app;
+  if (!$("credentials").open) $("credentials").showModal();
+}
+
+function request(token, path, {method = "GET", body, signal} = {}) {
+  const headers = {"X-EchoEar-Token": token};
+  if (body) headers["Content-Type"] = "application/json";
+  return fetch(path, {method, headers, body: body && JSON.stringify(body), signal, cache:"no-store"});
+}
+
+async function api(current, path, options) {
+  const res = await request(current.token, path, options);
+  if (res.status === 401 && app === current) {
+    stop();
+    setLocal("echoear-token", "");
+    credentials("Your token is no longer accepted.");
+  }
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  return res.status === 204 ? null : res.json();
+}
+
+function stop() {
+  clearInterval(poll);
+  view?.loading?.abort();
+  view = app = null;
+  disconnect();
+  $("workspace").hidden = true;
+  $("sidebar-toggle").hidden = true;
+  say("link-state", "Not connected");
+}
+
+async function authorize(token) {
+  $("connect").disabled = true;
+  say("auth-note", "Checking token…");
+  try {
+    const res = await request(token, "/api/scope");
+    if (res.status === 401 || res.status === 403) {
+      if (!app) setLocal("echoear-token", "");
+      credentials("That token wasn’t accepted. Check it and try again.");
+      return;
+    }
+    const scope = res.ok ? await res.json() : null;
+    if (res.status !== 404 && (!scope?.scoped || !scope.device_id)) throw new Error("Unexpected scope response");
+    stop();
     setLocal("echoear-token", token);
-    settings(false);
-    connect();
+    app = {token, scope, devices:[], deviceVersion:0, sidebar:!scope && wide.matches, tunnel:null};
+    $("workspace").dataset.app = scope ? "scoped" : "lan";
+    $("workspace").hidden = false;
+    $("sidebar-toggle").hidden = !!scope;
+    $("target").hidden = $("target-label").hidden = !!scope;
+    $("credentials").close();
+    $("token").value = "";
+    renderSidebar();
+    if (scope) {
+      $("share-url").value = "";
+      $("open-link").removeAttribute("href");
+      select({...scope, kind:"virtual"});
+    } else {
+      say("link-state", "Looking for cats…");
+      renderDevices();
+      select(null);
+      refreshDevices();
+      refreshTunnel();
+      poll = setInterval(() => { refreshDevices(); refreshTunnel(); }, 5000);
+    }
+  } catch {
+    credentials("Could not reach the bridge. Check the connection and try again.");
+  } finally {
+    $("connect").disabled = false;
+  }
+}
+
+$("settings").onclick = () => credentials();
+$("token-cancel").onclick = () => $("credentials").close();
+$("credentials").oncancel = e => { if (!app || $("connect").disabled) e.preventDefault(); };
+$("token-form").onsubmit = e => {
+  e.preventDefault();
+  const token = $("token").value.trim();
+  if (token) authorize(token);
+};
+
+function renderSidebar() {
+  $("sidebar").hidden = !app?.sidebar;
+  $("workspace").dataset.sidebar = app?.sidebar ? "open" : "closed";
+  $("sidebar-toggle").setAttribute("aria-expanded", String(!!app?.sidebar));
+}
+$("sidebar-toggle").onclick = () => { app.sidebar = !app.sidebar; renderSidebar(); };
+wide.addEventListener("change", e => {
+  if (app && !app.scope) { app.sidebar = e.matches; renderSidebar(); }
+});
+
+const rowParts = new WeakMap();
+function deviceRow(d) {
+  const button = node("button", "device");
+  button.type = "button";
+  button.dataset.id = d.device_id;
+  const name = node("span", "device-name"), state = node("span", "pill device-state");
+  const meta = node("span", "device-meta"), badge = node("span", "pill tunnel-badge", "HTTPS Tunnel");
+  const dot = node("span", "theme-dot");
+  dot.setAttribute("aria-hidden", "true");
+  button.append(dot, name, state, meta, badge);
+  rowParts.set(button, {name, state, meta, badge});
+  button.onclick = () => {
+    const selected = app.devices.find(cat => cat.device_id === button.dataset.id);
+    if (selected) {
+      select(selected);
+      if (selected.kind !== "virtual" && !wide.matches) {
+        app.sidebar = false;
+        renderSidebar();
+        $("sidebar-toggle").focus();
+      }
+    }
+  };
+  return button;
+}
+
+function renderDevices() {
+  if (!app || app.scope) return;
+  for (const [id, virtual] of [["physical", false], ["virtual", true]]) {
+    const nav = $(id);
+    const list = app.devices.filter(d => virtual ? persisted(d) : d.kind !== "virtual");
+    const rows = new Map([...nav.querySelectorAll("button")].map(b => [b.dataset.id, b]));
+    nav.querySelector("p")?.remove();
+    for (const d of list) {
+      const button = rows.get(d.device_id) ?? deviceRow(d);
+      rows.delete(d.device_id);
+      button.dataset.theme = themeOf(d);
+      button.setAttribute("aria-pressed", String(view?.id === d.device_id));
+      const {name, state, meta, badge} = rowParts.get(button);
+      if (name.textContent !== d.character) name.textContent = d.character;
+      state.dataset.status = isLive(d) ? "live" : d.online ? "http" : "off";
+      state.textContent = isLive(d) ? "Live WS" : d.online ? "HTTP" : "Offline";
+      meta.textContent = virtual ? "" : [
+        isLive(d) ? d.mode : "",
+        Number.isFinite(d.battery_pct) ? `Battery ${d.battery_pct}%` : "",
+        Number.isFinite(d.volume) ? `Vol ${d.volume}%` : "",
+      ].filter(Boolean).join(" · ");
+      meta.hidden = !meta.textContent;
+      badge.hidden = !d.tunnel?.active;
+      if (!button.isConnected) nav.append(button);
+    }
+    for (const stale of rows.values()) stale.remove();
+    if (!list.length) nav.append(node("p", "small", virtual ? "No saved Virtual Cats." : "No EchoEars found."));
+  }
+  const target = $("target");
+  const choices = app.devices.filter(d => d.online && d.device_id !== view?.id);
+  const values = choices.map(d => `${d.device_id}:${d.character}`).join("\n");
+  if (target.dataset.choices !== values) {
+    const prior = target.value;
+    target.replaceChildren(new Option("Ask my cat", ""), ...choices.map(d => new Option(`Intercom: ${d.character}`, d.device_id)));
+    target.value = choices.some(d => d.device_id === prior) ? prior : "";
+    target.dataset.choices = values;
+  }
+  $("join").textContent = view?.quick ? "Switch to mirror" : "Join as Phone Cat";
+  $("join").setAttribute("aria-pressed", String(!!view?.quick));
+  renderTunnel();
+}
+
+const preferredCat = devices => devices.find(d => d.kind !== "virtual" && isLive(d))
+  || devices.find(d => d.kind !== "virtual") || devices.find(persisted);
+async function refreshDevices() {
+  const current = app;
+  if (!current || current.scope) return;
+  if (current.deviceRequest) { current.devicesDirty = true; return; }
+  const version = current.deviceVersion;
+  current.deviceRequest = true;
+  try {
+    const {devices} = await api(current, "/api/devices");
+    if (app !== current || version !== current.deviceVersion) return;
+    current.devices = devices;
+    const updated = devices.find(d => d.device_id === view?.id);
+    if (!view?.id || !updated && view.virtual && !view.quick && !current.tunnelBusy) {
+      select(preferredCat(devices));
+    } else if (updated) {
+      view.device = updated;
+      renderCurrent();
+    }
+    renderDevices();
+    if ($("device-note").textContent === "Could not load devices.") say("device-note", "");
+  } catch {
+    if (app === current) say("device-note", "Could not load devices.");
+  } finally {
+    current.deviceRequest = false;
+    if (app === current && current.devicesDirty) {
+      current.devicesDirty = false;
+      refreshDevices();
+    }
+  }
+}
+
+async function refreshTunnel() {
+  const current = app;
+  if (!current || current.scope || current.tunnelRequest) return;
+  current.tunnelRequest = true;
+  try {
+    const {installed, service_running} = await api(current, "/api/tunnel/status");
+    current.tunnel = {installed, service_running};
+  } catch {
+    current.tunnel = null;
+  } finally {
+    current.tunnelRequest = false;
+    if (app === current) renderTunnel();
+  }
+}
+
+function renderTunnel() {
+  const status = app.tunnel;
+  say("tunnel-status", !status ? "Service status unavailable." : !status.installed ? "CLI not installed." :
+    status.service_running ? "Service running." : "Service not running.");
+  $("install-note").hidden = status?.installed !== false;
+  const d = view?.device, show = persisted(d), lock = !!app.tunnelBusy;
+  $("tunnel-controls").hidden = !show;
+  $("tunnel-hint").hidden = show;
+  const tunnel = show ? d.tunnel : null;
+  const share = tunnel?.active ? safeShareURL(tunnel.share_url) : "";
+  if ($("share-url").value !== share) {
+    $("share-url").value = share;
+    say("copy", "Copy Share Link");
+    if (share) $("open-link").href = share;
+    else $("open-link").removeAttribute("href");
+  }
+  if (!show) return;
+  say("tunnel-cat", d.character);
+  $("share").hidden = !share;
+  $("tunnel-create").hidden = !!tunnel?.active;
+  $("tunnel-create").disabled = lock || (!status?.installed && !tunnel);
+  say("tunnel-create", tunnel ? "Restore Tunnel" : "Create Tunnel");
+  $("tunnel-close").hidden = !tunnel;
+  $("tunnel-close").disabled = lock;
+  $("delete-cat").disabled = lock;
+  $("delete-cancel").hidden = !view.confirmDelete;
+  $("delete-cancel").disabled = lock;
+  say("delete-cat", view.confirmDelete ? "Confirm delete" : "Delete");
+}
+
+function safeShareURL(link) {
+  try {
+    const url = new URL(link);
+    return url.protocol === "https:" && !url.username && !url.password ? url.href : "";
+  } catch { return ""; }
+}
+
+$("create-cat").onsubmit = async e => {
+  e.preventDefault();
+  const current = app, form = e.currentTarget, button = form.querySelector("button");
+  const {character, theme} = Object.fromEntries(new FormData(form));
+  button.disabled = true;
+  say("device-note", "Creating cat…");
+  try {
+    const cat = await api(current, "/api/virtual-clients", {method:"POST", body:{character:character.trim(), theme}});
+    if (app !== current) return;
+    const d = {...cat, device_id:cat.id, kind:"virtual"};
+    current.deviceVersion++;
+    current.devices.push(d);
+    form.reset();
+    $("new-cat").open = false;
+    say("device-note", "Virtual Cat created.");
+    select(d);
+    refreshDevices();
+  } catch {
+    if (app === current) say("device-note", "Could not create that cat. Use 1–40 letters, numbers, spaces, or basic punctuation.");
+  } finally {
+    button.disabled = false;
+  }
+};
+
+async function changeTunnel(action) {
+  const current = app, cat = view, id = encodeURIComponent(cat.id);
+  if (current.tunnelBusy) return;
+  current.tunnelBusy = true;
+  renderTunnel();
+  say("tunnel-note", "Working…");
+  try {
+    const create = action === "create";
+    const result = await api(current, create ? "/api/tunnels" :
+      action === "delete" ? `/api/virtual-clients/${id}` : `/api/tunnels/${id}`,
+    create ? {method:"POST", body:{device_id:cat.id}} : {method:"DELETE"});
+    if (app !== current) return;
+    current.deviceVersion++;
+    const d = current.devices.find(d => d.device_id === cat.id);
+    if (action === "delete") {
+      current.devices = current.devices.filter(d => d.device_id !== cat.id);
+      if (view === cat) select(preferredCat(current.devices));
+      say("device-note", "Virtual Cat deleted.");
+    } else if (d) {
+      d.tunnel = result;
+      if (view === cat) view.device = d;
+    }
+    if (view === cat) say("tunnel-note", create ? "Tunnel created." : "Tunnel closed.");
+    refreshDevices();
+    refreshTunnel();
+  } catch {
+    if (app === current && view === cat) say("tunnel-note", `Could not ${action} ${action === "delete" ? "the cat" : "the tunnel"}.`);
+  } finally {
+    current.tunnelBusy = false;
+    if (app === current) renderDevices();
+  }
+}
+
+$("tunnel-create").onclick = () => changeTunnel("create");
+$("tunnel-close").onclick = () => changeTunnel("close");
+$("delete-cat").onclick = () => {
+  if (view.confirmDelete) changeTunnel("delete");
+  else {
+    view.confirmDelete = true;
+    say("tunnel-note", "Delete this cat? Its share link will stop working.");
+    renderTunnel();
+  }
+};
+$("delete-cancel").onclick = () => {
+  view.confirmDelete = false;
+  say("tunnel-note", "");
+  renderTunnel();
+  $("delete-cat").focus();
+};
+$("copy").onclick = async () => {
+  const field = $("share-url"), value = field.value;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(value);
+    copied = true;
+  } catch {
+    field.focus();
+    field.select();
+    try { copied = document.execCommand("copy"); } catch {}
+  }
+  if (field.value !== value) return;
+  say("copy", copied ? "Copied!" : "Copy Share Link");
+  say("tunnel-note", copied ? "Share link copied." : "Copy the selected link with your keyboard.");
+  if (copied) setTimeout(() => { if (field.value === value) say("copy", "Copy Share Link"); }, 2000);
+};
+
+$("join").onclick = () => {
+  if (view?.quick) select(preferredCat(app.devices));
+  else {
+    audioReady();
+    select({device_id:phone, theme:"plum", character:"Plum", kind:"virtual"}, true);
   }
 };
 
 function clearScene() {
   rev = 0;
+  pointer = null;
   keyed.clear();
   nodes.replaceChildren();
-  $("canvas-bg").setAttribute("fill", "#251C3B");
+  $("canvas-bg").setAttribute("fill", "#202432");
+  $("screen-placeholder").removeAttribute("display");
   delete screen.dataset.dim;
+  delete screen.dataset.interactive;
 }
-const chosen = () => devices.find(d => d.device_id === selected);
-function controls() {
-  const ready = ws?.readyState === WebSocket.OPEN && (asPhone || chosen()?.ws);
-  $("controls").hidden = !ready;
-  $("phone-controls").hidden = !asPhone;
-  $("mic-help").hidden = !asPhone || isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
-  $("talk").disabled = !$("mic-help").hidden;
-  $("join").textContent = asPhone ? "Switch to mirror" : "Join as Phone Cat";
-  $("join").setAttribute("aria-pressed", String(asPhone));
-}
-function watch(id) {
-  selected = id;
-  clearScene();
-  const d = chosen();
-  send({ev:"watch", device_id:d?.ws ? id : ""});
-  updateStatus(!d ? "Select a nearby cat." : d.ws ? `Mirroring ${d.character}…` :
-    `${d.character} is using HTTP firmware. Live mirroring requires a WebSocket connection.`);
-  peers();
-}
-function peers() {
-  const nav = $("peers"), list = devices.filter(d => d.online && d.device_id !== phone);
-  nav.replaceChildren();
-  for (const d of list) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.setAttribute("aria-pressed", String(!asPhone && d.device_id === selected));
-    b.textContent = d.character;
-    const badge = document.createElement("span");
-    badge.className = "peer-state";
-    badge.textContent = d.ws ? " · live" : " · HTTP";
-    b.append(badge);
-    b.onclick = () => {
-      if (asPhone) { asPhone = false; selected = d.device_id; connect(); }
-      else watch(d.device_id);
-    };
-    nav.append(b);
-  }
-  if (!list.length) {
-    const empty = document.createElement("span");
-    empty.className = "small";
-    empty.textContent = "No other cats online.";
-    nav.append(empty);
-  }
-  const target = $("target"), prev = target.value;
-  target.replaceChildren(new Option("Ask my cat", ""), ...list.map(d => new Option(`Intercom: ${d.character}`, d.device_id)));
-  target.value = list.some(d => d.device_id === prev) ? prev : "";
-  controls();
-}
-$("join").onclick = () => {
-  if (!token) { settings(true); return; }
-  asPhone = !asPhone;
-  if (asPhone) audioReady();
-  connect();
-};
 
-function connect() {
-  clearTimeout(timer);
-  if (!token) { settings(true); return; }
+function select(d, quick = false) {
+  const id = d?.device_id || "";
+  if (id === view?.id) return;
+  view?.loading?.abort();
+  // A fresh socket keeps unlabelled scene/patch frames from crossing selections.
+  disconnect();
+  view = {id, device:d, virtual:d?.kind === "virtual", quick, entries:new Map()};
+  $("text").value = "";
+  $("target").value = "";
+  say("chat-note", "");
+  say("tunnel-note", "");
+  renderCurrent();
+  renderDevices();
+  renderTranscript(true);
+  if (id) {
+    if (!quick) loadHistory();
+    connect();
+  } else say("link-state", "No cat selected");
+}
+
+function renderCurrent() {
+  const d = view?.device, ready = ws?.readyState === WebSocket.OPEN && rev > 0;
+  const active = ready && view?.virtual;
+  const mode = d?.mode && !["offline", "http"].includes(d.mode) ? d.mode : "";
+  $("workspace").dataset.theme = themeOf(d);
+  say("chat-name", d?.character || "Choose a cat");
+  $("chat-mode").hidden = !d;
+  say("chat-mode", !d ? "" : view.virtual ? active ? (mode || view.activity || "Live") : "Connecting" :
+    isLive(d) ? mode || "Live WS" : d.online ? "HTTP" : "Offline");
+  $("screen-controls").hidden = !ready;
+  $("phone-controls").hidden = !view?.virtual;
+  const micAvailable = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
+  $("talk").disabled = !active || !micAvailable;
+  $("sound").disabled = !active;
+  $("mic-help").hidden = !view?.virtual || micAvailable;
+  say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
+    "Mic needs localhost or an HTTPS opentunnel.xyz link");
+  $("text").disabled = !d || view.virtual && !active;
+  $("send").disabled = $("text").disabled || !!view?.sending || !!view?.resetting;
+  $("reset").disabled = !d || view.virtual && !active || !!view?.resetting || !!view?.sending;
+  $("refresh").disabled = !d || view.quick && !active || !!view?.loading || !!view?.resetting;
+}
+
+function disconnect() {
+  clearTimeout(retry);
   const old = ws;
   ws = null;
   old?.close();
   endMic(true, false);
   stopSound(false);
   clearScene();
-  devices = [];
-  peers();
-  $("link-state").textContent = "Connecting to the bridge…";
-  updateStatus(asPhone ? "Joining as Plum…" : "Looking for nearby cats…");
+  watched = null;
+}
+
+function connect(attempt = 0) {
+  if (!app || !view?.id) return;
+  disconnect();
+  const cat = view;
+  cat.activity = "";
+  say("link-state", "Connecting…");
+  updateStatus(cat.virtual ? `Joining as ${cat.device.character}…` : `Connecting to ${cat.device.character}…`);
+  renderCurrent();
   const url = new URL("/ws", location.href);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("token", token);
+  url.searchParams.set("token", app.token);
   const socket = new WebSocket(url);
   ws = socket;
   socket.binaryType = "arraybuffer";
-  let opened = false;
   socket.onopen = () => {
     if (ws !== socket) return;
-    opened = true;
-    reconnect = 0;
-    $("link-state").textContent = asPhone ? "Connected · Phone Cat" : "Connected · Remote control";
-    send(asPhone ? {ev:"hello",role:"web",device_id:phone,character:"Plum",firmware:"web",volume:+$("volume").value}
+    send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",volume}
       : {ev:"hello",role:"web"});
   };
   socket.onmessage = e => {
     if (ws !== socket) return;
     if (typeof e.data === "string") {
       try { command(JSON.parse(e.data)); } catch { updateStatus("Invalid screen update."); }
-    } else if (asPhone) playPCM(e.data);
+    } else if (cat.virtual) playPCM(e.data);
   };
   socket.onclose = () => {
     if (ws !== socket) return;
-    ws = null;
-    endMic(true, false);
-    stopSound(false);
-    controls();
-    $("link-state").textContent = opened ? "Disconnected · reconnecting…" : "Could not connect. Check the bridge token and URL.";
-    if (opened || reconnect > 0) {
-      reconnect++;
-      timer = setTimeout(connect, Math.min(5000, 500 * reconnect));
-    }
+    if (rev) attempt = 0;
+    disconnect();
+    renderCurrent();
+    say("link-state", "Reconnecting…");
+    updateStatus("Live screen disconnected.");
+    retry = setTimeout(() => connect(attempt + 1), Math.min(5000, 500 * 2 ** Math.min(attempt, 4)));
   };
 }
 
+function syncWatch(live) {
+  if (view.virtual || ws?.readyState !== WebSocket.OPEN) return;
+  const id = live ? view.id : "";
+  if (watched !== id) {
+    watched = id;
+    clearScene();
+    // Always subscribe by ID: the bridge may have reconnected since the peer snapshot.
+    send({ev:"watch", device_id:view.id});
+    const d = view.device;
+    updateStatus(id ? `Opening ${d.character}’s live screen…` : d.online ?
+      `${d.character} is online over HTTP. The live screen needs a WebSocket.` : `${d.character} is offline.`);
+  }
+}
+
+function activity(value) {
+  if (view.virtual) {
+    view.activity = value;
+    renderCurrent();
+  }
+}
+
 function command(msg) {
+  if (msg.type === "chat") {
+    if (msg.device_id === view.id && msg.entry?.id) {
+      view.entries.set(msg.entry.id, msg.entry);
+      view.liveDuringLoad?.set(msg.entry.id, msg.entry);
+      renderTranscript();
+    }
+    return;
+  }
   switch (msg.op) {
     case "peers": {
-      const wasLive = chosen()?.ws;
-      devices = msg.devices;
-      if (!asPhone) {
-        if (!selected) selected = devices.find(d => d.online && d.ws)?.device_id || "";
-        if (wasLive !== chosen()?.ws || (!rev && selected)) { watch(selected); break; }
-        if (!selected) updateStatus("Select a nearby cat.");
+      if (!app.scope) {
+        const peer = msg.devices.find(d => d.device_id === view.id);
+        if (!view.virtual) {
+          say("link-state", "LAN dashboard");
+          syncWatch(isLive(peer));
+        }
+        refreshDevices();
       }
-      peers();
       break;
     }
-    case "scene":
+    case "scene": {
+      const first = !rev;
       keyed.clear();
       nodes.replaceChildren();
       rev = msg.rev;
       $("canvas-bg").setAttribute("fill", msg.bg);
+      $("screen-placeholder").setAttribute("display", "none");
+      screen.dataset.interactive = "true";
       for (const n of msg.nodes) put(n);
-      updateStatus(asPhone ? "Plum · Phone Cat" : `Mirroring ${chosen()?.character || "EchoEar"}`);
-      controls();
+      if (first) {
+        say("link-state", app.scope ? "Private live cat" : "LAN dashboard");
+        updateStatus(view.virtual ? `${view.device.character} · Live Virtual Cat` : `Mirroring ${view.device.character}`);
+        loadHistory({replace:false});
+      }
+      renderCurrent();
       break;
+    }
     case "patch":
       if (msg.rev !== rev + 1) {
-        if (!asPhone) send({ev:"watch", device_id:selected});
+        if (!view.virtual || app.scope) send({ev:"watch", device_id:view.id});
         else connect();
         break;
       }
@@ -188,27 +561,165 @@ function command(msg) {
       break;
     case "power":
       screen.dataset.dim = String(msg.brightness < 20);
+      activity(msg.brightness < 20 ? "Sleepy" : "Live");
       break;
     case "volume":
       setVolume(msg.level);
       break;
     case "chime":
-      if (asPhone) chime(msg.kind);
+      if (view.virtual) {
+        if (msg.kind === "think") activity("Thinking");
+        chime(msg.kind);
+      }
       break;
     case "rec":
-      if (asPhone) {
+      if (view.virtual) {
         if (msg.action === "start") startMic(msg.target || "");
         else if (msg.action === "stop") endMic(false);
       }
       break;
     case "tts":
-      if (asPhone) {
-        if (msg.state === "start") ttsEnded = false;
+      if (view.virtual) {
+        if (msg.state === "start") { ttsEnded = false; activity("Speaking"); }
         if (msg.state === "end") { ttsEnded = true; ackIfDone(); }
       }
       break;
+    case "error":
+      say("chat-note", "The bridge couldn’t complete the live action.");
+      if (msg.status === 404 && view.virtual && !app.scope) refreshDevices();
+      break;
   }
 }
+
+const dayFormat = new Intl.DateTimeFormat(undefined, {dateStyle:"medium"});
+const timeFormat = new Intl.DateTimeFormat(undefined, {hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
+function bubble(entry) {
+  const role = ["assistant", "user", "intercom"].includes(entry.role) ? entry.role : "assistant";
+  const item = node("li", `bubble ${role}`);
+  item.dataset.entry = entry.id;
+  const catName = view.device.character;
+  const sender = entry.sender || (role === "user" ? "You" : catName);
+  const recipient = entry.recipient || (sender !== catName ? catName : "");
+  const label = role === "intercom" ? recipient ? `${sender} → ${recipient}` : `From ${sender}` : sender;
+  const header = node("div", "row wrap bubble-head");
+  header.append(node("strong", "", label));
+  if (role === "intercom") header.append(node("span", "pill", "Intercom"));
+  else if (role === "user") header.append(node("span", "pill", entry.source === "voice" ? "Voice" : "Text"));
+  const when = new Date(entry.timestamp);
+  if (Number.isFinite(when.valueOf())) {
+    const time = node("time", "", timeFormat.format(when));
+    time.dateTime = when.toISOString();
+    header.append(time);
+  }
+  item.append(header, node("p", "bubble-text", entry.text));
+  if (entry.scene_title || entry.tool_summary) {
+    const meta = node("div", "row wrap bubble-meta");
+    if (entry.scene_title) meta.append(node("span", "pill", `Scene: ${entry.scene_title}`));
+    if (entry.tool_summary) meta.append(node("span", "pill", `Tool: ${entry.tool_summary}`));
+    item.append(meta);
+  }
+  return item;
+}
+
+function renderTranscript(toBottom = false) {
+  const list = $("messages"), scroll = $("transcript"), top = scroll.scrollTop;
+  const follow = toBottom || scroll.scrollHeight - scroll.clientHeight - top <= 80;
+  const anchor = follow ? null : [...list.children].find(el => el.dataset.entry && el.offsetTop + el.offsetHeight > top);
+  const offset = anchor?.offsetTop;
+  const entries = [...view.entries.values()].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const content = document.createDocumentFragment();
+  let lastDay = "";
+  for (const entry of entries) {
+    const when = new Date(entry.timestamp);
+    const day = Number.isFinite(when.valueOf()) ? dayFormat.format(when) : "";
+    if (day && day !== lastDay) content.append(node("li", "day", day));
+    lastDay = day;
+    content.append(bubble(entry));
+  }
+  list.replaceChildren(content);
+  $("empty-chat").hidden = entries.length !== 0;
+  say("empty-chat", !view.id ? "Choose a cat to open its chat." : view.loading ? "Loading chat…" :
+    view.historyError ? "Could not load chat. Try Refresh." : "No messages yet — say hi or tap the mic!");
+  if (follow) scroll.scrollTop = scroll.scrollHeight;
+  else {
+    const replacement = anchor && [...list.children].find(el => el.dataset.entry === anchor.dataset.entry);
+    scroll.scrollTop = replacement ? top + replacement.offsetTop - offset : top;
+  }
+}
+
+async function loadHistory({replace = true} = {}) {
+  const cat = view, current = app;
+  if (!cat?.id || cat.resetting) return;
+  cat.loading?.abort();
+  const loading = new AbortController(), live = new Map();
+  cat.loading = loading;
+  cat.liveDuringLoad = live;
+  cat.historyError = false;
+  renderCurrent();
+  if (!cat.entries.size) renderTranscript();
+  try {
+    const {messages} = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/messages`, {signal:loading.signal});
+    if (view !== cat || cat.loading !== loading) return;
+    const merged = replace ? new Map() : new Map(cat.entries);
+    for (const entry of messages) if (entry.id) merged.set(entry.id, entry);
+    for (const [id, entry] of live) merged.set(id, entry);
+    cat.entries = merged;
+  } catch {
+    if (!loading.signal.aborted) cat.historyError = true;
+  } finally {
+    if (view === cat && cat.loading === loading) {
+      cat.loading = cat.liveDuringLoad = null;
+      renderCurrent();
+      renderTranscript();
+    }
+  }
+}
+
+$("refresh").onclick = () => loadHistory();
+$("reset").onclick = async () => {
+  const cat = view, current = app;
+  cat.loading?.abort();
+  cat.loading = cat.liveDuringLoad = null;
+  cat.resetting = true;
+  renderCurrent();
+  say("chat-note", "Starting a new chat…");
+  try {
+    await api(current, "/api/reset", {method:"POST", body:{device_id:cat.id}});
+    if (view !== cat) return;
+    cat.resetting = false;
+    cat.entries.clear();
+    renderTranscript(true);
+    say("chat-note", "New chat started.");
+    loadHistory();
+  } catch {
+    if (view === cat) say("chat-note", "Could not start a new chat.");
+  } finally {
+    cat.resetting = false;
+    if (view === cat) renderCurrent();
+  }
+};
+
+$("prompt").onsubmit = async e => {
+  e.preventDefault();
+  const cat = view, current = app, input = $("text"), text = input.value.trim();
+  if (!text || !cat?.id || $("send").disabled) return;
+  if (cat.virtual) audioReady();
+  cat.sending = true;
+  renderCurrent();
+  say("chat-note", "Sending…");
+  try {
+    const result = await api(current, "/api/chat", {method:"POST", body:{device_id:cat.id, text}});
+    if (view !== cat) return;
+    if (input.value.trim() === text) input.value = "";
+    say("chat-note", "");
+    if (!rev || result.reply) loadHistory({replace:false});
+  } catch {
+    if (view === cat) say("chat-note", "Could not send. Your message is still in the composer.");
+  } finally {
+    cat.sending = false;
+    if (view === cat) renderCurrent();
+  }
+};
 
 function el(tag, attrs) {
   const element = document.createElementNS(svgNS, tag);
@@ -264,7 +775,6 @@ function put(n) {
   group.replaceChildren(...marks);
 }
 
-let pointer = null;
 function xy(e) {
   const p = new DOMPoint(e.clientX,e.clientY).matrixTransform(screen.getScreenCTM().inverse());
   const int = v => Math.max(0,Math.min(359,Math.round(v)));
@@ -285,7 +795,7 @@ screen.addEventListener("pointermove", e => {
 });
 function pointerEnd(e, cancelled) {
   if (!pointer || pointer.pointer !== e.pointerId) return;
-  if (asPhone && !cancelled) audioReady();
+  if (view.virtual && !cancelled) audioReady();
   if (!cancelled && !pointer.drag) send({ev:"tap",id:pointer.id,...xy(e)});
   send({ev:"up",id:pointer.id,...xy(e)});
   pointer = null;
@@ -296,18 +806,9 @@ screen.addEventListener("keydown", e => {
   const g = e.target.closest("[data-on=tap]");
   if (!g || (e.key !== " " && e.key !== "Enter")) return;
   e.preventDefault();
-  if (asPhone) audioReady();
+  if (view.virtual) audioReady();
   send({ev:"tap",id:g.dataset.id,x:180,y:180});
 });
-$("prompt").onsubmit = e => {
-  e.preventDefault();
-  const input = $("text"), text = input.value.trim();
-  if (text) {
-    if (asPhone) audioReady();
-    send({ev:"text",device_id:asPhone ? phone : selected,text});
-    input.value = "";
-  }
-};
 $("volume").oninput = e => { $("volume-value").value = e.target.value + "%"; };
 $("volume").onchange = e => {
   const level = +e.target.value, old = volume;
@@ -315,33 +816,44 @@ $("volume").onchange = e => {
   send({ev:"head",action:level < old ? "vol_down" : "vol_up",volume:level});
 };
 
-let audio, gain, playAt = 0, volume = 80, ttsEnded = false;
+let audio, gain, playAt = 0, volume = 80, ttsEnded = false, muted = false;
 const speaking = new Set();
+function speakerUI() {
+  say("sound", audio?.state !== "running" ? "Enable speaker" : muted ? "Unmute speaker" : "Mute speaker");
+}
 function setVolume(n) {
   volume = n;
   $("volume").value = n;
   $("volume-value").value = n + "%";
-  if (gain) gain.gain.value = n / 100;
+  if (gain) gain.gain.value = muted ? 0 : n / 100;
 }
 async function audioReady() {
   try {
     if (!audio) {
       audio = new AudioContext();
       gain = audio.createGain();
-      gain.gain.value = volume / 100;
+      gain.gain.value = muted ? 0 : volume / 100;
       gain.connect(audio.destination);
     }
     if (audio.state !== "running") await audio.resume();
-    if (audio.state === "running") $("sound").hidden = true;
+    speakerUI();
     return audio.state === "running";
   } catch {
     return false;
   }
 }
-$("sound").onclick = audioReady;
+$("sound").onclick = async () => {
+  if (audio?.state === "running") {
+    muted = !muted;
+    setVolume(volume);
+    speakerUI();
+  } else if (!await audioReady()) {
+    say("chat-note", "The browser couldn’t enable audio.");
+  }
+};
 function playPCM(raw) {
   if (!(raw instanceof ArrayBuffer) || raw.byteLength < 3 || raw.byteLength % 2 !== 1 || new Uint8Array(raw)[0] !== 2) return;
-  if (audio?.state !== "running") { $("sound").hidden = false; return; }
+  if (audio?.state !== "running") { speakerUI(); return; }
   const wire = new DataView(raw,1), count = wire.byteLength / 2;
   const buffer = audio.createBuffer(1,count,16000), samples = buffer.getChannelData(0);
   for (let i = 0; i < count; i++) samples[i] = wire.getInt16(i*2,true)/32768;
@@ -362,6 +874,7 @@ function ackIfDone() {
   if (ttsEnded && speaking.size === 0) {
     ttsEnded = false;
     send({ev:"tts_ack", state:"done"});
+    activity("Live");
   }
 }
 function stopSound(ack) {
@@ -395,7 +908,7 @@ function chime(kind) {
 let mic, workletLoaded;
 function recordUI(active) {
   $("talk").setAttribute("aria-pressed", String(active));
-  $("talk").textContent = active ? "Stop & send" : "Talk";
+  $("talk").textContent = active ? "Stop & send" : "Mic · Talk";
   $("cancel").hidden = !active;
   $("target").disabled = active;
 }
@@ -411,7 +924,7 @@ async function startMic(target) {
   mic = rec;
   recordUI(true);
   try {
-    if (!await audioReady() || !asPhone || mic !== rec || ws?.readyState !== WebSocket.OPEN) throw new Error();
+    if (!await audioReady() || !view?.virtual || mic !== rec || ws?.readyState !== WebSocket.OPEN) throw new Error();
     rec.stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
     if (mic !== rec) { rec.stream.getTracks().forEach(t=>t.stop()); return; }
     workletLoaded ||= audio.audioWorklet.addModule("/app/mic.js").catch(err => { workletLoaded = null; throw err; });
@@ -426,17 +939,18 @@ async function startMic(target) {
       } else if (ws?.readyState === WebSocket.OPEN) {
         if (ws.bufferedAmount > 256*1024) {
           endMic(true);
-          updateStatus("Recording cancelled: the connection is too slow.");
+          say("chat-note", "Recording cancelled: the connection is too slow.");
         } else ws.send(event.data);
       }
     };
     send({ev:"rec_start",target});
     rec.source.connect(rec.node).connect(audio.destination);
-    updateStatus(target ? "Recording intercom…" : "Listening…");
+    activity("Listening");
+    say("chat-note", target ? "Recording intercom…" : "Listening…");
   } catch {
     if (mic === rec) {
       endMic(true);
-      updateStatus("Could not open the microphone. Check browser permissions.");
+      say("chat-note", "Could not open the microphone. Check browser permissions.");
     }
   }
 }
@@ -454,10 +968,13 @@ function endMic(cancelled, tell = true, flushed = false) {
   rec.node?.port.close();
   recordUI(false);
   if (tell) {
+    cancelled ||= !rec.node;
     send({ev:"rec_end",cancelled,target:rec.target});
-    updateStatus(cancelled ? "Recording cancelled." : "Message sent to the bridge.");
+    activity(cancelled ? "Live" : "Thinking");
+    say("chat-note", cancelled ? "Recording cancelled." : "Message sent to the bridge.");
   }
 }
 $("talk").onclick = () => { if (mic) endMic(false); else startMic($("target").value); };
 $("cancel").onclick = () => endMic(true);
-if (token) connect(); else settings(true);
+credentials();
+if (initialToken) authorize(initialToken);
