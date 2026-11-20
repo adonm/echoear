@@ -10,7 +10,7 @@ EchoEar <-- /ws: keyed scenes and PCM --> Go bridge :8765 <-- /app --> Browser
 ```
 
 **Target:** EchoEar / ESP-VoCat v1.2 (ESP32-S3, 16 MB flash and 16 MB PSRAM).
-Phase 2 (`v0.7.0`) uses a 1.28 MB thin client: a pure-C 360×360 RGB565
+Firmware `v0.7.1` uses a thin client: a pure-C 360×360 RGB565
 rasterizer replaces LVGL, applies keyed scene patches, and draws a fallback
 face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 
@@ -65,7 +65,8 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
 ## Controls and intercom
 
 - Tap the cat or pet its head, then speak after the tone. Voice activity
-  detection stops recording at silence; tap or pet again to stop early or interrupt speech.
+  detection stops recording after a 1.8 s pause, with a 25 s maximum. Tap or
+  pet again to stop early or interrupt speech.
 - Slide across the head pads to change volume, or hold a pad for one step.
   The display dims after 120 seconds idle unless a diagram is open; tap or pet to wake.
 - **Text** opens the peer drawer, where **New** starts a fresh conversation and
@@ -88,7 +89,8 @@ Mint defaults to Fable. Other cats default to Emma unless `ECHOEAR_TTS_VOICE`
 sets a different fallback (including `af_heart` for US English).
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
-Microphone access requires HTTPS or localhost. For a remote phone, install
+Microphone access requires HTTPS or localhost. On stop, the browser captures
+another 200 ms before flushing the final audio. For a remote phone, install
 the [OpenTunnel CLI](https://opentunnel.xyz) on the bridge host. If it is
 outside the bridge service's `PATH` and `~/.local/bin`, set
 `ECHOEAR_OPENTUNNEL_BIN` to its path in `bridge.env`. Restart the bridge
@@ -114,16 +116,21 @@ OpenCode config contains only the executable and its argument, no secrets.
 Code Mode exposes `tools.echoear.devices`, `snapshot`, `scene`, `patch`,
 `speak`, `chime`, `intercom`, and `wait_event` under `tools.echoear`.
 Scenes and patches support declarative `tap` and `cycle` reactions, named `states`,
-and delayed `after_ms`/`then` feedback. The bridge runs these locally without
-holding an OpenCode turn open; only an explicit `ask` starts a new turn.
+and delayed `after_ms`/`then` feedback. Give related nodes the same `group` and
+use relative `move: {target, dx, dy}` to shift a node or group in pixels.
+`revert_ms` undoes visual changes after the given delay. The bridge runs these
+reactions without holding an OpenCode turn open; only an explicit `ask` starts
+a new turn. A `scene` can also play a `chime` or `say` text inline. The agent
+defaults to 1–2 short spoken sentences and answers at length when asked.
 
 ## API
 
 HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
 The `/ws` hub sends keyed `scene` and `patch` JSON. Binary frames carry 16 kHz
 signed 16-bit little-endian mono PCM (`0x01` mic upload, `0x02` playback). HTTP voice
-inputs also accept WAV, up to 2 MiB. Kokoro starts synthesizing sentences
-while OpenCode streams its reply over SSE.
+inputs also accept WAV, up to 2 MiB. The bridge appends 150 ms of silence to
+PCM sent to Hex for transcription. Kokoro starts synthesizing sentences while
+OpenCode streams its reply over SSE.
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
@@ -159,8 +166,10 @@ becomes `screen`; `echoear-message` routes a message to a peer.
 ```
 
 Shapes use pixel coordinates and optional `#RRGGBB` colors. Types: `circle`,
-`rect`, `line`, `arc`, `text`, `btn`. Use `tap` for local feedback, `ask` for a
-bridge follow-up, or `reply_to` on a `btn` for a direct intercom recording.
+`rect`, `line`, `tri`, `arc`, `text`, `btn`. A `tri` takes three vertices
+(`x1`, `y1` through `x3`, `y3`) and fills by default. Use `tap` for local
+feedback, `ask` for a bridge follow-up, or `reply_to` on a `btn` for a direct
+intercom recording.
 
 ```echoear-message
 {"to":"Mint","text":"Which planet is known for its rings?"}
