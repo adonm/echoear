@@ -23,15 +23,12 @@ static void expect_art(unsigned x, unsigned y, uint8_t hi, uint8_t lo)
 
 int main(void)
 {
-    gfx_offline_cat(fb, "Cake");
+    gfx_offline_cat(fb);
     expect_pixel(0, 0, 0xff, 0x9a);
     expect_pixel(FRAME_WIDTH - 1, FRAME_HEIGHT - 1, 0xff, 0x9a);
     expect_art(180, 77, 0xf4, 0xe1);
     expect_art(112, 142, 0x18, 0xc4);
     expect_art(162, 207, 0x18, 0xc4);
-    gfx_offline_cat(fb, "Mint");
-    expect_pixel(0, 0, 0x7f, 0x18);
-    expect_art(180, 77, 0x24, 0x70);
     expect_art(248, 142, 0x18, 0xc4);
     puts("PASS offline cat fallback in LCD byte order");
 }

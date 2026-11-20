@@ -1,6 +1,7 @@
 #include "head_touch.h"
+#include "board.h"
 
-#ifdef ECHOEAR_BOX3
+#if !BOARD_HAS_HEAD_PADS
 esp_err_t head_touch_start(void) { return ESP_OK; }
 #else
 #include "audio.h"
@@ -71,6 +72,7 @@ static void scan(touch_channel_handle_t pads[PADS], uint32_t baseline[PADS])
         }
         if (first >= 0 && !handled && now - start >= PET_WINDOW_MS) {
             if (!pressed[first]) {
+                media_call_end(0);
                 media_interrupt();
                 ws_client_head_pet(audio_get_volume());
             }

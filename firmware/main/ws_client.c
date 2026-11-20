@@ -18,6 +18,7 @@
 #include "esp_transport_ws.h"
 #include "esp_websocket_client.h"
 #include "frame.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "media.h"
@@ -26,11 +27,12 @@
 #include "telemetry.h"
 #include "wifi.h"
 
-enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000, INPUT_CAP = 24 };
+enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000, INPUT_CAP = 24,
+       CALL_BYTES = AUDIO_CALL_SAMPLES * sizeof(int16_t), CALL_SEND_MS = 90 };
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
-typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, INPUT_HEAD, TTS_ACK, REJECT_RECORD } input_kind_t;
+typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, INPUT_HEAD, TTS_ACK, REJECT_RECORD, CALL_FAILED } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
@@ -42,8 +44,13 @@ typedef struct {
 typedef struct {
     uint8_t opcode, type, carry;
     size_t used;
-    bool drop, odd;
+    bool drop, odd, call;
 } fragment_t;
+typedef struct {
+    uint32_t session, id;
+    TickType_t queued;
+    uint8_t wire[1 + CALL_BYTES];
+} call_packet_t;
 
 static const char *TAG = "ws";
 static esp_websocket_client_handle_t client;
@@ -52,6 +59,7 @@ static TaskHandle_t service;
 static portMUX_TYPE input_lock = portMUX_INITIALIZER_UNLOCKED;
 static input_t inputs[INPUT_CAP], pending_drag;
 static unsigned input_head, input_count, drag_after;
+static QueueHandle_t call_tx;
 static uint8_t *rx_buffer;
 static fragment_t rx;
 static bool tts_accepted;
@@ -193,6 +201,21 @@ bool ws_client_rec_pcm(uint32_t session, const int16_t *pcm, size_t samples)
     return send_ready(session, packet, bytes + 1, true);
 }
 
+void ws_client_call_pcm(uint32_t session, uint32_t id, const int16_t *pcm)
+{
+    if (!call_tx || !media_call_sending(id)) return;
+    // The media task never takes the socket lock. New audio replaces unsent audio.
+    call_packet_t packet = { .session = session, .id = id, .queued = xTaskGetTickCount(), .wire = { RECORD_PCM } };
+    memcpy(packet.wire + 1, pcm, CALL_BYTES);
+    xQueueOverwrite(call_tx, &packet);
+    xTaskNotifyGive(service);
+}
+
+void ws_client_call_failed(uint32_t session, uint32_t id)
+{
+    enqueue_session((input_t){ .kind = CALL_FAILED, .session = session, .audio_id = id });
+}
+
 void ws_client_rec_end(uint32_t session, const char *target, bool cancelled)
 {
     cJSON *json = event_json("rec_end");
@@ -224,6 +247,12 @@ static void send_input(const input_t *input)
         ws_client_rec_end(session, input->target, true);
         return;
     }
+    if (input->kind == CALL_FAILED) {
+        char text[64];
+        int len = snprintf(text, sizeof(text), "{\"ev\":\"call_end\",\"call\":%" PRIu32 "}", input->audio_id);
+        if (len > 0 && (size_t)len < sizeof(text)) send_ready(session, text, len, false);
+        return;
+    }
     bool head = input->kind == INPUT_HEAD;
     const char *event = head ? "head" : input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
     cJSON *json = event_json(event);
@@ -248,6 +277,16 @@ static bool socket_writable(void)
            FD_ISSET(fd, &writable) && !FD_ISSET(fd, &errors);
 }
 
+static void send_call_pcm(void)
+{
+    call_packet_t packet;
+    if (xQueueReceive(call_tx, &packet, 0) == pdPASS &&
+        xTaskGetTickCount() - packet.queued < pdMS_TO_TICKS(CALL_SEND_MS) &&
+        media_call_sending(packet.id) && socket_writable()) {
+        send_wire(packet.session, packet.wire, sizeof(packet.wire), true, false, pdMS_TO_TICKS(CALL_SEND_MS));
+    }
+}
+
 static bool send_telemetry(uint32_t session, bool hello)
 {
     if (!hello && media_is_recording()) return false;
@@ -258,17 +297,20 @@ static bool send_telemetry(uint32_t session, bool hello)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char extra[240] = "";
+    char extra[384] = "";
     if (hello) {
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
         int len = snprintf(extra, sizeof(extra), ",\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
-                           "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\"",
-                           device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT);
+                           "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
+                           "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"drag\":%s}",
+                           device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
+                           BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
+                           BOARD_HAS_CALL ? "true" : "false", BOARD_HAS_DRAG ? "true" : "false");
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
-    char text[704];
+    char text[768];
     int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\"%s,\"free_heap\":%zu,\"min_free_heap\":%zu,"
                        "\"free_psram\":%zu,\"wifi_rssi\":%d,\"rssi\":%d,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
                        "\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"volume\":%d" TELEMETRY_IO_JSON "}",
@@ -323,12 +365,28 @@ static void dispatch(const cJSON *msg)
             media_interrupt();
             tts_accepted = false;
         }
+    } else if (!strcmp(op, "call")) {
+        const char *state = field(msg, "state");
+        const cJSON *call = cJSON_GetObjectItemCaseSensitive(msg, "call");
+        if (!cJSON_IsNumber(call) || !(call->valuedouble > 0 && call->valuedouble <= UINT32_MAX)) return;
+        uint32_t id = (uint32_t)call->valuedouble;
+        if (id != call->valuedouble) return;
+        bool muted = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "muted"));
+        if (!strcmp(state, "start")) {
+            tts_accepted = false;
+            if (!media_call_start(id, muted)) ws_client_call_failed(ws_client_session(), id);
+        } else if (!strcmp(state, "mute")) {
+            media_call_set_mute(id, muted);
+        } else if (!strcmp(state, "end")) {
+            media_call_end(id);
+        }
     } else if (!strcmp(op, "chime")) {
         const char *kind = field(msg, "kind");
         if (!strcmp(kind, "tap")) media_chime(AUDIO_START_TONE);
         else if (!strcmp(kind, "think")) media_chime(AUDIO_THINK_TONE);
         else if (!strcmp(kind, "intercom")) media_chime(AUDIO_HAPPY_TONE);
         else if (!strcmp(kind, "cancel")) media_chime(AUDIO_QUIET_TONE);
+        else if (!strcmp(kind, "ring")) media_chime(AUDIO_RING_TONE);
     } else if (!strcmp(op, "power")) {
         display_set_brightness(integer(msg, "brightness", 12, 85));
     } else if (!strcmp(op, "volume")) {
@@ -380,7 +438,8 @@ static void receive_binary(const uint8_t *bytes, size_t len)
 {
     if (!rx.type && len) {
         rx.type = *bytes;
-        if (rx.type == SPEAKER_PCM && tts_accepted) {
+        rx.call = rx.type == SPEAKER_PCM && media_call_active();
+        if (rx.type == SPEAKER_PCM && (tts_accepted || rx.call)) {
             ++bytes;
             --len;
         } else if (rx.type != FRAME_TAG) {
@@ -388,7 +447,8 @@ static void receive_binary(const uint8_t *bytes, size_t len)
             return;
         }
     }
-    if (rx.type == SPEAKER_PCM) receive_pcm(bytes, len);
+    if (rx.call) buffer_bytes(bytes, len, CALL_BYTES);
+    else if (rx.type == SPEAKER_PCM) receive_pcm(bytes, len);
     else if (rx.type == FRAME_TAG) buffer_bytes(bytes, len, FRAME_PACKET_CAP);
 }
 
@@ -418,6 +478,8 @@ static void receive_frame(const esp_websocket_event_data_t *event)
             cJSON_Delete(msg);
         } else if (rx.type == FRAME_TAG) {
             if (!display_apply_frame(rx_buffer, rx.used)) ESP_LOGD(TAG, "Ignored display frame");
+        } else if (rx.call) {
+            if (rx.used && !(rx.used % sizeof(int16_t))) media_call_pcm(rx_buffer, rx.used);
         } else if (rx.odd) {
             media_interrupt();
             tts_accepted = false;
@@ -498,6 +560,7 @@ static void service_task(void *arg)
         }
         input_t input;
         while (next_input(&input)) send_input(&input);
+        send_call_pcm();
     }
 }
 
@@ -543,8 +606,9 @@ esp_err_t ws_client_init(void)
         .reconnect_timeout_ms = 1000, .network_timeout_ms = 5000, .buffer_size = 4096, .task_stack = 6144,
     };
     rx_buffer = heap_caps_malloc(FRAME_PACKET_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    call_tx = xQueueCreate(1, sizeof(call_packet_t));
     client = esp_websocket_client_init(&config);
-    if (!rx_buffer || !client) goto fail;
+    if (!rx_buffer || !call_tx || !client) goto fail;
     if (esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, on_event, NULL) != ESP_OK ||
         xTaskCreate(service_task, "ws_service", 5120, NULL, 4, &service) != pdPASS) goto fail;
     return ESP_OK;
@@ -553,9 +617,11 @@ fail:
     if (client) esp_websocket_client_destroy(client);
     if (ws_transport) esp_transport_destroy(ws_transport);
     if (parent) esp_transport_destroy(parent);
+    if (call_tx) vQueueDelete(call_tx);
     free(rx_buffer);
     client = NULL;
     ws_transport = NULL;
+    call_tx = NULL;
     rx_buffer = NULL;
     return ESP_ERR_NO_MEM;
 }

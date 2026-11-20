@@ -44,25 +44,16 @@ static void circle(uint16_t *fb, int x, int y, int r, int inner, bool lower_half
     }
 }
 
-void gfx_offline_cat(uint16_t *fb, const char *character)
+void gfx_offline_cat(uint16_t *fb)
 {
-    bool cake = !strcmp(character, "Cake"), mint = !strcmp(character, "Mint"), plum = !strcmp(character, "Plum");
-    bool blank = !strcmp(character, "New Cat");
-    uint16_t bg = wire_color(cake ? 0xfff3d1 : mint ? 0x7be3c6 : plum ? 0xd8c7ff : blank ? 0xf3f4f6 : 0xfcd34d);
-    uint16_t mark = wire_color(cake ? 0xf59e0b : mint ? 0x228e81 : plum ? 0x9f7aea : 0xea580c);
+    uint16_t bg = wire_color(0xfff3d1);
+    uint16_t mark = wire_color(0xf59e0b);
     uint16_t ink = wire_color(0x1a1926);
     rect(fb, 0, 0, FRAME_WIDTH, FRAME_HEIGHT, bg);
-    circle(fb, 180, 180, 172, 169, false, wire_color(cake ? 0x8c8577 : mint ? 0x4b867a : 0x74687c));
-    if (cake) {
-        art_rect(fb, 147, 67, 14, 24, mark);
-        art_rect(fb, 173, 61, 14, 33, mark);
-        art_rect(fb, 199, 67, 14, 24, mark);
-    } else if (mint) {
-        art_rect(fb, 156, 72, 48, 12, mark);
-    } else if (!blank) {
-        circle(fb, 180, 78, 16, 0, false, mark);
-        if (plum) circle(fb, 190, 72, 14, 0, false, bg);
-    }
+    circle(fb, 180, 180, 172, 169, false, wire_color(0x8c8577));
+    art_rect(fb, 147, 67, 14, 24, mark);
+    art_rect(fb, 173, 61, 14, 33, mark);
+    art_rect(fb, 199, 67, 14, 24, mark);
     circle(fb, 112, 142, 17, 0, false, ink);
     circle(fb, 248, 142, 17, 0, false, ink);
     for (int y = 180; y <= 205; y += 25) {

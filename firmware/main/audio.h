@@ -6,12 +6,15 @@
 
 #include "esp_err.h"
 
-enum { AUDIO_RATE = 16000, AUDIO_MAX_SECONDS = 60, AUDIO_RECORD_CHUNK_SAMPLES = 1280 };
-typedef enum { AUDIO_START_TONE, AUDIO_THINK_TONE, AUDIO_QUIET_TONE, AUDIO_HAPPY_TONE } audio_tone_t;
+enum { AUDIO_RATE = 16000, AUDIO_MAX_SECONDS = 60, AUDIO_RECORD_CHUNK_SAMPLES = 1280,
+       AUDIO_10MS = AUDIO_RATE / 100, AUDIO_CALL_SAMPLES = 4 * AUDIO_10MS };
+typedef enum { AUDIO_START_TONE, AUDIO_THINK_TONE, AUDIO_QUIET_TONE, AUDIO_HAPPY_TONE, AUDIO_RING_TONE } audio_tone_t;
 typedef esp_err_t (*audio_capture_sink_t)(const int16_t *pcm, size_t samples, void *ctx);
 
 esp_err_t audio_init(void);
 void audio_tone(audio_tone_t tone);
+esp_err_t audio_read_10ms(int16_t pcm[AUDIO_10MS]);
+esp_err_t audio_write_10ms(const int16_t pcm[AUDIO_10MS]);
 esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t sink, void *ctx);
 int audio_get_volume(void);
 esp_err_t audio_set_volume(int level);

@@ -71,7 +71,7 @@ static esp_err_t blit(frame_bounds_t area)
 
 static void display_show_offline(void)
 {
-    gfx_offline_cat(fb, wifi_character());
+    gfx_offline_cat(fb);
 }
 
 static void paint_task(void *arg)
@@ -155,7 +155,7 @@ static void touch_task(void *arg)
         switch (event.kind) {
         case TOUCH_PRESS:
             display_wake();
-            media_interrupt();
+            if (!media_call_active()) media_interrupt();
             break;
         case TOUCH_TAP: ws_client_pointer("tap", event.x, event.y); break;
         case TOUCH_DRAG: ws_client_pointer("drag", event.x, event.y); break;

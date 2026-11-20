@@ -13,7 +13,7 @@
 #include "nvs.h"
 
 enum {
-    CHANNELS = 2, FRAMES = AUDIO_RATE / 100, MAX_FRAMES = AUDIO_RATE * AUDIO_MAX_SECONDS,
+    CHANNELS = 2, FRAMES = AUDIO_10MS, MAX_FRAMES = AUDIO_RATE * AUDIO_MAX_SECONDS,
     FADE = AUDIO_RATE / 200, DMA_TAIL = 6 * 240, CHIME_FRAMES = AUDIO_RATE / 10,
 };
 
@@ -79,6 +79,21 @@ esp_err_t audio_set_volume_live(int level)
 static esp_err_t write_speaker(int16_t *stereo, size_t frames)
 {
     return esp_codec_dev_write(speaker, stereo, frames * CHANNELS * sizeof(*stereo));
+}
+
+esp_err_t audio_read_10ms(int16_t pcm[AUDIO_10MS])
+{
+    int16_t stereo[FRAMES * CHANNELS];
+    ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, stereo, sizeof(stereo)), TAG, "Read mic");
+    for (size_t i = 0; i < FRAMES; ++i) pcm[i] = stereo[CHANNELS * i];
+    return ESP_OK;
+}
+
+esp_err_t audio_write_10ms(const int16_t pcm[AUDIO_10MS])
+{
+    int16_t stereo[FRAMES * CHANNELS];
+    for (size_t i = 0; i < FRAMES; ++i) stereo[2 * i] = stereo[2 * i + 1] = pcm[i];
+    return write_speaker(stereo, FRAMES);
 }
 
 esp_err_t audio_init(void)
@@ -149,7 +164,7 @@ static int16_t chirp(int n)
 
 void audio_tone(audio_tone_t tone)
 {
-    const int beat = AUDIO_RATE * 40 / 1000;
+    const int beat = AUDIO_RATE * (tone == AUDIO_RING_TONE ? 70 : 40) / 1000;
     const int length = tone == AUDIO_HAPPY_TONE ? CHIME_FRAMES : tone == AUDIO_START_TONE ? beat : 2 * beat;
     int16_t samples[FRAMES * CHANNELS];
 
@@ -160,6 +175,7 @@ void audio_tone(audio_tone_t tone)
             int n = offset + i;
             float hz = tone == AUDIO_START_TONE ? 740.0f :
                        tone == AUDIO_THINK_TONE ? (n < beat ? 370.0f : 493.9f) :
+                       tone == AUDIO_RING_TONE ? (n < beat ? 660.0f : 880.0f) :
                        (n < beat ? 440.0f : 293.7f);
             int16_t sample = n >= length ? 0 : tone == AUDIO_HAPPY_TONE ? chirp(n) :
                              tone_sample(n % beat, beat, hz, tone == AUDIO_QUIET_TONE ? 2700.0f : 4700.0f);
@@ -175,22 +191,22 @@ void audio_tone(audio_tone_t tone)
 esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t sink, void *ctx)
 {
     _Static_assert(AUDIO_RECORD_CHUNK_SAMPLES % FRAMES == 0, "Chunk must contain whole VAD frames");
-    int16_t stereo[FRAMES * CHANNELS];
+    int16_t mono[FRAMES];
     // Drop the already-buffered RX frames, including any containing the start tone.
     for (int i = 0; i < DMA_TAIL / FRAMES; ++i) {
-        ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, stereo, sizeof(stereo)), TAG, "Drain mic DMA");
+        ESP_RETURN_ON_ERROR(audio_read_10ms(mono), TAG, "Drain mic DMA");
     }
 
     size_t samples = 0, pending = 0;
     vad_t vad = { 0 };
     while (samples < MAX_FRAMES && !stop_requested()) {
-        ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, stereo, sizeof(stereo)), TAG, "Read mic");
+        ESP_RETURN_ON_ERROR(audio_read_10ms(mono), TAG, "Read mic");
         // Both BSPs leave ES7210 mic selection at MIC1 and MIC2 (two Philips slots, not TDM).
         uint64_t sum = 0;
         for (size_t i = 0; i < FRAMES; ++i) {
-            int32_t mono = stereo[CHANNELS * i];
-            recording[pending++] = mono;
-            sum += mono * mono;
+            int32_t sample = mono[i];
+            recording[pending++] = sample;
+            sum += sample * sample;
         }
         vad_result_t result = vad_update(&vad, sum / FRAMES);
         if (result == VAD_NO_SPEECH && !stop_requested()) {
