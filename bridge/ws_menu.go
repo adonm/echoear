@@ -65,6 +65,16 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		return
 	}
 	native := c.role == "device"
+	if d.callState != callNone {
+		switch ev.Event {
+		case "status", "tap", "head", "call_end":
+		case "rec_end":
+			d.recIgnoreStart = false
+			return
+		default:
+			return
+		}
+	}
 	switch ev.Event {
 	case "status":
 		d.status(ev.wsStatus)
@@ -74,16 +84,28 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	case "tap":
 		h.pointer(d, ev, now, native)
 	case "drag", "up":
-		if (native || c.role == "web") && d.displayApp != nil && d.app == d.displayApp && !d.asleep {
+		if d.caps.Drag && (native || c.role == "web") && d.displayApp != nil && d.app == d.displayApp && !d.asleep {
 			h.pointer(d, ev, now, native)
 		}
 	case "head":
 		switch ev.Action {
 		case "pet":
+			if d.callState != callNone {
+				h.endCall(d, "hung up")
+				return
+			}
 			h.wake(d, now)
 			d.pet = now.Add(300 * time.Millisecond)
 			h.push(d, object{"op": "chime", "kind": "tap"}, false)
 			h.render(d, now, false)
+		}
+	case "call":
+		if target, ok := recordTarget(ev.Target); ok && target != "" && c.device == d {
+			h.startCall(d, target)
+		}
+	case "call_end":
+		if c.device == d && ev.Call != 0 && d.callID == ev.Call {
+			h.endCall(d, "audio unavailable")
 		}
 	case "rec_start":
 		if target, ok := recordTarget(ev.Target); ok && !d.recOpen && !d.recIgnoreStart {
@@ -170,25 +192,42 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		return
 	}
 	a := d.scene.actions[key]
+	if d.callState != callNone {
+		if d.scene.call != d.callID {
+			return
+		}
+		switch a.kind {
+		case "call-answer":
+			h.answerCall(d)
+		case "call-decline":
+			h.declineCall(d)
+		case "call-hangup":
+			h.endCall(d, "hung up")
+		case "call-mute":
+			h.toggleCallMute(d)
+		}
+		return
+	}
 	switch a.kind {
 	case "menu":
 		h.chime(d, "tap")
 		d.drawer, d.card, d.pending = "menu", nil, nil
+		d.menuPage = 0
 		d.view = nil
 		h.render(d, now, false)
-	case "menu-open", "menu-back", "intercom-page":
+	case "menu-open", "menu-back", "menu-page":
 		switch a.kind {
 		case "menu-open":
-			d.drawer, d.peerPage = a.value, 0
+			d.drawer, d.menuPage = a.value, 0
 		case "menu-back":
 			if d.drawer == "menu" {
 				d.drawer = ""
 			} else {
-				d.drawer = "menu"
+				d.drawer, d.menuPage = "menu", 0
 			}
-		case "intercom-page":
+		case "menu-page":
 			delta, _ := strconv.Atoi(a.value)
-			d.peerPage += delta
+			d.menuPage += delta
 		}
 		h.chime(d, "tap")
 		h.render(d, now, false)
@@ -218,6 +257,8 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		} else {
 			h.startRecording(d, a.value, now, true)
 		}
+	case "call-peer":
+		h.startCall(d, a.value)
 	}
 }
 

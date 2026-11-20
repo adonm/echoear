@@ -15,7 +15,11 @@ type sceneView struct {
 	bg, title, art string
 	actions        map[string]sceneAction
 	duringTurn     bool // Timer notices may be dismissed even while speaking.
+	intercom       *intercomCard
+	call           uint32
 }
+
+func (s *sceneView) hasIntercom() bool { return s != nil && s.intercom != nil }
 
 func (s sceneView) svg(face string) string {
 	return svgStart + `<rect width="360" height="360" fill="` + s.bg + `"/>` + face + s.art + `</svg>`
@@ -101,12 +105,12 @@ func catChrome(cat catState, pose catPose) sceneView {
 	}
 	switch pose.mood {
 	case "", "idle":
-		s.control("menu", "menu", "", 120, 292, 120, 48, "Menu", "", "menu", "#202538", "#FFFFFF")
+		s.control(bounds{120, 292, 120, 48}, actionTile("menu", "Menu", "menu", palette{"#202538", "#FFFFFF"}))
 	case "listening":
 		s.art += svgRect(103, 30, 154, 40, 20, "#202538", "none", 0) +
 			svgCircle(124, 50, 5, "#FF6978") + svgLabel(187, 56, 18, "Listening…", "#FFFFFF")
-		s.control("rec-cancel", "rec-cancel", "", 56, 284, 114, 52, "Cancel", "", "cancel", "#412936", "#FFE3E8")
-		s.control("rec-send", "rec-send", "", 190, 284, 114, 52, "Send", "", "check", "#54E6A9", "#0A2821")
+		s.control(bounds{56, 284, 114, 52}, actionTile("rec-cancel", "Cancel", "cancel", dangerPalette))
+		s.control(bounds{190, 284, 114, 52}, actionTile("rec-send", "Send", "check", answerPalette))
 	case "thinking", "speaking":
 		s.stopControl()
 	}
@@ -131,21 +135,37 @@ func messageScene(title, heading, text string, cat catState) sceneView {
 	return s
 }
 
-func intercomScene(sender peer, text string, cat catState) sceneView {
+type intercomCard struct {
+	sender peer
+	text   string
+	cat    catState
+}
+
+func (card intercomCard) scene(canCall bool) sceneView {
+	sender, text, cat := card.sender, card.text, card.cat
 	if text == "" {
 		text = "Voice message"
 	}
 	title := "From " + sender.Character
 	s := messageScene(title, truncate(title+"!", 25), text, cat)
-	s.control("reply", "reply", sender.DeviceID, 83, 226, 194, 38, "Reply to "+truncate(sender.Character, 18), "", "", cat.AccentColor, catInk)
-	s.control("cat", "cat", "", 139, 300, 82, 32, "Cat", "", "", cat.FaceBG, catInk)
+	s.intercom = &card
+	reply := tile{id: "reply", label: "Reply", action: sceneAction{"reply", sender.DeviceID}, colors: palette{cat.AccentColor, menuPeerInk(cat.AccentColor)}}
+	done := tile{id: "done", label: "Done", action: sceneAction{"cat", ""}, colors: palette{cat.FaceBG, menuPeerInk(cat.FaceBG)}}
+	if canCall {
+		s.control(bounds{43, 218, 78, 55}, tile{id: "call", label: "Call", action: sceneAction{"call-peer", sender.DeviceID}, colors: answerPalette})
+		s.control(bounds{141, 218, 78, 55}, reply)
+		s.control(bounds{239, 218, 78, 55}, done)
+	} else {
+		s.control(bounds{85, 218, 85, 55}, reply)
+		s.control(bounds{190, 218, 85, 55}, done)
+	}
 	return s
 }
 
 func noticeScene(title, message string) sceneView {
 	cat := blankCat()
 	s := messageScene(title, title, message, cat)
-	s.control("cat", "cat", "", 139, 300, 82, 32, "Cat", "", "", cat.FaceBG, catInk)
+	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Cat", "", palette{cat.FaceBG, catInk}))
 	return s
 }
 
@@ -153,7 +173,7 @@ func timerScene(message string) sceneView {
 	cat := blankCat()
 	s := messageScene("Time's up!", "Time's up!", message, cat)
 	s.duringTurn = true
-	s.control("cat", "dismiss", "", 139, 300, 82, 32, "OK", "", "", cat.FaceBG, catInk)
+	s.control(bounds{139, 300, 82, 32}, tile{id: "cat", label: "OK", action: sceneAction{"dismiss", ""}, colors: palette{cat.FaceBG, catInk}})
 	return s
 }
 

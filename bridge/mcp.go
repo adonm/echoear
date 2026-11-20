@@ -231,11 +231,12 @@ func (h *wsHub) deviceStatus(entry object, id string, full bool) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
 		entry["character"], entry["cat"], entry["voice"] = d.cat.Name, d.cat.catLook, d.voice
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, d.rev, d.firmware
+		entry["caps"] = d.caps
 		entry["auto_volume"], entry["sleeping"] = d.autoVol, d.asleep
 		if d.board != "" {
 			entry["board"], entry["shape"], entry["width"], entry["height"] = d.board, d.screen.shape, d.screen.width, d.screen.height
 		}
-		if d.pct >= 0 {
+		if d.caps.Battery && d.pct >= 0 {
 			entry["battery_pct"] = d.pct
 		}
 		if full {

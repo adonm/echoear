@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func facePoseSVGs() []string {
@@ -17,6 +18,72 @@ func facePoseSVGs() []string {
 		catSVG(cat, catPose{mood: "idle", battery: 80, blink: true}),
 		catSVG(cat, catPose{mood: "speaking", battery: 80}),
 		catSVG(cat, catPose{mood: "sleepy", battery: 80}),
+	}
+}
+
+func TestCallScreenTouchTargets(t *testing.T) {
+	cat := blankCat()
+	cat.Name = "Mint & Friends"
+	card := intercomCard{sender: peer{DeviceID: "echoear-mint", Character: cat.Name}, text: "A message for you!", cat: cat}
+	for _, tc := range []struct {
+		name string
+		view sceneView
+		ids  []string
+	}{
+		{"incoming", callScene(callRingingIn, 1, cat, false, 0), []string{"call-answer", "call-decline"}},
+		{"outgoing", callScene(callRingingOut, 1, cat, false, 0), []string{"call-hangup"}},
+		{"active", callScene(callActive, 1, cat, false, 62*time.Second), []string{"call-mute", "call-hangup"}},
+		{"muted", callScene(callActive, 1, cat, true, 62*time.Second), []string{"call-mute", "call-hangup"}},
+		{"voice note", card.scene(true), []string{"call", "reply", "done"}},
+	} {
+		for _, geom := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
+			t.Run(tc.name+"/"+strconv.Itoa(geom.width), func(t *testing.T) {
+				s, err := buildScreen(tc.view.svg(""), false, geom)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(s.hits) != len(tc.ids) {
+					t.Fatalf("wrong controls: %v", s.hits)
+				}
+				side := min(geom.width, geom.height)
+				px := func(x int) int { return (geom.width-side)/2 + x*side/360 }
+				py := func(y int) int { return (geom.height-side)/2 + y*side/360 }
+				for i, hit := range s.hits {
+					if !slices.Contains(tc.ids, hit.id) {
+						t.Fatalf("unexpected control %q", hit.id)
+					}
+					for _, x := range []int{hit.x1, hit.x2} {
+						for _, y := range []int{hit.y1, hit.y2} {
+							if !inScreenCircle(x, y) {
+								t.Errorf("%s clips the round bezel at %d,%d", hit.id, x, y)
+							}
+						}
+					}
+					if px(hit.x2)-px(hit.x1) < 48 || py(hit.y2)-py(hit.y1) < 35 {
+						t.Errorf("undersized touch target: %v", hit)
+					}
+					for _, other := range s.hits[:i] {
+						if image.Rect(hit.x1, hit.y1, hit.x2, hit.y2).Overlaps(image.Rect(other.x1, other.y1, other.x2, other.y2)) {
+							t.Errorf("overlapping touch targets: %v and %v", hit, other)
+						}
+					}
+					x, y := px((hit.x1+hit.x2)/2), py((hit.y1+hit.y2)/2)
+					if sx, sy := geom.inverseTap(x, y); hitID(s.hits, sx, sy) != hit.id {
+						t.Errorf("%s cannot be hit at its panel center", hit.id)
+					}
+					base := s.fb[(y-14)*geom.width+x]
+					for yy := y - 6; yy <= y+12; yy++ {
+						for xx := x - 20; xx <= x+20; xx++ {
+							if s.fb[yy*geom.width+xx] != base {
+								goto labelVisible
+							}
+						}
+					}
+					t.Errorf("missing label pixels in %s", hit.id)
+				labelVisible:
+				}
+			})
+		}
 	}
 }
 
@@ -59,17 +126,21 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 	}
 
 	menu := func(name string, s sceneView, regions ...region) {
-		scenes = append(scenes, scene{name, s.svg(""), append(regions,
-			reg("title", menuBG, 95, 51, 170, 29, 42, 14),
-			reg("back icon", "#262E43", 148, 306, 22, 18, 8, 8),
-			reg("back label", "#262E43", 171, 305, 49, 22, 23, 8))})
+		regions = append(regions, reg("title", menuBG, 95, 51, 170, 29, 42, 14))
+		if s.actions["menu-prev"].kind != "" || s.actions["menu-next"].kind != "" {
+			regions = append(regions, reg("back label", "#262E43", 149, 295, 62, 22, 23, 8))
+		} else {
+			regions = append(regions, reg("back icon", "#262E43", 148, 306, 22, 18, 8, 8),
+				reg("back label", "#262E43", 171, 305, 49, 22, 23, 8))
+		}
+		scenes = append(scenes, scene{name, s.svg(""), regions})
 	}
-	menu("home", menuHome(heartVoice, true, 55, false),
-		reg("intercom icon", "#372530", 104, 105, 22, 21, 13, 13),
-		reg("intercom label", "#372530", 68, 133, 94, 22, 44, 9),
-		reg("volume icon", "#203144", 234, 101, 22, 21, 13, 10),
-		reg("volume label", "#203144", 198, 125, 94, 18, 45, 9),
-		reg("volume subtitle", "#203144", 198, 147, 94, 15, 32, 6),
+	menu("home", menuHome(heartVoice, true, 55, false, false, 0),
+		reg("intercom icon", "#372530", 103, 98, 22, 21, 13, 13),
+		reg("intercom label", "#372530", 67, 126, 94, 22, 44, 9),
+		reg("volume icon", "#203144", 235, 94, 22, 21, 13, 10),
+		reg("volume label", "#203144", 199, 118, 94, 18, 45, 9),
+		reg("volume subtitle", "#203144", 199, 140, 94, 15, 32, 6),
 		reg("voice icon", "#322741", 104, 189, 22, 21, 13, 8),
 		reg("voice label", "#322741", 68, 213, 94, 18, 34, 9),
 		reg("voice subtitle", "#322741", 68, 235, 94, 15, 22, 6),
@@ -84,25 +155,25 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 		reg("auto label", "#203144", 171, 251, 48, 22, 24, 8))
 	var choiceRegions []region
 	for i := range 4 {
-		x, y := 58+130*(i%2), 93+88*(i/2)
+		x, y := 57+132*(i%2), 86+95*(i/2)
 		choiceRegions = append(choiceRegions,
 			reg(voiceCatalog[i].Name+" icon", "#322741", x+46, y+12, 22, 23, 11, 8),
 			reg(voiceCatalog[i].Name+" label", "#322741", x+10, y+36, 94, 24, 26, 9))
 	}
-	menu("voice", voiceScene(heartVoice), choiceRegions...)
+	menu("voice", voiceScene(heartVoice, 0), choiceRegions...)
 	var choices []menuPeer
 	choiceRegions = nil
 	for i := range 9 {
 		choices = append(choices, menuPeer{strconv.Itoa(i), "Cat " + strconv.Itoa(i), "#372530", "#FFADAC"})
 		if i < 4 {
-			x, y := 58+130*(i%2), 86+72*(i/2)
-			choiceRegions = append(choiceRegions, reg("peer "+strconv.Itoa(i)+" icon", "#372530", x+43, y+9, 28, 13, 16, 6),
-				reg("peer "+strconv.Itoa(i)+" label", "#372530", x+22, y+32, 70, 17, 24, 7))
+			x, y := 57+132*(i%2), 86+95*(i/2)
+			choiceRegions = append(choiceRegions, reg("peer "+strconv.Itoa(i)+" icon", "#372530", x+41, y+13, 32, 18, 16, 6),
+				reg("peer "+strconv.Itoa(i)+" label", "#372530", x+22, y+42, 70, 18, 24, 7))
 		}
 	}
-	menu("intercom", intercomSceneMenu(choices, 1), append(choiceRegions,
-		reg("previous label", "#262E43", 97, 246, 60, 17, 23, 7),
-		reg("next label", "#262E43", 202, 246, 60, 17, 23, 7))...)
+	menu("intercom", peerScene(choices, 1, false), append(choiceRegions,
+		reg("previous label", "#262E43", 89, 286, 40, 20, 23, 7),
+		reg("next label", "#262E43", 231, 286, 40, 20, 23, 7))...)
 	var rows []region
 	for i := range 6 {
 		rows = append(rows, reg("stats row "+strconv.Itoa(i+1), "#0E111B", 55, 106+27*i, 250, 18, 90, 6))

@@ -206,7 +206,7 @@ func (h *wsHub) showPhoto(device, id string) bool {
 	now := time.Now()
 	h.wake(d, now)
 	s := sceneView{bg: "#000000", title: "Photo", art: `<image href="photo:` + id + `" width="360" height="360"/>`}
-	s.control("cat", "cat", "", 139, 300, 82, 32, "Cat", "", "", "#FFFAEE", catInk)
+	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Cat", "", palette{"#FFFAEE", catInk}))
 	d.view = &s
 	h.render(d, now, true)
 	return true

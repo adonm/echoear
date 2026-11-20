@@ -30,15 +30,43 @@ var uiIcons = map[string]string{
 	"stats":    "M2 5v15h20M5 14h4l3-7 3 9 3-5h4",
 	"plus":     "M4 12h16M12 4v16",
 	"minus":    "M4 12h16",
+	"call":     "M5 4l4-1 3 5-3 3q2 4 6 6l3-3 5 3-1 4q-1 2-5 1Q6 19 3 8q-1-3 2-4z",
 }
 
-func (s *sceneView) control(id, action, value string, x, y, w, h int, text, sub, icon, bg, fg string) {
+type bounds struct{ x, y, w, h int }
+type palette struct{ bg, ink string }
+
+var (
+	navPalette    = palette{"#262E43", menuInk}
+	dangerPalette = palette{"#8C3045", "#FFFFFF"}
+	answerPalette = palette{"#54E6A9", "#0A2821"}
+	volumePalette = palette{"#203144", "#A6DCFF"}
+	voicePalette  = palette{"#322741", "#E2C5FF"}
+)
+
+type tile struct {
+	id, label, detail, icon, badge string
+	action                         sceneAction
+	colors                         palette
+}
+
+func actionTile(id, label, icon string, colors palette) tile {
+	return tile{id: id, label: label, icon: icon, action: sceneAction{id, ""}, colors: colors}
+}
+
+func (s *sceneView) control(b bounds, t tile) {
+	x, y, w, h := b.x, b.y, b.w, b.h
+	bg, fg, text, sub, icon := t.colors.bg, t.colors.ink, t.label, t.detail, t.icon
 	r, tx, ty, size := h/2, x+w/2, y+h/2+6, 16
 	ix, iy, is := x+w/2-10, y+h/2-10, 20
 	if h == 78 {
 		r, iy, ty, size = 18, y+13, y+57, 18
 		if sub != "" {
 			iy, ty = y+9, y+47
+		}
+		if t.badge != "" {
+			size = 15
+			text = truncate(text, 11)
 		}
 	} else if icon == "plus" || icon == "minus" {
 		is, ix, iy = 30, x+w/2-15, y+h/2-15
@@ -51,45 +79,82 @@ func (s *sceneView) control(id, action, value string, x, y, w, h int, text, sub,
 		scale := float64(is) / 24
 		art += fmt.Sprintf(`<path d="%s" transform="translate(%d %d) scale(%.4f %.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, scale, scale, fg)
 	}
+	if t.badge != "" {
+		art += svgRect(tx-13, iy+2, 26, 13, 6, t.badge, fg, 1)
+	}
 	if icon != "plus" && icon != "minus" {
 		art += svgLabel(tx, ty, size, text, fg)
 	}
 	if sub != "" {
 		art += svgText(tx, y+66, 13, sub, menuMuted, "")
 	}
-	name := text
+	name := t.label
 	switch icon {
 	case "plus":
 		name = "Raise volume"
 	case "minus":
 		name = "Lower volume"
 	}
-	s.button(id, name, sceneAction{action, value}, x, y, w, h, art)
+	s.button(t.id, name, t.action, x, y, w, h, art)
 }
 
 func (s *sceneView) stopControl() {
-	s.control("stop", "stop", "", 120, 292, 120, 46, "Stop", "", "stop", "#32263C", "#FFE3E8")
+	s.control(bounds{120, 292, 120, 46}, actionTile("stop", "Stop", "stop", palette{"#32263C", "#FFE3E8"}))
+}
+
+func menuHeader(title string) sceneView {
+	return sceneView{bg: menuBG, title: title, art: svgLabel(180, 76, 28, title, menuInk)}
 }
 
 func menuScene(title string) sceneView {
-	s := sceneView{bg: menuBG, title: title, art: svgLabel(180, 76, 28, title, menuInk)}
-	s.control("menu-back", "menu-back", "", 120, 292, 120, 46, "Back", "", "back", "#262E43", menuInk)
+	s := menuHeader(title)
+	s.control(bounds{120, 292, 120, 46}, actionTile("menu-back", "Back", "back", navPalette))
 	return s
 }
 
-func (s *sceneView) menuTile(i int, id, action, value, label, sub, icon, bg, fg string) {
-	s.control(id, action, value, 58+130*(i%2), 93+88*(i/2), 114, 78, label, sub, icon, bg, fg)
+const tilesPerPage = 4
+
+func clampTilePage(page, count int) int {
+	return min(max(page, 0), (max(count, 1)-1)/tilesPerPage)
 }
 
-func menuHome(voice string, auto bool, level int, scoped bool) sceneView {
-	s := menuScene("Menu")
-	s.menuTile(0, "menu-intercom", "menu-open", "intercom", "Talk to…", "", "intercom", "#372530", "#FFADAC")
-	s.menuTile(1, "menu-volume", "menu-open", "volume", "Volume", volumeLabel(auto, level), "volume", "#203144", "#A6DCFF")
-	s.menuTile(2, "menu-voice", "menu-open", "voice", "Voice", voiceName(voice), "voice", "#322741", "#E2C5FF")
-	if !scoped {
-		s.menuTile(3, "menu-stats", "menu-open", "stats", "Stats", "", "stats", "#193833", "#80F1C5")
+func tileGrid(title string, choices []tile, page int) sceneView {
+	page = clampTilePage(page, len(choices))
+	start, end := page*tilesPerPage, min(len(choices), (page+1)*tilesPerPage)
+	s := menuHeader(title)
+	for i, choice := range choices[start:end] {
+		s.control(bounds{57 + 132*(i%2), 86 + 95*(i/2), 114, 78}, choice)
+	}
+	if len(choices) <= tilesPerPage {
+		s.control(bounds{120, 292, 120, 46}, actionTile("menu-back", "Back", "back", navPalette))
+	} else {
+		if start > 0 {
+			s.control(bounds{84, 276, 49, 42}, tile{id: "menu-prev", label: "Prev", action: sceneAction{"menu-page", "-1"}, colors: navPalette})
+		}
+		s.control(bounds{151, 276, 58, 42}, actionTile("menu-back", "Back", "", navPalette))
+		if end < len(choices) {
+			s.control(bounds{227, 276, 49, 42}, tile{id: "menu-next", label: "Next", action: sceneAction{"menu-page", "1"}, colors: navPalette})
+		}
 	}
 	return s
+}
+
+func menuHome(voice string, auto bool, level int, scoped, calling bool, page int) sceneView {
+	link := func(id, label, detail, icon string, colors palette) tile {
+		return tile{id: "menu-" + id, label: label, detail: detail, icon: icon, colors: colors, action: sceneAction{"menu-open", id}}
+	}
+	choices := []tile{
+		link("intercom", "Voice Note", "", "intercom", palette{"#372530", "#FFADAC"}),
+		link("volume", "Volume", volumeLabel(auto, level), "volume", volumePalette),
+		link("voice", "Voice", voiceName(voice), "voice", voicePalette),
+	}
+	if calling {
+		choices = append(choices, link("call", "Call", "", "call", palette{"#193833", "#80F1C5"}))
+	}
+	if !scoped {
+		choices = append(choices, link("stats", "Stats", "", "stats", palette{"#193833", "#80F1C5"}))
+	}
+	return tileGrid("Menu", choices, page)
 }
 
 func volumeScene(auto bool, level int) sceneView {
@@ -98,53 +163,83 @@ func volumeScene(auto bool, level int) sceneView {
 	if level > 0 {
 		s.art += svgRect(71, 145, max(1, 218*level/100), 12, 6, "#7BD3FF", "none", 0)
 	}
-	s.control("vol-minus", "vol-minus", "", 91, 174, 68, 56, "−", "", "minus", "#203144", "#A6DCFF")
-	s.control("vol-plus", "vol-plus", "", 201, 174, 68, 56, "+", "", "plus", "#203144", "#A6DCFF")
+	s.control(bounds{91, 174, 68, 56}, actionTile("vol-minus", "−", "minus", volumePalette))
+	s.control(bounds{201, 174, 68, 56}, actionTile("vol-plus", "+", "plus", volumePalette))
 	icon, tint := "", menuMuted
 	if auto {
 		icon, tint = "check", "#A6DCFF"
 	}
-	s.control("vol-auto", "vol-auto", "", 116, 238, 128, 46, "Auto", "", icon, "#203144", tint)
+	s.control(bounds{116, 238, 128, 46}, actionTile("vol-auto", "Auto", icon, palette{volumePalette.bg, tint}))
 	return s
 }
 
-func voiceScene(current string) sceneView {
-	s := menuScene("Voice")
-	for i, voice := range voiceCatalog[:4] {
+func voiceScene(current string, page int) sceneView {
+	choices := make([]tile, 0, len(voiceCatalog))
+	for _, voice := range voiceCatalog {
 		icon, tint := "voice", "#E2C5FF"
 		if current == voice.ID {
 			icon, tint = "check", "#FFD68B"
 		}
-		s.menuTile(i, "voice-"+strings.ToLower(voice.Name), "voice-select", voice.ID, voice.Name, "", icon, "#322741", tint)
+		choices = append(choices, tile{id: "voice-" + strings.ToLower(voice.Name), label: voice.Name, icon: icon,
+			action: sceneAction{"voice-select", voice.ID}, colors: palette{voicePalette.bg, tint}})
 	}
-	return s
+	return tileGrid("Voice", choices, page)
 }
 
 type menuPeer struct {
 	id, name, face, accent string
 }
 
-func intercomSceneMenu(peers []menuPeer, page int) sceneView {
-	s := menuScene("Talk to…")
-	pageSize := 4
-	start, end := page*pageSize, min(len(peers), (page+1)*pageSize)
-	for i, p := range peers[start:end] {
-		x, y := 58+130*(i%2), 86+72*(i/2)
-		id := "intercom-" + p.id
+func peerScene(peers []menuPeer, page int, calling bool) sceneView {
+	title, prefix, action := "Voice Note", "intercom", "reply"
+	if calling {
+		title, prefix, action = "Call", "call", "call-peer"
+	}
+	choices := make([]tile, 0, len(peers))
+	for i, p := range peers {
+		id := prefix + "-" + p.id
 		if len(id) > 64 {
-			id = "intercom:" + strconv.Itoa(start+i)
+			id = prefix + ":" + strconv.Itoa(i)
 		}
-		fg := menuPeerInk(p.face)
-		s.button(id, p.name, sceneAction{"reply", p.id}, x, y, 114, 62,
-			svgRect(x, y, 114, 62, 31, p.face, menuMuted, 2)+
-				svgRect(x+46, y+11, 22, 9, 4, p.accent, fg, 1)+
-				svgLabel(x+57, y+46, 14, truncate(p.name, 11), fg))
+		choices = append(choices, tile{id: id, label: p.name, badge: p.accent,
+			action: sceneAction{action, p.id}, colors: palette{p.face, menuPeerInk(p.face)}})
 	}
-	if start > 0 {
-		s.control("intercom-prev", "intercom-page", "-1", 85, 231, 84, 46, "Prev", "", "", "#262E43", menuInk)
+	s := tileGrid(title, choices, page)
+	if len(choices) == 0 {
+		s.art += svgLabel(180, 167, 19, "No call-ready cats online", menuMuted)
 	}
-	if end < len(peers) {
-		s.control("intercom-next", "intercom-page", "1", 191, 231, 84, 46, "Next", "", "", "#262E43", menuInk)
+	return s
+}
+
+func callScene(state callState, id uint32, peer catState, muted bool, elapsed time.Duration) sceneView {
+	name := truncate(peer.Name, 20)
+	title := "In call · " + name
+	switch state {
+	case callRingingOut:
+		title = "Calling " + name + "…"
+	case callRingingIn:
+		title = name + " calling"
+	}
+	ink := menuPeerInk(peer.FaceBG)
+	s := sceneView{bg: menuBG, title: title, call: id,
+		art: svgCircle(180, 113, 48, peer.FaceBG) + svgCircle(180, 86, 8, peer.AccentColor) +
+			svgCircle(164, 107, 5, ink) + svgCircle(196, 107, 5, ink) +
+			svgRect(175, 120, 10, 6, 3, ink, "none", 0) +
+			svgLabel(180, 190, min(27, 440/max(1, runeLen(title))), title, menuInk)}
+	left, right, center := bounds{68, 245, 100, 54}, bounds{192, 245, 100, 54}, bounds{115, 260, 130, 54}
+	if state == callRingingIn {
+		s.control(left, actionTile("call-answer", "Answer", "", answerPalette))
+		s.control(right, actionTile("call-decline", "Decline", "", dangerPalette))
+	} else if state == callActive {
+		s.art += svgLabel(180, 229, 24, callDuration(elapsed), menuMuted)
+		label := "Mute"
+		if muted {
+			label = "Unmute"
+		}
+		s.control(left, actionTile("call-mute", label, "", navPalette))
+		s.control(right, actionTile("call-hangup", "Hang Up", "", dangerPalette))
+	} else {
+		s.control(center, actionTile("call-hangup", "Hang Up", "", dangerPalette))
 	}
 	return s
 }
@@ -197,10 +292,10 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 		return fmt.Sprint(*n) + suffix
 	}
 	battery := "Bat " + integer(device.Battery, "%")
-	if device.HasBattery != nil && !*device.HasBattery {
-		battery = "USB"
-	} else if device.Kind == "virtual" {
+	if device.Kind == "virtual" {
 		battery = "Web"
+	} else if !d.caps.Battery {
+		battery = "USB"
 	}
 	mode := "Man"
 	if d.autoVol {

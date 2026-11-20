@@ -24,6 +24,7 @@ type wsEvent struct {
 	Height    *int   `json:"height"`
 	Shape     string `json:"shape"`
 	Board     string `json:"board"`
+	Caps      wsCaps `json:"caps"`
 	ID        string `json:"id"`
 	X         int    `json:"x"`
 	Y         int    `json:"y"`
@@ -32,6 +33,7 @@ type wsEvent struct {
 	Text      string `json:"text"`
 	State     string `json:"state"`
 	Audio     uint64 `json:"audio"`
+	Call      uint32 `json:"call"`
 	Cancelled bool   `json:"cancelled"`
 	wsStatus
 }
@@ -67,6 +69,7 @@ type wsHub struct {
 	storedPeers   []peerDisplay
 	refreshing    bool
 	refreshNeeded bool
+	nextCall      uint32
 }
 
 func newWSHub(b *bridge) *wsHub {
@@ -251,6 +254,7 @@ func (h *wsHub) detach(c *wsClient) {
 	defer h.mu.Unlock()
 	delete(h.clients, c)
 	if d := c.device; d != nil && h.devices[d.key] == d {
+		h.endCall(d, "disconnected")
 		h.dropApp(d)
 		delete(h.devices, d.key)
 		h.clearRecording(d)
@@ -264,8 +268,9 @@ func (h *wsHub) disconnectDevice(id string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if d := h.devices[id]; d != nil {
-		h.dropApp(d)
 		d.client.cancel()
+		h.endCall(d, "disconnected")
+		h.dropApp(d)
 		delete(h.devices, id)
 		h.clearRecording(d)
 		h.cancelTurn(d)

@@ -78,7 +78,16 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := c.device
-	if d == nil || !h.active(d) || !d.recOpen {
+	if d == nil || !h.active(d) {
+		return
+	}
+	if d.callState != callNone {
+		if d.callState == callActive {
+			h.relayCallPCM(d, data)
+		}
+		return
+	}
+	if !d.recOpen {
 		return
 	}
 	room := (maxPCM - len(d.mic)) &^ 1
@@ -282,6 +291,22 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		h.finishTurn(d, id, nil, nil)
 		return
 	}
+	if target := callTarget(text); target != "" {
+		others, err := h.peerSnapshot(d.who.DeviceID)
+		if err == nil {
+			for _, p := range others {
+				if !strings.EqualFold(p.Character, target) && !strings.EqualFold(p.DeviceID, target) {
+					continue
+				}
+				h.mu.Lock()
+				if h.active(d) && d.turn == id && ctx.Err() == nil {
+					h.startCall(d, p.DeviceID)
+				}
+				h.mu.Unlock()
+				return
+			}
+		}
+	}
 	if body := directBody(text); body != "" {
 		others, err := h.peerSnapshot(d.who.DeviceID)
 		if err != nil || ctx.Err() != nil {
@@ -387,8 +412,12 @@ func (h *wsHub) play(d *wsDevice, stream *AudioStream) context.Context {
 }
 
 func (h *wsHub) playTraced(d *wsDevice, stream *AudioStream, trace *turnTrace, ttsStart time.Time) context.Context {
-	h.stopPlayback(d, true)
 	ctx, cancel := context.WithCancel(d.client.ctx)
+	if d.callState != callNone {
+		cancel()
+		return ctx
+	}
+	h.stopPlayback(d, true)
 	d.stopAudio = cancel
 	id := d.audio
 	go func() {
@@ -566,7 +595,7 @@ func (b *bridge) intercomTargets(others []peer, target string) []peer {
 	defer h.mu.Unlock()
 	var connected []peer
 	for _, p := range others {
-		if d := h.devices[strings.ToLower(p.DeviceID)]; d != nil && h.active(d) {
+		if d := h.devices[strings.ToLower(p.DeviceID)]; d != nil && h.active(d) && d.callState == callNone {
 			connected = append(connected, p)
 		}
 	}
@@ -599,10 +628,10 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 	cat := h.b.catFor(sender)
 	h.mu.Lock()
 	for _, d := range connected {
-		if !h.active(d) {
+		if !h.active(d) || d.callState != callNone {
 			continue
 		}
-		view := intercomScene(sender, text, cat)
+		view := (intercomCard{sender, text, cat}).scene(false)
 		h.cancelTurn(d)
 		h.stopPlayback(d, true)
 		if !d.recAt.IsZero() {
@@ -661,7 +690,7 @@ func (h *wsHub) caption(receipts []wsReceipt, sender peer, text string) {
 	if len(receipts) == 0 || text == "" {
 		return
 	}
-	view := intercomScene(sender, shortText(text, maxMessage, true), h.b.catFor(sender))
+	view := (intercomCard{sender, shortText(text, maxMessage, true), h.b.catFor(sender)}).scene(false)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, r := range receipts {

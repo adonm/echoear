@@ -18,6 +18,36 @@ const idleSleep = 120 * time.Second
 
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
+type wsCaps struct {
+	Battery  *bool `json:"battery,omitempty"`
+	HeadPads *bool `json:"head_pads,omitempty"`
+	Call     *bool `json:"call,omitempty"`
+	Drag     *bool `json:"drag,omitempty"`
+}
+
+type deviceCaps struct {
+	Battery  bool `json:"battery"`
+	HeadPads bool `json:"head_pads"`
+	Call     bool `json:"call"`
+	Drag     bool `json:"drag"`
+}
+
+func helloCaps(ev wsEvent, board string) deviceCaps {
+	value := func(flag *bool, fallback bool) bool {
+		if flag != nil {
+			return *flag
+		}
+		return fallback
+	}
+	vocat := ev.Role == "device" && board == "esp-vocat"
+	return deviceCaps{
+		Battery:  value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
+		HeadPads: value(ev.Caps.HeadPads, vocat),
+		Call:     value(ev.Caps.Call, false),
+		Drag:     value(ev.Caps.Drag, true),
+	}
+}
+
 type wsStatus struct {
 	Battery        *int     `json:"battery_pct"`
 	MV             *int     `json:"battery_mv"`
@@ -46,6 +76,7 @@ type wsDevice struct {
 	firmware   string
 	screen     screenGeometry
 	board      string
+	caps       deviceCaps
 	theme      string
 	voice      string
 	announcing bool
@@ -68,20 +99,27 @@ type wsDevice struct {
 	appView    svgScreen
 	appGen     uint64
 
-	scene    sceneView
-	view     *sceneView
-	pending  *sceneView
-	card     *sceneView
-	drawer   string
-	peerPage int
-	statsAt  time.Time
-	rev      uint64
-	pose     catPose
-	moodAt   time.Time
-	last     time.Time
-	meter    time.Time
-	pet      time.Time
-	asleep   bool
+	scene       sceneView
+	view        *sceneView
+	pending     *sceneView
+	card        *sceneView
+	drawer      string
+	menuPage    int
+	statsAt     time.Time
+	rev         uint64
+	pose        catPose
+	moodAt      time.Time
+	last        time.Time
+	meter       time.Time
+	pet         time.Time
+	asleep      bool
+	callState   callState
+	callID      uint32
+	callPeer    string
+	callMuted   bool
+	callStarted time.Time
+	callSecond  time.Duration
+	callCancel  context.CancelFunc
 
 	recAt          time.Time
 	recOpen        bool
@@ -169,6 +207,7 @@ type peerDisplay struct {
 	auto     bool
 	online   bool
 	firmware string
+	caps     deviceCaps
 }
 
 func (h *wsHub) onlinePeers(sender string) map[string]peerDisplay {
@@ -182,7 +221,7 @@ func (h *wsHub) onlinePeers(sender string) map[string]peerDisplay {
 		if d.virtual() {
 			p.IP = ""
 		}
-		out[d.key] = peerDisplay{p, d.cat.catLook, d.autoVol, true, d.firmware}
+		out[d.key] = peerDisplay{p, d.cat.catLook, d.autoVol, true, d.firmware, d.caps}
 	}
 	return out
 }
@@ -204,7 +243,7 @@ func (h *wsHub) peerFrame(scoped bool) wsFrame {
 	devices := make([]object, 0, len(list))
 	for _, p := range list {
 		if scoped {
-			devices = append(devices, object{"device_id": p.DeviceID, "character": p.Character, "online": true})
+			devices = append(devices, object{"device_id": p.DeviceID, "character": p.Character, "online": true, "caps": p.caps})
 			continue
 		}
 		entry := object{"device_id": p.DeviceID, "character": p.Character, "ip": p.IP,
@@ -212,6 +251,7 @@ func (h *wsHub) peerFrame(scoped bool) wsFrame {
 			"ws": p.online, "cat": p.cat, "auto_volume": p.auto}
 		if p.online {
 			entry["firmware"] = p.firmware
+			entry["caps"] = p.caps
 		}
 		devices = append(devices, entry)
 	}
@@ -284,7 +324,7 @@ func (h *wsHub) broadcastPeerFrames() {
 			}
 		}
 		for _, d := range h.devices {
-			if d.drawer == "intercom" {
+			if d.drawer == "intercom" || d.drawer == "call" || d.card.hasIntercom() || d.view.hasIntercom() {
 				h.render(d, time.Now(), false)
 			}
 		}
@@ -379,6 +419,12 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	screen, board := roundScreen, ""
 	if ev.Role == "device" {
 		board = "esp-vocat"
+		if ev.Board != "" {
+			board = ev.Board
+		}
+		if board == "esp-box-3" {
+			screen = screenGeometry{320, 240, "rect"}
+		}
 		if ev.Width != nil {
 			screen.width = *ev.Width
 		}
@@ -387,9 +433,6 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		}
 		if ev.Shape != "" {
 			screen.shape = ev.Shape
-		}
-		if ev.Board != "" {
-			board = ev.Board
 		}
 		// Bound native frames by the v2 maximum (360×360 RGB565).
 		if screen.width < 1 || screen.width > screenSize || screen.height < 1 || screen.height > screenSize ||
@@ -435,15 +478,13 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: who,
 		firmware: shortText(ev.Firmware, 24, false), screen: screen, board: board,
-		theme: v.Theme, pct: -1, last: now, moodAt: now, announcing: true}
+		caps: helloCaps(ev, board), theme: v.Theme, pct: -1, last: now, moodAt: now, announcing: true}
 	h.b.catMu.Lock()
 	defer h.b.catMu.Unlock()
 	d.cat = h.b.catFor(d.who)
 	d.voice = h.b.voices.resolve(d.cat.Voice, d.voiceTheme())
 	d.autoVol, d.vol = h.b.volumePrefs(d.key)
-	if ev.Role == "device" {
-		d.telemetry.HasBattery = new(board == "esp-vocat")
-	}
+	d.telemetry.HasBattery = new(d.caps.Battery)
 	d.status(ev.wsStatus)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -451,11 +492,12 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		return
 	}
 	if old := h.devices[d.key]; old != nil {
+		old.client.cancel()
+		h.endCall(old, "disconnected")
 		h.dropApp(old)
 		h.clearRecording(old)
 		h.cancelTurn(old)
 		h.stopPlayback(old, true)
-		old.client.cancel()
 		d.rev = old.rev
 	}
 	h.devices[d.key], c.device, c.role = d, d, ev.Role
@@ -486,25 +528,22 @@ func (h *wsHub) announce(d *wsDevice) {
 
 func (d *wsDevice) status(s wsStatus) {
 	t := &d.telemetry
-	if s.HasBattery != nil {
-		t.HasBattery = s.HasBattery
-		if !*s.HasBattery {
-			d.pct, d.charging = -1, false
-			t.Battery, t.MV, t.Charge = nil, nil, nil
+	if d.caps.Battery {
+		if s.Battery != nil {
+			d.pct = min(100, max(-1, *s.Battery))
+			if d.pct >= 0 {
+				t.Battery = new(d.pct)
+			} else {
+				t.Battery = nil
+			}
 		}
-	}
-	if s.Battery != nil {
-		d.pct = min(100, max(-1, *s.Battery))
-		if d.pct >= 0 {
-			t.Battery, t.HasBattery = new(d.pct), new(true)
+		if s.MV != nil {
+			t.MV = new(min(6000, max(0, *s.MV)))
 		}
-	}
-	if s.MV != nil {
-		t.MV = new(min(6000, max(0, *s.MV)))
-	}
-	if s.Charge != nil {
-		d.charging = *s.Charge
-		t.Charge = s.Charge
+		if s.Charge != nil {
+			d.charging = *s.Charge
+			t.Charge = s.Charge
+		}
 	}
 	if s.WiFi == nil {
 		s.WiFi = s.RSSI
@@ -570,6 +609,10 @@ type renderRequest struct {
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	mood := "idle"
 	switch {
+	case d.callState == callActive:
+		mood = "call"
+	case d.callState != callNone:
+		mood = "calling"
 	case d.asleep:
 		mood = "sleepy"
 	case d.recOpen || !d.recAt.IsZero():
@@ -591,22 +634,35 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	d.pose = pose
 	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace}
 	switch {
+	case d.callState != callNone:
+		if p := h.callPeer(d); p != nil {
+			var elapsed time.Duration
+			if d.callState == callActive {
+				elapsed = now.Sub(d.callStarted)
+				d.callSecond = elapsed.Truncate(time.Second)
+			}
+			r.view = callScene(d.callState, d.callID, p.cat, d.callMuted, elapsed)
+		}
 	case d.drawer != "" && mood == "idle":
 		switch d.drawer {
 		case "volume":
 			r.view = volumeScene(d.autoVol, d.vol)
 		case "voice":
-			r.view = voiceScene(d.voice)
-		case "intercom":
-			choices := []menuPeer{{"all", "Everyone", "#FFADAC", "#FFD68B"}}
+			r.view = voiceScene(d.voice, d.menuPage)
+		case "intercom", "call":
+			calling := d.drawer == "call"
+			var choices []menuPeer
 			for _, other := range h.devices {
-				if other != d && h.active(other) {
+				if other != d && h.active(other) && (!calling || other.caps.Call) {
 					choices = append(choices, menuPeer{other.who.DeviceID, other.cat.Name, other.cat.FaceBG, other.cat.AccentColor})
 				}
 			}
-			slices.SortFunc(choices[1:], func(a, b menuPeer) int { return strings.Compare(a.id, b.id) })
-			d.peerPage = min(max(0, d.peerPage), (len(choices)-1)/4)
-			r.view = intercomSceneMenu(choices, d.peerPage)
+			slices.SortFunc(choices, func(a, b menuPeer) int { return strings.Compare(a.id, b.id) })
+			if !calling {
+				choices = append([]menuPeer{{"all", "Everyone", "#FFADAC", "#FFD68B"}}, choices...)
+			}
+			d.menuPage = clampTilePage(d.menuPage, len(choices))
+			r.view = peerScene(choices, d.menuPage, calling)
 		case "stats":
 			if d.client.scope == nil {
 				d.statsAt = now
@@ -615,7 +671,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 			}
 			fallthrough
 		default:
-			r.view = menuHome(d.voice, d.autoVol, d.vol, d.client.scope != nil)
+			r.view = menuHome(d.voice, d.autoVol, d.vol, d.client.scope != nil, d.caps.Call, d.menuPage)
 		}
 	case mood == "listening":
 		r.cat, r.pose = new(d.cat), pose
@@ -628,6 +684,9 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		r.view = *d.view
 	default:
 		r.cat, r.pose = new(d.cat), pose
+	}
+	if card := r.view.intercom; card != nil {
+		r.view = card.scene(h.canCall(d, card.sender.DeviceID))
 	}
 	if r.cat == nil && r.app == nil && (mood == "thinking" || mood == "speaking") {
 		r.view.actions = maps.Clone(r.view.actions)
@@ -730,6 +789,9 @@ func (h *wsHub) wake(d *wsDevice, now time.Time) {
 }
 
 func (h *wsHub) setSleeping(d *wsDevice, asleep bool) {
+	if asleep && d.callState != callNone {
+		return
+	}
 	if d.asleep != asleep {
 		d.asleep = asleep
 		h.push(d, object{"op": "power", "brightness": d.brightness()}, true)
@@ -760,6 +822,10 @@ func (h *wsHub) animate(ctx context.Context) {
 			h.tickApps(now)
 			for _, d := range h.devices {
 				switch {
+				case d.callState != callNone:
+					if d.callState == callActive && now.Sub(d.callStarted).Truncate(time.Second) > d.callSecond {
+						h.render(d, now, false)
+					}
 				case !d.recAt.IsZero() && d.recStopTimer == nil && now.Sub(d.recAt) > 90*time.Second:
 					h.stopRecordingAtLimit(d, now)
 				case d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)):

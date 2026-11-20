@@ -257,6 +257,10 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		b.ws.mu.Lock()
 		d := b.ws.devices[strings.ToLower(id)]
 		if d != nil && b.ws.active(d) {
+			if d.callState != callNone {
+				b.ws.mu.Unlock()
+				return nil, problem(409, "Cat is in a call")
+			}
 			b.ws.startTurn(d, time.Now(), false, "typed", func(ctx context.Context, turn uint64) {
 				b.ws.runTurn(ctx, d, turn, text, "typed", nil)
 			})
