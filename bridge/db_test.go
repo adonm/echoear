@@ -56,15 +56,21 @@ func TestTursoMigration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "echoear.db")
 	at := time.Date(2026, 10, 1, 12, 5, 0, 123000000, time.UTC)
-	cake := peer{"echoear-0001", "Cake", "192.168.8.21", 80, at.Unix()}
-	mint := peer{"echoear-0002", "Mint", "192.168.8.22", 80, at.Unix()}
+	cake := peer{"echoear-0001", "Cake", "127.0.0.21", 80, at.Unix()}
+	mint := peer{"echoear-0002", "Mint", "127.0.0.22", 80, at.Unix()}
+	nonLANCake := peer{"echoear-0003", "Cake", "192.0.2.21", 80, at.Unix()}
+	nonLANMint := peer{"echoear-0004", "Mint", "192.0.2.22", 80, at.Unix()}
 	greg := virtualClient{ID: "virt-12345678", Character: "Greg", Theme: "plum", CreatedAt: at}
 	tunnel := tunnelRecord{greg.ID, "greg", "https://greg.example.test", 1234, strings.Repeat("a", 32), "echoear-" + strings.Repeat("b", 24), ""}
 	chat := chatEntry{ID: "legacy-1", Role: "system", Sender: "Greg", Text: "First", Timestamp: at, Source: "mcp", SceneTitle: "Quiz", ToolSummary: "Card"}
 	sessions := map[string]string{cake.DeviceID: "ses_cake", mint.DeviceID: "ses_mint", greg.ID: "ses_greg"}
 	voices := map[string]string{cake.DeviceID: heartVoice, mint.DeviceID: fableVoice}
 	all := map[string]any{
-		"devices":         object{cake.DeviceID: cake, mint.DeviceID: mint, "bad": []int{1}},
+		"devices": object{
+			cake.DeviceID: cake, mint.DeviceID: mint,
+			nonLANCake.DeviceID: nonLANCake, nonLANMint.DeviceID: nonLANMint,
+			"bad": []int{1},
+		},
 		"virtual_clients": map[string]virtualClient{greg.ID: greg},
 		"tunnels":         map[string]tunnelRecord{greg.ID: tunnel},
 		"sessions":        sessions,
@@ -91,8 +97,10 @@ func TestTursoMigration(t *testing.T) {
 		"voices": 2, "chat_events": 2, "messages": 1, "memory": 0, "apps": 0, "timers": 0} {
 		assertRows(name, n)
 	}
-	if got, _, err := deviceStore(db).get(cake.DeviceID); err != nil || got != cake {
-		t.Fatal("device fields did not migrate", err)
+	for _, want := range []peer{cake, mint} {
+		if got, _, err := deviceStore(db).get(want.DeviceID); err != nil || got != want {
+			t.Fatalf("device %s did not migrate: %v", want.DeviceID, err)
+		}
 	}
 	if got, _, err := virtualStore(db).get(greg.ID); err != nil || got != greg {
 		t.Fatal("virtual client fields did not migrate", err)
