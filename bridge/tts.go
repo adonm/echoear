@@ -215,6 +215,22 @@ type clip struct {
 	err  error
 }
 
+func (c *speechClips) peek(text string) []byte {
+	c.mu.Lock()
+	item := c.clips[text]
+	c.mu.Unlock()
+	if item != nil {
+		select {
+		case <-item.done:
+			if item.err == nil {
+				return item.pcm
+			}
+		default:
+		}
+	}
+	return nil
+}
+
 func (c *speechClips) get(ctx context.Context, w *synthWorker, text string) ([]byte, error) {
 	c.mu.Lock()
 	if c.clips == nil {

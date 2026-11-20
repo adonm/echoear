@@ -83,6 +83,7 @@ func run() error {
 	b := &bridge{root: root, token: token, peers: loadPeers(filepath.Join(local, "devices.json")),
 		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
+	b.ws = newWSHub(b)
 	go func() {
 		ctx, cancel := context.WithTimeout(root, ttsWait)
 		defer cancel()
@@ -105,6 +106,7 @@ func run() error {
 	go func() { served <- server.Serve(listener) }()
 	select {
 	case <-signals.Done():
+		b.ws.shutdown()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
@@ -114,6 +116,7 @@ func run() error {
 	case err = <-served:
 	}
 	finish()
+	b.ws.shutdown()
 	<-worker.done
 	oc.client.CloseIdleConnections()
 	hex.client.CloseIdleConnections()

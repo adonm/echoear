@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171525">
+  <title>EchoEar · Cat Club</title>
+  <link rel="stylesheet" href="/app/style.css">
+  <script src="/app/client.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">ECHOEAR / LOCAL</p>
+        <h1>Cat Club<span>.</span></h1>
+      </div>
+      <button id="settings" type="button" class="quiet" aria-expanded="false" aria-controls="credentials">Bridge token</button>
+    </header>
+    <form id="credentials" class="panel" hidden>
+      <label for="token">Bridge token</label>
+      <div class="row">
+        <input id="token" type="password" required autocomplete="off" spellcheck="false">
+        <button type="submit">Connect</button>
+      </div>
+    </form>
+    <section class="panel" aria-labelledby="devices-heading">
+      <div class="row between wrap">
+        <h2 id="devices-heading">Nearby cats</h2>
+        <button id="join" type="button" class="accent">Join as Phone Cat</button>
+      </div>
+      <nav id="peers" class="row wrap peers" aria-label="EchoEar devices"></nav>
+      <p id="link-state" class="small" role="status">Connect to discover your cats.</p>
+    </section>
+    <section class="stage-panel" aria-label="EchoEar screen and controls">
+      <div class="stage">
+        <svg id="screen" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" aria-labelledby="screen-title screen-description">
+          <title id="screen-title">EchoEar screen</title>
+          <desc id="screen-description">Select an online EchoEar or join as a Phone Cat.</desc>
+          <defs><clipPath id="round-screen"><circle cx="180" cy="180" r="180"/></clipPath></defs>
+          <g id="canvas" clip-path="url(#round-screen)">
+            <rect id="canvas-bg" width="360" height="360" fill="#251C3B"/>
+            <g id="nodes"></g>
+          </g>
+        </svg>
+      </div>
+      <p id="screen-status" class="small" role="status">No cat selected.</p>
+      <div id="controls" class="panel" hidden>
+        <form id="prompt" class="row">
+          <label class="sr-only" for="text">Quick text prompt</label>
+          <input id="text" maxlength="640" required placeholder="Ask your cat something…" autocomplete="off">
+          <button type="submit">Send</button>
+        </form>
+        <div class="row between wrap">
+          <label for="volume">Volume</label>
+          <input id="volume" type="range" min="0" max="100" value="80">
+          <output for="volume" id="volume-value">80%</output>
+        </div>
+        <div id="phone-controls" class="row wrap" hidden>
+          <label class="sr-only" for="target">Talk destination</label>
+          <select id="target"><option value="">Ask my cat</option></select>
+          <button id="talk" type="button" class="accent" aria-pressed="false">Talk</button>
+          <button id="cancel" type="button" class="quiet" hidden>Cancel recording</button>
+          <button id="sound" type="button" class="quiet">Enable sound</button>
+        </div>
+        <p id="mic-help" class="small" hidden>Microphone access needs HTTPS or localhost. You can still send text and play audio.</p>
+      </div>
+    </section>
+    <noscript><p class="panel">JavaScript is required for the live screen and audio.</p></noscript>
+  </main>
+</body>
+</html>

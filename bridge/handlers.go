@@ -32,6 +32,7 @@ type bridge struct {
 	chime    []byte
 	peerHTTP *http.Client
 	ota      otaFile
+	ws       *wsHub
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
@@ -198,6 +199,9 @@ func (b *bridge) identity(r *http.Request, obj object, register bool) (peer, err
 	if err := b.peers.register(p); err != nil {
 		return peer{}, err
 	}
+	if b.ws != nil {
+		b.ws.peersChanged()
+	}
 	if b.worker != nil {
 		go func() {
 			ctx, cancel := context.WithTimeout(b.root, ttsWait)
@@ -276,7 +280,7 @@ func (b *bridge) postPeer(ctx context.Context, who peer, path, kind string, body
 	return res.StatusCode >= 200 && res.StatusCode < 300
 }
 
-func (b *bridge) deliver(ctx context.Context, sender peer, recipients []peer, text string, raw []byte) delivery {
+func (b *bridge) deliverHTTP(ctx context.Context, sender peer, recipients []peer, text string, raw []byte) delivery {
 	out := delivery{sent: []string{}, delivered: []string{}, failed: []string{}}
 	if len(recipients) == 0 {
 		out.err = "peer_not_found"
@@ -394,7 +398,7 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 	if text == "" {
 		return answer{}, problem(400, "Expected nonempty text")
 	}
-	others, err := b.peers.snapshot(sender.DeviceID)
+	others, err := b.peerSnapshot(sender.DeviceID)
 	if err != nil {
 		return answer{}, err
 	}
@@ -408,18 +412,58 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 		}
 		return b.relay(ctx, sender, others, direct.target, direct.text, pcm)
 	}
+	gen, err := b.generateReply(ctx, b.root, sender, others, text, nil)
+	if err != nil {
+		return answer{}, err
+	}
+	sent := []string{}
+	out := answer{Reply: gen.reply, SessionID: gen.sid, Screen: gen.screen, OpenCodeMS: gen.openMS, SampleRate: sampleRate, SentTo: &sent}
+	if gen.reply != "" {
+		b.attachAudio(ctx, &out, gen.audio, gen.ttsStart)
+	}
+	if gen.message != nil {
+		d := b.deliver(ctx, sender, targets(others, gen.message.target), gen.message.text, nil)
+		out.SentTo, out.DeliveredTo, out.FailedTo, out.Error = &d.sent, &d.delivered, &d.failed, d.err
+	}
+	return out, nil
+}
+
+type generatedReply struct {
+	reply, sid string
+	screen     object
+	message    *intercomMessage
+	audio      *AudioStream
+	openMS     int64
+	ttsStart   time.Time
+}
+
+// HTTP verifies the final text before publishing an audio URL. A WebSocket can
+// play the speculative stream; nil tells it to interrupt a superseded stream.
+func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, others []peer, text string, publish func(*AudioStream)) (generatedReply, error) {
 	makeSpeech := func() *speechTurn {
 		deadline, _ := ctx.Deadline()
-		audioCtx, cancel := context.WithDeadline(b.root, deadline)
+		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
 		return newSpeechTurn(audioCtx, cancel, b.worker)
 	}
 	var eager *speechTurn
+	publishEager := func() {
+		if publish != nil {
+			publish(eager.stream)
+		}
+	}
+	discard := func() {
+		eager.discard()
+		if publish != nil {
+			publish(nil)
+		}
+	}
 	onSentence := func(s string) {
 		if b.worker == nil || !b.worker.ready.Load() {
 			return
 		}
 		if eager == nil {
 			eager = makeSpeech()
+			publishEager()
 		}
 		eager.send(s)
 	}
@@ -428,9 +472,9 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 	openMS := time.Since(start).Milliseconds()
 	if err != nil {
 		if eager != nil {
-			eager.discard()
+			discard()
 		}
-		return answer{}, err
+		return generatedReply{}, err
 	}
 	reply, screen, message := extractPayloads(raw)
 	ttsStart := time.Now()
@@ -440,26 +484,19 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 		final := SplitSentences(clean)
 		if eager == nil {
 			eager = makeSpeech()
+			publishEager()
 		}
 		if !eager.complete(final) {
-			eager.discard()
+			discard()
 			eager = makeSpeech()
 			eager.complete(final)
+			publishEager()
 		}
 		stream = eager.stream
 	} else if eager != nil {
-		eager.discard()
+		discard()
 	}
-	sent := []string{}
-	out := answer{Reply: reply, SessionID: sid, Screen: screen, OpenCodeMS: openMS, SampleRate: sampleRate, SentTo: &sent}
-	if reply != "" {
-		b.attachAudio(ctx, &out, stream, ttsStart)
-	}
-	if message != nil {
-		d := b.deliver(ctx, sender, targets(others, message.target), message.text, nil)
-		out.SentTo, out.DeliveredTo, out.FailedTo, out.Error = &d.sent, &d.delivered, &d.failed, d.err
-	}
-	return out, nil
+	return generatedReply{reply, sid, screen, message, stream, openMS, ttsStart}, nil
 }
 
 func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any, error) {
@@ -491,7 +528,7 @@ func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any
 	out := answer{SampleRate: sampleRate}
 	switch {
 	case intercom:
-		others, err := b.peers.snapshot(sender.DeviceID)
+		others, err := b.peerSnapshot(sender.DeviceID)
 		if err != nil {
 			return nil, err
 		}
@@ -515,6 +552,13 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 	switch r.Method {
 	case http.MethodGet:
 		switch {
+		case path == "/":
+			http.Redirect(w, r, "/app", http.StatusFound)
+			return nil, nil
+		case serveApp(w, path):
+			return nil, nil
+		case path == "/ws" && b.ws != nil:
+			return nil, b.ws.serve(w, r)
 		case path == "/health":
 			h := make(chan bool, 1)
 			go func() { h <- b.hex.reachable(ctx, "/health") }()
@@ -526,7 +570,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			}
 			return object{"ok": true, "hex": <-h, "opencode": o, "tts": ready, "tts_engine": engine}, nil
 		case path == "/api/devices":
-			others, err := b.peers.snapshot("")
+			others, err := b.peerSnapshot("")
 			return object{"devices": publicPeers(others)}, err
 		case strings.HasPrefix(path, "/api/audio/"):
 			return nil, b.audio.ServeAudio(w, r, strings.TrimPrefix(path, "/api/audio/"))
@@ -551,7 +595,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 				if err != nil {
 					return nil, err
 				}
-				others, err := b.peers.snapshot(sender.DeviceID)
+				others, err := b.peerSnapshot(sender.DeviceID)
 				return object{"ok": true, "peers": publicPeers(others)}, err
 			case "/api/text":
 				sender, err := b.identity(r, obj, false)
