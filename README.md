@@ -1,6 +1,6 @@
 # EchoEar
 
-EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk tutor with interactive diagrams, intercom, and a browser mirror.
+EchoEar is a tap-to-talk companion with interactive diagrams, voice notes, live calls, and a browser mirror.
 
 ```text
 EchoEar <-- /ws: RGB565 frames, touch, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
@@ -9,16 +9,14 @@ EchoEar <-- /ws: RGB565 frames, touch, PCM --> Go bridge :8765 <-- /app: SVG -->
                                               `-- Kokoro   (persistent FP32 worker)
 ```
 
-**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Firmware `v0.9.1` displays
-RGB565 updates from the bridge, reports touch coordinates and hardware telemetry,
-and draws a fallback face offline. The bridge runs app logic and renders the
-display; `/app` uses native SVG.
+**Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Both use a 360×360 logical canvas,
+centered on the BOX-3’s rectangular display. The bridge runs apps and renders
+RGB565 updates for hardware and SVG for `/app`. Boards draw a fallback face offline.
 
-**New in 0.9.1:** Both boards support finger drags in micro-apps. Adaptive voice
-detection on hardware and in `/app` sends short utterances sooner and allows
-longer pauses in longer recordings. The bridge can speak the first sentence
-before OpenCode finishes, shares photos from `/app`, and backs up its database
-daily. The bridge and browser client are split into focused modules.
+**New in 0.9.2:** Live two-way **Call** and all nine Kokoro voices in the paged
+on-device picker. Firmware announces features in `hello` and flushes only the
+dirty LCD columns within changed rows. The bridge and dashboard add paginated
+chat history, faster face rendering, and separate turn and hardware diagnostics.
 
 ## Quickstart
 
@@ -79,22 +77,26 @@ daily. The bridge and browser client are split into focused modules.
    and graphics tests (strict GCC with ASan/UBSan, both display sizes).
    Add `--live` to exercise the running services; ShellCheck runs if installed.
 
-## Controls and intercom
+## Controls, voice notes, and calls
 
 - Tap the cat face and speak after the tone. Pause 1.5 seconds to send
   automatically, or 3 seconds once you've spoken for 4 seconds. Tap **Send**
   to finish early, **Cancel** to discard, or **Stop** to interrupt a reply.
-- Head touch only pets, wakes, or interrupts the cat; it never changes volume.
+- On VoCat, head touch only pets, wakes, or interrupts; it never changes volume.
   The display dims after 120 seconds idle.
 - The on-device **Menu** has large, high-contrast buttons with icons and labels:
-  **Talk to…** opens intercom, **Volume** sets the level or enables **Auto**,
-  **Voice** chooses a speaking voice, and **Stats** opens the diagnostics HUD.
+  **Voice Note** opens intercom, **Volume** sets the level or enables **Auto**,
+  **Voice** pages through all nine voices, and **Stats** opens the diagnostics HUD.
   Auto-volume estimates ambient noise from recordings and adjusts the DAC in RAM
   without writing to flash. **Cat** closes a diagram.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or choose a peer in
-  **Menu → Talk to…** to record directly to that cat.
+  **Menu → Voice Note** to record directly to that cat.
+- Tap **Call** on an incoming Intercom card, pick a peer in **Menu → Call**, or
+  say “call \<name\>.” Both cats must be online and call-capable. The recipient
+  can answer or decline; either side can mute its mic or hang up. Unlike a
+  voice note, a call streams both ways in real time.
 - Ask for a composed message (“Send Mint a knock-knock joke”). The agent uses
   `emit` to deliver a card and synthesized speech to the recipient.
 
@@ -109,8 +111,10 @@ Open **Reassign / Load Cat** in the LAN sidebar to move or swap a design, voice,
 and active conversation between devices. Use **Saved Cats** there to assign a
 profile to the selected device or delete the saved copy. Shared tunnel links
 can chat but cannot reset or reassign cats.
-The Chat panel loads the cat's conversation history across sessions and
-updates live over `/ws`. Use **Photo** to show an image on the selected cat's
+Chat updates live over `/ws`; **Load older** fetches earlier messages across
+sessions. Use **Call** from a virtual cat in `/app` to call a compatible board
+or another virtual cat. Mirroring a physical cat does not turn the browser into
+its microphone. Use **Photo** to show an image on the selected cat's
 screen and leave a card in its chat. Use **Voice** under the screen for one-click
 Heart or Fable, or choose among Heart and all eight UK voices in the dropdown. The
 choice is saved per device in the bridge database. Mint defaults to Fable (`bm_fable`,
@@ -121,8 +125,8 @@ countdown and a Cancel button. The LAN sidebar's **Saved Memory & Assets**
 section lets you inspect and delete saved keys and visuals.
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
-Microphone access requires HTTPS or localhost and uses the same adaptive
-silence timing as the boards. On manual stop, the browser flushes any buffered
+Browser calls and recording need microphone access (HTTPS or localhost).
+Voice notes use the same adaptive silence timing as the boards. On manual stop, the browser flushes any buffered
 audio before ending the recording, without a fixed recording tail. For a remote
 phone, install the [OpenTunnel CLI](https://opentunnel.xyz) on the bridge host. If it is
 outside the bridge service's `PATH` and `~/.local/bin`, set
@@ -130,8 +134,8 @@ outside the bridge service's `PATH` and `~/.local/bin`, set
 with `systemctl --user restart echoear-bridge.service` so it finds the CLI.
 In the dashboard, select a Virtual Cat, choose **Create Tunnel** to start
 its route, then **Copy Share Link**. The HTTPS link opens the same cat and
-conversation as the LAN dashboard, with mic, screen, and intercom to online
-EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
+conversation as the LAN dashboard, with mic, screen, voice notes, and calls to
+online EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
 other cats' chats. Treat the link as a password and use **Close Tunnel** to revoke it.
 
 ### Geeky diagnostics
@@ -176,9 +180,9 @@ OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
 reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
-On startup after MCP tool schemas or server instructions change, the bridge
-reconnects EchoEar MCP and compacts active OpenCode sessions without changing
-the canonical chat history.
+After a change to MCP schemas, instructions, the agent prompt, or the runtime
+contract version, the bridge reconnects EchoEar MCP and compacts active
+OpenCode sessions on startup without changing canonical chat history.
 Code Mode exposes exactly four MCP tools under `tools.echoear`:
 
 | Tool | Purpose |
@@ -242,12 +246,14 @@ or connectivity are required for normal local operation.
 
 HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
 Hardware needs firmware `0.8.0` or newer and announces `proto: 2` in its
-authenticated `/ws` hello. The bridge remembers each board there, using the
+authenticated `/ws` `hello`. Firmware `0.9.2` also reports `caps` for battery,
+head touch, Call, and drag. The bridge remembers each board there, using the
 socket IP and port 80 unless the hello specifies a port. The SVG renderer
 streams dirty rectangles as `0x03` RGB565 binary frames, using RLE565 when
 smaller. BOX-3 announces its native size; the bridge centers the square
 artwork and maps raw touch coordinates back into SVG space. Browsers receive
-`op: "svg"`; their on-screen controls also work with Tab, Enter, and Space.
+`op: "svg"` with `device_id`; controls share the boards’ hit targets and also
+work with Tab, Enter, and Space.
 `0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
 little-endian mono PCM. Voice capture and intercom use WebSocket. The bridge
 pads voiced PCM sent to Hex with 150 ms of silence on each side. Kokoro starts
