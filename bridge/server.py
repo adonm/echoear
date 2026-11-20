@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-from tts import MAX_TEXT, SAMPLE_RATE, Speech, plain_text
+from tts import MAX_PCM, MAX_TEXT, SAMPLE_RATE, Speech, plain_text
 
 DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
@@ -327,6 +327,34 @@ class Sessions:
             return final_reply(messages["data"], prompt["data"]["id"]), sid
 
 
+class AudioStream:
+    def __init__(self):
+        self.chunks: list[bytes] = []
+        self.done = False
+        self.error: str | None = None
+        self.cond = threading.Condition()
+        self.total_bytes = 0
+
+    def produce(self, speech, text):
+        error = None
+        try:
+            for _, pcm in speech.synthesize_sentences(text):
+                with self.cond:
+                    if not pcm or len(pcm) % 2 or self.total_bytes + len(pcm) > MAX_PCM:
+                        raise ValueError("Invalid sentence size or audio stream exceeds 2 MiB")
+                    self.chunks.append(pcm)
+                    self.total_bytes += len(pcm)
+                    self.cond.notify_all()
+        except Exception as exc:
+            error = type(exc).__name__
+            print(f"EchoEar TTS streaming failed: {error}", file=sys.stderr, flush=True)
+        finally:
+            with self.cond:
+                self.error = error
+                self.done = True
+                self.cond.notify_all()
+
+
 class Bridge(ThreadingHTTPServer):
     def __init__(self, address, token, ota_dir, sessions):
         self.token = token.encode()
@@ -337,23 +365,24 @@ class Bridge(ThreadingHTTPServer):
         self.audio_lock = threading.Lock()
         super().__init__(address, Handler)
 
-    def cache_pcm(self, pcm):
+    def cache_audio(self, stream):
         audio_id = secrets.token_urlsafe(18)
         with self.audio_lock:
-            self.audio[audio_id] = pcm
+            self.audio[audio_id] = stream
             if len(self.audio) > 16:
                 self.audio.popitem(last=False)
         return f"/api/audio/{audio_id}"
 
-    def cached_pcm(self, audio_id):
+    def cached_audio(self, audio_id):
         with self.audio_lock:
-            pcm = self.audio.get(audio_id)
-            if pcm is not None:
+            stream = self.audio.get(audio_id)
+            if stream is not None:
                 self.audio.move_to_end(audio_id)
-            return pcm
+            return stream
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     timeout = 15
 
     def log_message(self, *_):
@@ -363,13 +392,46 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, result):
         self.send_bytes(status, json_bytes(result), "application/json")
 
-    def send_bytes(self, status, body, content_type):
+    def payload_headers(self, status, content_type, length):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        if length is None:
+            self.send_header("Transfer-Encoding", "chunked")
+        else:
+            self.send_header("Content-Length", str(length))
+        self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
+
+    def send_bytes(self, status, body, content_type):
+        self.payload_headers(status, content_type, len(body))
         self.end_headers()
         self.wfile.write(body)
+
+    def send_audio(self, stream):
+        with stream.cond:
+            length = stream.total_bytes if stream.done else None
+        self.payload_headers(200, "audio/pcm", length)
+        self.end_headers()
+        if length is not None:
+            # Once done, chunks never change; no join or lock is needed to replay them.
+            for pcm in stream.chunks:
+                self.wfile.write(pcm)
+            return
+
+        index = 0
+        while True:
+            with stream.cond:
+                stream.cond.wait_for(lambda: index < len(stream.chunks) or stream.done)
+                if index == len(stream.chunks):
+                    break
+                pcm = stream.chunks[index]
+            self.wfile.write(f"{len(pcm):X}\r\n".encode("ascii"))
+            self.wfile.write(pcm)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+            index += 1
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def read_body(self, limit):
         lengths = self.headers.get_all("Content-Length", [])
@@ -438,29 +500,43 @@ class Handler(BaseHTTPRequestHandler):
         return dict(reply=reply, screen=screen, session_id=sid, opencode_ms=elapsed_ms(start),
                     **self.audio_fields(reply))
 
-    def speech_pcm(self, text):
-        clean = plain_text(text)
-        if len(clean) > MAX_TEXT or not any(c.isalnum() for c in clean):
-            raise Error(400, f"Expected spoken text of 1–{MAX_TEXT} characters")
+    def speech_input(self, text):
+        try:
+            clean = Speech.spoken_text(text)
+        except ValueError:
+            raise Error(400, f"Expected spoken text of 1–{MAX_TEXT} characters") from None
         if self.server.speech is None:
             raise Error(503, "TTS unavailable")
+        return self.server.speech, clean
+
+    def speech_pcm(self, text):
+        speech, clean = self.speech_input(text)
         try:
-            return self.server.speech.synthesize(clean)
+            return speech.synthesize_pcm(clean)
         except Exception as error:
             print(f"EchoEar TTS synthesis failed: {type(error).__name__}", file=sys.stderr, flush=True)
             raise Error(502, "TTS synthesis failed") from None
 
     def audio_fields(self, reply):
-        result = dict(audio_url=None, audio_bytes=0, sample_rate=SAMPLE_RATE, tts_ms=0)
-        if reply:
-            start = time.monotonic_ns()
-            try:
-                pcm = self.speech_pcm(reply)
-                result.update(audio_url=self.server.cache_pcm(pcm), audio_bytes=len(pcm))
-            except Error as error:
-                if error.status != 502:  # Inference failures are already logged.
-                    print(f"EchoEar could not attach TTS audio: {error}", file=sys.stderr, flush=True)
-            result["tts_ms"] = elapsed_ms(start)
+        result = dict(audio_url=None, audio_bytes=0, sample_rate=SAMPLE_RATE,
+                      audio_streaming=False, tts_first_ms=0, tts_ms=0)
+        if not reply:
+            return result
+        start = time.monotonic_ns()
+        try:
+            speech, clean = self.speech_input(reply)
+        except Error as error:
+            print(f"EchoEar could not attach TTS audio: {error}", file=sys.stderr, flush=True)
+        else:
+            stream = AudioStream()
+            threading.Thread(target=stream.produce, args=(speech, clean), daemon=True).start()
+            with stream.cond:
+                stream.cond.wait_for(lambda: stream.chunks or stream.done)
+                if stream.chunks:
+                    result.update(audio_url=self.server.cache_audio(stream),
+                                  audio_bytes=stream.total_bytes if stream.done else 0,
+                                  audio_streaming=not stream.done)
+        result["tts_first_ms"] = result["tts_ms"] = elapsed_ms(start)
         return result
 
     def ota(self, manifest):
@@ -480,11 +556,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, dict(exists=True, size=info.st_size, sha256=digest, mtime=int(info.st_mtime)))
                 return
             firmware.seek(0)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(info.st_size))
+            self.payload_headers(200, "application/octet-stream", info.st_size)
             self.send_header("X-Firmware-Sha256", digest)
-            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             remaining = info.st_size
             while remaining and (chunk := firmware.read(min(remaining, 64 * 1024))):
@@ -508,10 +581,10 @@ class Handler(BaseHTTPRequestHandler):
                 if path in ("/ota/version.json", "/ota/latest.bin"):
                     return self.ota(path.endswith(".json"))
                 if path.startswith("/api/audio/"):
-                    pcm = self.server.cached_pcm(path.removeprefix("/api/audio/"))
-                    if pcm is None:
+                    stream = self.server.cached_audio(path.removeprefix("/api/audio/"))
+                    if stream is None:
                         raise Error(404, "Audio not found")
-                    return self.send_bytes(200, pcm, "audio/pcm")
+                    return self.send_audio(stream)
             if self.command == "POST":
                 if path == "/api/voice":
                     return self.send_json(200, self.voice())
@@ -554,7 +627,7 @@ def main():
         try:
             start = time.monotonic_ns()
             speech = Speech(DATA / "echoear/tts-models")
-            speech.synthesize("Hello! Let's find something fun to learn.")
+            speech.synthesize_pcm("Hello! Let's find something fun to learn.")
             bridge.speech = speech
             print(f"EchoEar TTS ready: {speech.engine}/{speech.voice} ({elapsed_ms(start)} ms startup)", flush=True)
         except Exception as error:

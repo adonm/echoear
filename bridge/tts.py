@@ -2,18 +2,41 @@
 
 import math
 import os
+import re
 import threading
 
 SAMPLE_RATE = 16000
 MAX_PCM = 2 * 1024 * 1024
 MAX_TEXT = 640
 MARKDOWN = str.maketrans("", "", "*_`#")
+SENTENCE_END = re.compile(r"""[.!?]+["'”’)\]]*(?=\s|$)""")
+ABBREVIATION = re.compile(r"\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|e\.g|i\.e)\.$", re.IGNORECASE)
+INITIALS = re.compile(r"\b(?:[A-Z]\.)+$")
 
 
 def plain_text(value):
     if not isinstance(value, str):
         return ""
     return " ".join(value.translate(MARKDOWN).split())
+
+
+def split_sentences(text: str) -> list[str]:
+    text = plain_text(text)
+    sentences = []
+    clip_start = sentence_start = 0
+    for end in SENTENCE_END.finditer(text):
+        sentence = text[sentence_start:end.end()].strip()
+        if end.group().startswith(".") and (ABBREVIATION.search(sentence) or INITIALS.search(sentence)):
+            continue
+        sentence_start = end.end()
+        # Count letters so "Ooh, awesome question!" stays with the explanation.
+        if end.group().startswith(("!", "?")) and sum(c.isalnum() for c in sentence) < 20:
+            continue
+        sentences.append(text[clip_start:sentence_start].strip())
+        clip_start = sentence_start
+    if tail := text[clip_start:].strip():
+        sentences.append(tail)
+    return sentences
 
 
 class Speech:
@@ -38,10 +61,26 @@ class Speech:
         self.resample = resample_poly
         self.lock = threading.Lock()
 
-    def synthesize(self, text):
+    @staticmethod
+    def spoken_text(text):
         text = plain_text(text)
         if len(text) > MAX_TEXT or not any(c.isalnum() for c in text):
             raise ValueError("Expected short spoken text")
+        return text
+
+    def synthesize_pcm(self, text: str) -> bytes:
+        return self._pcm(self.spoken_text(text))
+
+    def synthesize_sentences(self, text: str):
+        sentences = split_sentences(self.spoken_text(text))
+        for i, sentence in enumerate(sentences):
+            pcm = self._pcm(sentence)
+            if i + 1 < len(sentences):
+                # Kokoro trims clip edges. Restore a short pause between independently generated sentences.
+                pcm += bytes(SAMPLE_RATE // 10 * 2)
+            yield i, pcm
+
+    def _pcm(self, text):
         with self.lock:
             wave, rate = self.kokoro.create(text, voice=self.voice, lang="en-us")
         if rate != SAMPLE_RATE:
@@ -50,8 +89,14 @@ class Speech:
         if wave.ndim != 1 or not 0 < wave.size <= MAX_PCM // 2:
             raise ValueError("Invalid synthesized audio length")
         np = self.numpy
-        peak = float(np.max(np.abs(wave)))
+        scaled = wave * 1.8
+        magnitude = np.abs(scaled)
+        peak = float(np.max(magnitude))
         if not math.isfinite(peak) or peak < 1e-5:
             raise ValueError("Synthesized audio is silent or invalid")
-        target = 32767 * 10 ** (-1 / 20)
-        return np.rint(wave * (target / peak)).astype("<i2").tobytes()
+        # Fixed voice gain preserves relative loudness. A soft knee limits peaks to -1 dBFS.
+        knee = 0.75
+        headroom = 10 ** (-1 / 20) - knee
+        hot = magnitude > knee
+        magnitude[hot] = knee + headroom * np.tanh((magnitude[hot] - knee) / headroom)
+        return np.rint(np.copysign(magnitude, scaled) * 32767).astype("<i2").tobytes()

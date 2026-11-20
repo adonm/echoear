@@ -14,12 +14,14 @@ import shlex
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import wave
 from pathlib import Path
 
 from server import Bridge, SESSION_ID, Sessions, json_bytes, split_screen, upstream
+from tts import split_sentences
 
 DEVICE = f"bridge-selftest-{secrets.token_hex(8)}"
 SPEECH = b"What is the capital city of France? Answer with only the city name."
@@ -138,34 +140,90 @@ def test_screen_parser():
     print("PASS screen sanitization preserves btn, tap, and ask within size limits", flush=True)
 
 
-def check_pcm(payload, headers, expected):
+def test_sentence_split():
+    assert split_sentences(
+        "**Whoa!** Dr. Lee found a 3.2-inch shell. Ooh, awesome question! Where do spiral shells get their shape?"
+    ) == [
+        "Whoa! Dr. Lee found a 3.2-inch shell.",
+        "Ooh, awesome question! Where do spiral shells get their shape?",
+    ]
+    assert split_sentences('She asked, "Why is the Moon so bright?" The answer is reflected sunlight.') == [
+        'She asked, "Why is the Moon so bright?"', "The answer is reflected sunlight.",
+    ]
+    chained = "Whoa! That is pretty neat! Sunlight takes several minutes to reach us."
+    assert split_sentences(chained) == [chained]
+    assert split_sentences("Paris.") == ["Paris."] and split_sentences("Wow!") == ["Wow!"]
+    print("PASS sentence boundaries, abbreviations, decimals, and merged exclamations", flush=True)
+
+
+def check_pcm(payload, headers, expected=None):
     assert headers.get_content_type() == "audio/pcm"
-    assert 8000 < expected == len(payload) == int(headers["Content-Length"])
+    if headers.get("Transfer-Encoding") == "chunked":
+        assert expected is None and "Content-Length" not in headers
+    else:
+        assert len(payload) == int(headers["Content-Length"])
+    if expected is not None:
+        assert len(payload) == expected
+    assert len(payload) > 8000
     assert len(payload) % 2 == 0
     samples = array("h", payload)
     if sys.byteorder == "big":
         samples.byteswap()
     rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
-    assert rms > 100 and 28000 < max(map(abs, samples)) < 30000
+    assert rms > 100 and max(map(abs, samples)) <= 29204
     return len(samples) / 16000, round(rms)
 
 
-def check_audio(url, token, result):
+def audio_path(result):
     path = result["audio_url"]
     assert re.fullmatch(r"/api/audio/[A-Za-z0-9_-]{24}", path or "")
     assert result["sample_rate"] == 16000
-    assert isinstance(result["tts_ms"], int) and result["tts_ms"] >= 0
+    assert isinstance(result["tts_first_ms"], int) and result["tts_first_ms"] == result["tts_ms"] >= 0
+    assert type(result["audio_streaming"]) is bool
+    assert (result["audio_bytes"] == 0) == result["audio_streaming"]
+    return path
+
+
+def check_audio(url, token, result):
+    path = audio_path(result)
     rejects(401, url, path)
     pcm, headers = send(url, path, token=token)
-    return check_pcm(pcm, headers, result["audio_bytes"])
+    return check_pcm(pcm, headers, result["audio_bytes"] or None)
+
+
+def check_stream(url, token, result, posted_at):
+    path = audio_path(result)
+    assert result["audio_streaming"] and result["audio_bytes"] == 0
+    request = urllib.request.Request(url + path, headers={"X-EchoEar-Token": token})
+    with HTTP.open(request, timeout=30) as response:
+        assert response.version == 11 and response.headers["Transfer-Encoding"] == "chunked"
+        assert response.headers["Connection"] == "close"
+        first = response.read1()
+        first_received = time.monotonic_ns()
+        rest = response.read()
+        completed = time.monotonic_ns()
+        assert first and rest
+        pcm = first + rest
+        duration, rms = check_pcm(pcm, response.headers)
+    replay, headers = send(url, path, token=token)
+    assert "Transfer-Encoding" not in headers and headers["Content-Length"] == str(len(pcm))
+    assert replay == pcm
+    first_ms = result["tts_first_ms"]
+    total_ms = first_ms + (completed - posted_at) // 1_000_000
+    assert first_ms < 0.8 * total_ms, (first_ms, total_ms)
+    assert (first_received - posted_at) * 2 < completed - posted_at
+    print(f"PASS progressive 16 kHz PCM and byte-identical replay: "
+          f"{first_ms} ms first sentence, {total_ms} ms full stream, {duration:.2f} s audio (RMS {rms})", flush=True)
 
 
 def test_visual(url, token, sid):
     result, _ = send(url, "/api/text", token=token, body={
         "device_id": DEVICE,
         "text": ("What is a right triangle? Compare it to something at home and draw a diagram. "
-                 "Add an Explore button with a question and a tappable detail with a fun fact."),
+                 "Add an Explore button with a question and a tappable detail with a fun fact. "
+                 "Explain it to a child in four complete spoken sentences."),
     })
+    posted_at = time.monotonic_ns()
     assert result["session_id"] == sid
     reply = result["reply"]
     assert 20 <= len(reply.split()) <= 75 and not re.search(r"[*_`#]|https?://|echoear-screen", reply)
@@ -177,13 +235,14 @@ def test_visual(url, token, sid):
     assert any(s["t"] == "line" for s in screen["shapes"])
     assert any(s["t"] == "btn" and s.get("ask") for s in screen["shapes"])
     assert any(s.get("tap") for s in screen["shapes"])
-    duration, rms = check_audio(url, token, result)
+    assert len(split_sentences(reply)) >= 2
+    check_stream(url, token, result, posted_at)
     model = {"providerID": "opencode", "id": "gemini-4-neon", "variant": "high"}
     messages = upstream("OpenCode", "GET", f"/api/session/{sid}/message?order=desc&limit=1&type=assistant")
     latest = messages["data"][0]
     assert latest["agent"] == "echoear" and latest["model"] == model, (latest["agent"], latest["model"])
     print("PASS interactive right-triangle diagram; assistant used echoear / Gemini 4 Neon high", flush=True)
-    print(f'Sample: {reply}\nSpeech: {duration:.2f} s, RMS {rms}, TTS {result["tts_ms"]} ms', flush=True)
+    print(f"Sample: {reply}", flush=True)
 
 
 def test_live(url, token, pcm):
@@ -236,7 +295,8 @@ def test_live(url, token, pcm):
     silence, _ = send(url, "/api/voice", body=bytes(2 * 16000 * 2), **voice)
     assert silence["transcript"] == silence["reply"] == silence["session_id"] == ""
     assert silence["opencode_ms"] == 0 and silence["screen"] is None
-    assert silence["audio_url"] is None and silence["audio_bytes"] == silence["tts_ms"] == 0
+    assert silence["audio_url"] is None and silence["audio_streaming"] is False
+    assert silence["audio_bytes"] == silence["tts_first_ms"] == silence["tts_ms"] == 0
     print("PASS reset and silent PCM skip OpenCode", flush=True)
 
 
@@ -249,6 +309,7 @@ def main():
     token = config.get("ECHOEAR_BRIDGE_TOKEN")
     if not token:
         parser.error("Missing ECHOEAR_BRIDGE_TOKEN")
+    test_sentence_split()
     test_screen_parser()
     with tempfile.TemporaryDirectory(prefix="echoear-bridge-test-") as temp:
         root = Path(temp)
