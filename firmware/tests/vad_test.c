@@ -27,10 +27,22 @@ int main(void)
     blocks(&short_noise, 527, 150);
     assert(vad_update(&short_noise, 150 * 150) == VAD_NO_SPEECH);
 
+    vad_t word = { 0 };
+    blocks(&word, 20, 150);
+    blocks(&word, 10, 900);
+    blocks(&word, 129, 150);
+    assert(vad_update(&word, 150 * 150) == VAD_SEND);
+
+    vad_t pop = { 0 };
+    blocks(&pop, 20, 150);
+    blocks(&pop, 9, 2500);
+    blocks(&pop, 129, 150);
+    assert(vad_update(&pop, 150 * 150) == VAD_NO_SPEECH);
+
     vad_t intermittent = { 0 };
     blocks(&intermittent, 20, 100);
     blocks(&intermittent, 30, 900);
-    blocks(&intermittent, 155, 100);
+    blocks(&intermittent, 90, 100);
     blocks(&intermittent, 20, 900);
     blocks(&intermittent, 129, 100);
     assert(vad_update(&intermittent, 100 * 100) == VAD_SEND);

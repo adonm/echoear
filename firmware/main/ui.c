@@ -4,47 +4,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "bridge_client.h"
 #include "bsp/esp_vocat.h"
 #include "cat_face.h"
 #include "conversation.h"
-#include "esp_log.h"
+#include "ui_widgets.h"
 
-enum { SCREEN_SIZE = 360, MAX_SHAPES = 24, CHAT_ACTION_Y = 293 };
+enum { CHAT_ACTION_Y = 293 };
 
-static lv_obj_t *network_label;
-static lv_obj_t *cat;
-static lv_obj_t *chat;
-static lv_obj_t *caption;
-static lv_obj_t *volume_pill;
-static lv_obj_t *volume_label;
-static lv_timer_t *volume_timer;
-static lv_obj_t *cat_text;
-static lv_obj_t *chat_cat;
-static lv_obj_t *chat_new;
-static lv_obj_t *chat_peer;
-static lv_obj_t *chat_peer_label;
-static lv_obj_t *scroll;
-static lv_obj_t *message_label;
-static lv_obj_t *talk;
-static lv_obj_t *talk_label;
-static lv_obj_t *reset;
-static lv_obj_t *diagram;
-static lv_obj_t *artwork;
-static lv_obj_t *diagram_title;
-static lv_obj_t *diagram_subtitle;
-static lv_obj_t *diagram_info;
-static lv_obj_t *diagram_talk;
-static lv_obj_t *diagram_talk_label;
-static lv_obj_t *diagram_back;
-static lv_obj_t *highlighted;
-static lv_timer_t *highlight_timer;
-static lv_timer_t *notice_timer;
-static lv_point_precise_t line_points[MAX_SHAPES][2];
+static lv_obj_t *cat, *cat_text, *caption, *reset;
+static lv_obj_t *chat, *chat_cat, *chat_new, *chat_peer, *chat_peer_label, *network_label, *scroll, *message_label, *talk;
+static lv_obj_t *diagram, *artwork, *diagram_title, *diagram_info, *diagram_subtitle, *diagram_talk, *diagram_back;
+static lv_obj_t *highlighted, *volume_pill, *volume_label;
+static lv_timer_t *volume_timer, *highlight_timer, *notice_timer;
 typedef struct { char *tap; char *ask; char *reply_to; } shape_action_t;
 static shape_action_t shape_actions[MAX_SHAPES];
-static char displayed_peer[BRIDGE_TARGET_CAP];
+static bridge_peer_t displayed_peer;
 static ui_action_cb_t dispatch;
 static ui_phase_t phase;
 static bool online;
@@ -68,7 +45,9 @@ static bool wake_locked(void)
 
 bool ui_wake(void)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return false;
+    }
     bool woke = wake_locked();
     bsp_display_unlock();
     return woke;
@@ -84,23 +63,6 @@ static void touch_started(lv_event_t *event)
     touch_woke = wake_locked();
 }
 
-static void set_enabled(lv_obj_t *button, bool enabled)
-{
-    if (enabled) {
-        lv_obj_remove_state(button, LV_STATE_DISABLED);
-    } else {
-        lv_obj_add_state(button, LV_STATE_DISABLED);
-    }
-}
-
-static void update_talk(lv_obj_t *button, lv_obj_t *text, bool enabled)
-{
-    const char *title = phase == UI_RECORDING ? "Send" : phase == UI_SPEAKING ? "Stop speech" : "Tap to Talk";
-    lv_label_set_text(text, title);
-    lv_obj_set_style_bg_color(button, lv_color_hex(phase == UI_RECORDING ? 0x9b3045 : 0x5444a3), LV_PART_MAIN);
-    set_enabled(button, enabled);
-}
-
 static bool can_intercom(void)
 {
     return online && audio_ready && (phase == UI_IDLE || phase == UI_SPEAKING);
@@ -108,30 +70,24 @@ static bool can_intercom(void)
 
 static void update_controls(void)
 {
-    const bool talk_enabled = phase == UI_RECORDING || phase == UI_SPEAKING ||
-                              (phase == UI_IDLE && online && audio_ready);
-    update_talk(talk, talk_label, talk_enabled);
-    update_talk(diagram_talk, diagram_talk_label, talk_enabled);
-    set_enabled(reset, phase == UI_IDLE && online);
-    set_enabled(chat_new, phase == UI_IDLE && online);
-    set_enabled(chat_peer, can_intercom());
-}
-
-static int utf8_prefix(const char *text, size_t max)
-{
-    size_t len = strnlen(text, max + 1);
-    if (len > max) {
-        len = max;
-        while (len && ((unsigned char)text[len] & 0xc0) == 0x80) {
-            --len;
-        }
+    bool recording = phase == UI_RECORDING, speaking = phase == UI_SPEAKING, ready = phase == UI_IDLE && online;
+    const char *title = recording ? "Send" : speaking ? "Stop speech" : "Tap to Talk";
+    lv_color_t color = lv_color_hex(recording ? 0x9b3045 : 0x5444a3);
+    lv_obj_t *talk_buttons[] = { talk, diagram_talk };
+    for (size_t i = 0; i < sizeof(talk_buttons) / sizeof(talk_buttons[0]); ++i) {
+        lv_obj_t *button = talk_buttons[i];
+        lv_label_set_text(lv_obj_get_child(button, 0), title);
+        lv_obj_set_style_bg_color(button, color, LV_PART_MAIN);
+        lv_obj_set_state(button, LV_STATE_DISABLED, !(recording || speaking || (ready && audio_ready)));
     }
-    return len;
+    lv_obj_set_state(reset, LV_STATE_DISABLED, !ready);
+    lv_obj_set_state(chat_new, LV_STATE_DISABLED, !ready);
+    lv_obj_set_state(chat_peer, LV_STATE_DISABLED, !can_intercom());
 }
 
 static void set_diagram_subtitle(const char *message)
 {
-    lv_label_set_text_fmt(diagram_subtitle, "%.*s", utf8_prefix(message, 256), message);
+    lv_label_set_text_fmt(diagram_subtitle, "%.*s", ui_utf8_prefix(message, 256), message);
     lv_obj_set_hidden(diagram_info, !message[0]);
 }
 
@@ -144,18 +100,12 @@ static void set_phase(ui_phase_t next, const char *message)
     phase = next;
     char greeting[24];
     if (!message) {
-        switch (phase) {
-        case UI_IDLE:
-            if (online && audio_ready) {
-                snprintf(greeting, sizeof(greeting), "Tap %s!", cat_face_name());
-                message = greeting;
-            } else {
-                message = audio_ready ? "Joining Wi-Fi..." : "Sound unavailable";
-            }
-            break;
-        case UI_RECORDING: message = "Listening!"; break;
-        case UI_BUSY: message = "Hmm..."; break;
-        case UI_SPEAKING: message = "Meow!"; break;
+        if (phase == UI_IDLE && online && audio_ready) {
+            snprintf(greeting, sizeof(greeting), "Tap %s!", cat_face_name());
+            message = greeting;
+        } else {
+            message = phase == UI_RECORDING ? "Listening!" : phase == UI_BUSY ? "Hmm..." :
+                      phase == UI_SPEAKING ? "Meow!" : audio_ready ? "Joining Wi-Fi..." : "Sound unavailable";
         }
     }
     lv_label_set_text(caption, message);
@@ -219,44 +169,50 @@ static void hide_screen(void)
     update_pages();
 }
 
-static bool start_intercom(const char *target)
+static void show_cat(void)
 {
-    if (!can_intercom() || conversation_start_intercom(target) != ESP_OK) {
+    text_view = false;
+    hide_screen();
+}
+
+static bool start_intercom(const char *target, const char *character)
+{
+    if (!can_intercom() || conversation_start_intercom(target, character) != ESP_OK) {
         return false;
     }
     char message[sizeof("To !") + BRIDGE_TARGET_CAP];
-    snprintf(message, sizeof(message), "To %s!", target);
+    snprintf(message, sizeof(message), "To %s!", character);
     wake_locked();
-    text_view = false;
-    hide_screen();
+    show_cat();
     set_phase(UI_RECORDING, message);
     return true;
 }
 
 static void talk_action(bool dismiss_diagram)
 {
+    ui_phase_t next;
     if (phase == UI_SPEAKING) {
         dispatch(UI_STOP_SPEAKING);
-    } else if (phase == UI_RECORDING) {
-        if (dispatch(UI_STOP_RECORDING)) {
-            if (dismiss_diagram) {
-                text_view = false;
-                hide_screen();
-            }
-            set_phase(UI_BUSY, NULL);
-        }
-    } else if (phase == UI_IDLE && online && audio_ready && dispatch(UI_START_RECORDING)) {
-        if (dismiss_diagram) {
-            text_view = false;
-            hide_screen();
-        }
-        set_phase(UI_RECORDING, NULL);
+        return;
     }
+    if (phase == UI_RECORDING && dispatch(UI_STOP_RECORDING)) {
+        next = UI_BUSY;
+    } else if (phase == UI_IDLE && online && audio_ready && dispatch(UI_START_RECORDING)) {
+        next = UI_RECORDING;
+    } else {
+        return;
+    }
+    if (dismiss_diagram) {
+        show_cat();
+    }
+    set_phase(next, NULL);
 }
 
 void ui_pet(void)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     if (!wake_locked()) {
         talk_action(false);
     }
@@ -267,13 +223,12 @@ static void on_click(lv_event_t *event)
 {
     lv_obj_t *button = lv_event_get_target(event);
     if (button == diagram_back) {
-        text_view = false;
-        hide_screen();
+        show_cat();
     } else if (button == cat_text || button == chat_cat) {
         text_view = button == cat_text;
         update_pages();
     } else if (button == chat_peer) {
-        start_intercom(displayed_peer);
+        start_intercom(displayed_peer.id, displayed_peer.character);
     } else if (button == reset || button == chat_new) {
         if (dispatch(UI_NEW_CHAT)) {
             set_phase(UI_BUSY, "Freshening up...");
@@ -283,56 +238,37 @@ static void on_click(lv_event_t *event)
     }
 }
 
-static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
+static lv_obj_t *pill(lv_obj_t *parent, int width, int x, int y, uint32_t color,
+                     const lv_font_t *font, const char *title)
 {
-    lv_obj_t *obj = lv_label_create(parent);
-    lv_obj_set_style_text_font(obj, font, 0);
-    lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
-    return obj;
-}
-
-static lv_obj_t *pill(lv_obj_t *parent, int width, int height, int y, uint32_t color)
-{
-    lv_obj_t *obj = lv_button_create(parent);
-    lv_obj_set_size(obj, width, height);
-    lv_obj_align(obj, LV_ALIGN_TOP_MID, 0, y);
+    lv_obj_t *obj = parent ? lv_button_create(parent) : NULL;
+    if (!obj) {
+        return NULL;
+    }
+    lv_obj_t *text = ui_label(obj, font, title ? CAT_INK : 0xf1f6fb);
+    if (!text || !lv_obj_add_event_cb(obj, on_click, LV_EVENT_CLICKED, NULL)) {
+        lv_obj_delete(obj);
+        return NULL;
+    }
+    lv_obj_set_size(obj, width, title ? 30 : 36);
+    lv_obj_align(obj, LV_ALIGN_TOP_MID, x, y);
     lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_set_style_bg_color(obj, lv_color_hex(color), 0);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0x252b34), LV_STATE_DISABLED);
-    lv_obj_add_event_cb(obj, on_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(title ? 0xd7ccc9 : 0x252b34), LV_STATE_DISABLED);
+    if (title) {
+        ui_ink_border(obj);
+        lv_obj_set_style_bg_color(obj, lv_color_hex(0xffcb9a), LV_STATE_PRESSED);
+        lv_label_set_text(text, title);
+    }
+    lv_obj_center(text);
     return obj;
 }
 
 static lv_obj_t *named_pill(lv_obj_t *parent, const char *title, int x, int y, uint32_t color)
 {
-    lv_obj_t *obj = pill(parent, 68, 30, y, color);
-    lv_obj_align(obj, LV_ALIGN_TOP_MID, x, y);
-    lv_obj_set_style_border_width(obj, 3, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(CAT_INK), 0);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0xd7ccc9), LV_STATE_DISABLED);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0xffcb9a), LV_STATE_PRESSED);
-    lv_obj_t *text = label(obj, &lv_font_montserrat_16, CAT_INK);
-    lv_label_set_text(text, title);
-    lv_obj_center(text);
-    return obj;
-}
-
-static void decorative(lv_obj_t *obj)
-{
-    lv_obj_set_scrollable(obj, false);
-    lv_obj_set_clickable(obj, false);
-}
-
-static lv_obj_t *plain_box(lv_obj_t *parent, int x, int y, int width, int height)
-{
-    lv_obj_t *obj = lv_obj_create(parent);
-    lv_obj_remove_style_all(obj);
-    decorative(obj);
-    lv_obj_set_size(obj, width, height);
-    lv_obj_set_pos(obj, x, y);
-    return obj;
+    return pill(parent, 68, x, y, color, &lv_font_montserrat_16, title);
 }
 
 static void hide_volume(lv_timer_t *timer)
@@ -341,23 +277,11 @@ static void hide_volume(lv_timer_t *timer)
     lv_timer_pause(timer);
 }
 
-static void init_volume(lv_obj_t *screen)
-{
-    volume_pill = plain_box(screen, 103, 214, 154, 34);
-    lv_obj_set_style_radius(volume_pill, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(volume_pill, lv_color_hex(cat_face_accent()), 0);
-    lv_obj_set_style_bg_opa(volume_pill, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(volume_pill, 3, 0);
-    lv_obj_set_style_border_color(volume_pill, lv_color_hex(CAT_INK), 0);
-    volume_label = label(volume_pill, &lv_font_montserrat_16, CAT_INK);
-    lv_obj_center(volume_label);
-    volume_timer = lv_timer_create(hide_volume, 1500, NULL);
-    hide_volume(volume_timer);
-}
-
 void ui_show_volume(int level)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     wake_locked();
     lv_label_set_text_fmt(volume_label, "Volume %d%%", level);
     lv_obj_set_hidden(volume_pill, false);
@@ -368,172 +292,45 @@ void ui_show_volume(int level)
 
 void ui_set_battery(int pct, bool charging)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     cat_face_set_battery(pct, charging);
     bsp_display_unlock();
 }
 
-static lv_obj_t *diagram_heading(const lv_font_t *font, int y, int width)
+static bool init_diagram(lv_obj_t *screen)
 {
-    lv_obj_t *obj = label(diagram, font, 0xf8fafc);
-    lv_obj_set_size(obj, width, 29);
-    lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(obj, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_align(obj, LV_ALIGN_TOP_MID, 0, y);
-    return obj;
-}
-
-static void init_diagram(lv_obj_t *screen)
-{
-    diagram = plain_box(screen, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
+    diagram = ui_box(screen, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
+    artwork = ui_box(diagram, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
+    diagram_title = ui_label(diagram, &lv_font_montserrat_24, 0xf8fafc);
+    diagram_info = ui_box(diagram, 65, 247, 230, 36);
+    diagram_subtitle = ui_label(diagram_info, &lv_font_montserrat_16, 0xfff3fd);
+    diagram_talk = pill(diagram, 142, 0, 286, 0x5444a3, &lv_font_montserrat_16, NULL);
+    diagram_back = named_pill(diagram, "Cat", 0, 324, 0xfffaee);
+    if (!artwork || !diagram_title || !diagram_subtitle || !diagram_talk || !diagram_back) {
+        return false;
+    }
     lv_obj_set_clickable(diagram, true);
     lv_obj_set_style_bg_opa(diagram, LV_OPA_COVER, 0);
-    artwork = plain_box(diagram, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
-    diagram_title = diagram_heading(&lv_font_montserrat_24, 26, 180);
-    diagram_info = plain_box(diagram, 65, 247, 230, 36);
+    ui_fit_label(diagram_title, 180, 29);
+    lv_obj_align(diagram_title, LV_ALIGN_TOP_MID, 0, 26);
     lv_obj_set_style_radius(diagram_info, 15, 0);
     lv_obj_set_style_bg_color(diagram_info, lv_color_hex(0x1b1630), 0);
     lv_obj_set_style_bg_opa(diagram_info, LV_OPA_90, 0);
-    diagram_subtitle = label(diagram_info, &lv_font_montserrat_16, 0xfff3fd);
-    lv_obj_set_size(diagram_subtitle, 216, 34);
-    lv_obj_set_style_text_align(diagram_subtitle, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(diagram_subtitle, LV_LABEL_LONG_MODE_DOTS);
+    ui_fit_label(diagram_subtitle, 216, 34);
     lv_obj_center(diagram_subtitle);
-
-    diagram_talk = pill(diagram, 142, 36, 286, 0x5444a3);
-    diagram_talk_label = label(diagram_talk, &lv_font_montserrat_16, 0xf1f6fb);
-    lv_obj_center(diagram_talk_label);
-    diagram_back = named_pill(diagram, "Cat", 0, 324, 0xfffaee);
-    highlight_timer = lv_timer_create(clear_highlight, 200, NULL);
-    hide_screen();
-}
-
-static const char *field_text(const cJSON *obj, const char *key)
-{
-    const cJSON *value = cJSON_GetObjectItemCaseSensitive(obj, key);
-    return cJSON_IsString(value) ? value->valuestring : "";
-}
-
-static int field_num(const cJSON *obj, const char *key, int min, int max, int fallback)
-{
-    const cJSON *value = cJSON_GetObjectItemCaseSensitive(obj, key);
-    return cJSON_IsNumber(value) && value->valuedouble >= min && value->valuedouble <= max
-           ? (int)value->valuedouble : fallback;
-}
-
-static lv_color_t field_color(const cJSON *obj, const char *key, uint32_t fallback)
-{
-    const char *text = field_text(obj, key);
-    if (text[0] != '#' || strlen(text) != 7) {
-        return lv_color_hex(fallback);
-    }
-    uint32_t color = 0;
-    for (int i = 1; i <= 6; ++i) {
-        int digit = text[i] >= '0' && text[i] <= '9' ? text[i] - '0'
-                  : text[i] >= 'a' && text[i] <= 'f' ? text[i] - 'a' + 10
-                  : text[i] >= 'A' && text[i] <= 'F' ? text[i] - 'A' + 10 : -1;
-        if (digit < 0) {
-            return lv_color_hex(fallback);
-        }
-        color = (color << 4) | digit;
-    }
-    return lv_color_hex(color);
-}
-
-static lv_obj_t *draw_shape(const cJSON *shape, unsigned index)
-{
-    const char *type = field_text(shape, "t");
-    lv_color_t color = field_color(shape, "c", 0xf8fafc);
-    int x = field_num(shape, "x", 0, SCREEN_SIZE - 1, -1);
-    int y = field_num(shape, "y", 0, SCREEN_SIZE - 1, -1);
-    int radius = field_num(shape, "r", 1, SCREEN_SIZE / 2, 0);
-    int stroke = field_num(shape, "w", 1, 24, 3);
-    if (strcmp(type, "line") == 0) {
-        int x1 = field_num(shape, "x1", 0, SCREEN_SIZE - 1, -1);
-        int y1 = field_num(shape, "y1", 0, SCREEN_SIZE - 1, -1);
-        int x2 = field_num(shape, "x2", 0, SCREEN_SIZE - 1, -1);
-        int y2 = field_num(shape, "y2", 0, SCREEN_SIZE - 1, -1);
-        if (x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0) {
-            return NULL;
-        }
-        int left = LV_MIN(x1, x2);
-        int top = LV_MIN(y1, y2);
-        lv_point_precise_t *points = line_points[index];
-        points[0] = (lv_point_precise_t){ x1 - left, y1 - top };
-        points[1] = (lv_point_precise_t){ x2 - left, y2 - top };
-        lv_obj_t *line = lv_line_create(artwork);
-        lv_obj_remove_style_all(line);
-        decorative(line);
-        lv_obj_set_size(line, abs(x2 - x1) + 1, abs(y2 - y1) + 1);
-        lv_obj_set_pos(line, left, top);
-        lv_line_set_points(line, points, 2);
-        lv_obj_set_style_line_color(line, color, 0);
-        lv_obj_set_style_line_width(line, stroke, 0);
-        lv_obj_set_style_line_rounded(line, true, 0);
-        return line;
-    }
-    if (x < 0 || y < 0) {
-        return NULL;
-    }
-    if (strcmp(type, "text") == 0) {
-        lv_obj_t *text = label(artwork, &lv_font_montserrat_16, 0xf8fafc);
-        decorative(text);
-        const char *value = field_text(shape, "s");
-        lv_label_set_text_fmt(text, "%.*s", utf8_prefix(value, 144), value);
-        lv_obj_set_style_text_color(text, color, 0);
-        lv_obj_align(text, LV_ALIGN_CENTER, x - SCREEN_SIZE / 2, y - SCREEN_SIZE / 2);
-        return text;
-    } else if (strcmp(type, "arc") == 0 && radius) {
-        lv_obj_t *arc = lv_arc_create(artwork);
-        lv_obj_remove_style_all(arc);
-        decorative(arc);
-        lv_obj_set_size(arc, 2 * radius, 2 * radius);
-        lv_obj_set_pos(arc, x - radius, y - radius);
-        lv_arc_set_rotation(arc, 0);
-        lv_arc_set_bg_angles(arc, 0, 360);
-        lv_arc_set_angles(arc, field_num(shape, "a1", 0, 360, 0), field_num(shape, "a2", 0, 360, 360));
-        lv_obj_set_style_arc_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_color(arc, color, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(arc, stroke < radius ? stroke : radius, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_rounded(arc, true, LV_PART_INDICATOR);
-        return arc;
-    } else if (strcmp(type, "circle") == 0 || strcmp(type, "rect") == 0 || strcmp(type, "btn") == 0) {
-        const bool circle = type[0] == 'c';
-        const bool button = type[0] == 'b';
-        int width = circle ? 2 * radius : field_num(shape, "w", 1, SCREEN_SIZE, 0);
-        int height = circle ? 2 * radius : field_num(shape, "h", 1, SCREEN_SIZE, 0);
-        if (!width || !height) {
-            return NULL;
-        }
-        lv_obj_t *obj = plain_box(artwork, circle ? x - radius : x, circle ? y - radius : y, width, height);
-        lv_obj_set_style_radius(obj, circle ? LV_RADIUS_CIRCLE : button ? field_num(shape, "r", 0, 180, 14) : radius, 0);
-        if (button || cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(shape, "fill"))) {
-            lv_obj_set_style_bg_color(obj, color, 0);
-            lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-        } else {
-            lv_obj_set_style_border_color(obj, color, 0);
-            lv_obj_set_style_border_width(obj, circle ? stroke : 2, 0);
-        }
-        if (button) {
-            lv_obj_t *text = label(obj, &lv_font_montserrat_16, lv_color_brightness(color) > 140 ? 0x251c3b : 0xfffaff);
-            lv_obj_set_size(text, width > 8 ? width - 8 : width, LV_MIN(height, 20));
-            lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
-            lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_DOTS);
-            const char *value = field_text(shape, "s");
-            lv_label_set_text_fmt(text, "%.*s", utf8_prefix(value, 144), value);
-            lv_obj_center(text);
-        }
-        return obj;
-    }
-    return NULL;
+    return true;
 }
 
 static void on_shape_tap(lv_event_t *event)
 {
     shape_action_t *action = lv_event_get_user_data(event);
     if (action->reply_to) {
-        if (!start_intercom(action->reply_to)) {
+        bool sibling = displayed_peer.id[0] && (!strcasecmp(action->reply_to, displayed_peer.character) ||
+                                                !strcasecmp(action->reply_to, displayed_peer.id));
+        if (!start_intercom(sibling ? displayed_peer.id : action->reply_to,
+                            sibling ? displayed_peer.character : action->reply_to)) {
             set_diagram_subtitle(!online ? "Waiting for Wi-Fi" : !audio_ready ? "Sound unavailable" :
                                 "Busy. Try again!");
         }
@@ -544,37 +341,36 @@ static void on_shape_tap(lv_event_t *event)
     lv_obj_add_state(highlighted, LV_STATE_USER_1);
     lv_timer_reset(highlight_timer);
     lv_timer_resume(highlight_timer);
-    if (action->ask && online) {
-        if (conversation_ask(action->ask) == ESP_OK) {
-            diagram_asking = true;
-            if (action->tap) {
-                lv_label_set_text_fmt(diagram_subtitle, "%s\nAsking...", action->tap);
-                lv_obj_set_hidden(diagram_info, false);
-            } else {
-                set_diagram_subtitle("Asking...");
-            }
-            return;
+    bool can_ask = action->ask && online;
+    if (can_ask && conversation_ask(action->ask) == ESP_OK) {
+        diagram_asking = true;
+        if (action->tap) {
+            lv_label_set_text_fmt(diagram_subtitle, "%s\nAsking...", action->tap);
+            lv_obj_set_hidden(diagram_info, false);
+        } else {
+            set_diagram_subtitle("Asking...");
         }
-        set_diagram_subtitle(action->tap ? action->tap : "Busy. Try again!");
-    } else {
-        set_diagram_subtitle(action->tap ? action->tap : "Waiting for Wi-Fi");
+        return;
     }
+    set_diagram_subtitle(action->tap ? action->tap : can_ask ? "Busy. Try again!" : "Waiting for Wi-Fi");
     conversation_chime();
 }
 
-static void add_shape_action(lv_obj_t *obj, const cJSON *shape, unsigned index)
+static void attach_shape_action(lv_obj_t *obj, const cJSON *item)
 {
-    const char *tap = field_text(shape, "tap");
-    const char *ask = field_text(shape, "ask");
-    shape_action_t *action = &shape_actions[index];
+    const char *tap = ui_field_text(item, "tap"), *ask = ui_field_text(item, "ask");
+    shape_action_t *action = &shape_actions[lv_obj_get_index(obj)];
     action->tap = *tap && strnlen(tap, 257) <= 256 ? strdup(tap) : NULL;
     action->ask = *ask && strnlen(ask, CONVERSATION_QUESTION_MAX + 1) <= CONVERSATION_QUESTION_MAX
                   ? strdup(ask) : NULL;
-    const char *reply_to = field_text(shape, "reply_to");
-    if (strcmp(field_text(shape, "t"), "btn") == 0 && bridge_client_valid_target(reply_to)) {
+    const char *reply_to = ui_field_text(item, "reply_to");
+    if (!strcmp(ui_field_text(item, "t"), "btn") && bridge_client_valid_target(reply_to)) {
         action->reply_to = strdup(reply_to);
     }
     if (!action->tap && !action->ask && !action->reply_to) {
+        return;
+    }
+    if (!lv_obj_add_event_cb(obj, on_shape_tap, LV_EVENT_CLICKED, action)) {
         return;
     }
     lv_obj_set_clickable(obj, true);
@@ -586,7 +382,6 @@ static void add_shape_action(lv_obj_t *obj, const cJSON *shape, unsigned index)
     lv_obj_set_style_outline_color(obj, lv_color_hex(0xffed8a), LV_STATE_USER_1);
     lv_obj_set_style_outline_width(obj, 4, LV_STATE_USER_1);
     lv_obj_set_style_outline_opa(obj, LV_OPA_COVER, LV_STATE_USER_1);
-    lv_obj_add_event_cb(obj, on_shape_tap, LV_EVENT_CLICKED, action);
 }
 
 static esp_err_t show_screen(const cJSON *screen)
@@ -598,63 +393,59 @@ static esp_err_t show_screen(const cJSON *screen)
     }
     wake_locked();
     hide_screen();
-    lv_obj_set_style_bg_color(diagram, field_color(screen, "bg", 0x0b1020), 0);
-    const char *title = field_text(screen, "title");
-    lv_label_set_text_fmt(diagram_title, "%.*s", utf8_prefix(title, 100), title);
-    set_diagram_subtitle(field_text(screen, "subtitle"));
-    // Line widgets borrow their points; the old widgets were deleted before reusing these slots.
+    lv_obj_set_style_bg_color(diagram, lv_color_hex(ui_field_color(screen, "bg", 0x0b1020)), 0);
+    const char *title = ui_field_text(screen, "title");
+    lv_label_set_text_fmt(diagram_title, "%.*s", ui_utf8_prefix(title, 100), title);
+    set_diagram_subtitle(ui_field_text(screen, "subtitle"));
     unsigned index = 0;
     const cJSON *shape;
     cJSON_ArrayForEach(shape, shapes) {
-        lv_obj_t *obj = draw_shape(shape, index);
+        lv_obj_t *obj = ui_draw_shape(artwork, shape, index++);
         if (obj) {
-            add_shape_action(obj, shape, index);
+            attach_shape_action(obj, shape);
         }
-        ++index;
     }
     lv_obj_set_hidden(diagram, false);
     update_pages();
     return ESP_OK;
 }
 
-esp_err_t ui_init(const char *device_suffix, const uint8_t mac[6], ui_action_cb_t action_cb)
+static bool init_cat(lv_obj_t *screen, const uint8_t mac[6])
 {
-    lv_display_t *display = bsp_display_start();
-    if (!display || !bsp_display_get_input_dev() || !bsp_display_lock(0)) {
-        return ESP_FAIL;
+    cat = ui_box(screen, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
+    if (!cat || !lv_obj_add_event_cb(cat, on_click, LV_EVENT_CLICKED, NULL) || !cat_face_init(cat, mac)) {
+        return false;
     }
-    dispatch = action_cb;
-    lv_obj_t *screen = lv_display_get_screen_active(display);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x16132b), 0);
-    lv_obj_set_scrollable(screen, false);
-
-    cat = plain_box(screen, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
     lv_obj_set_clickable(cat, true);
-    lv_obj_add_event_cb(cat, on_click, LV_EVENT_CLICKED, NULL);
-    cat_face_init(cat, mac);
-    lv_obj_t *caption_pill = plain_box(cat, 78, 244, 204, 34);
-    lv_obj_set_style_radius(caption_pill, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(caption_pill, lv_color_hex(0xfffaee), 0);
-    lv_obj_set_style_bg_opa(caption_pill, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(caption_pill, 3, 0);
-    lv_obj_set_style_border_color(caption_pill, lv_color_hex(CAT_INK), 0);
-    caption = label(caption_pill, &lv_font_montserrat_16, CAT_INK);
-    lv_obj_set_size(caption, 190, 20);
-    lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(caption, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_center(caption);
+    caption = ui_label(ui_comic_box(cat, 78, 244, 204, 34, 0xfffaee), &lv_font_montserrat_16, CAT_INK);
     cat_text = named_pill(cat, "Text", -39, 289, 0xfffaee);
     reset = named_pill(cat, "New", 39, 289, cat_face_accent());
+    if (!caption || !cat_text || !reset) {
+        return false;
+    }
+    ui_fit_label(caption, 190, 20);
+    lv_obj_center(caption);
+    return true;
+}
 
-    chat = plain_box(screen, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
-    lv_obj_t *title = label(chat, &lv_font_montserrat_24, 0xffe8fb);
+static bool init_chat(lv_obj_t *screen, const char *device_suffix)
+{
+    chat = ui_box(screen, 0, 0, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_t *title = ui_label(chat, &lv_font_montserrat_24, 0xffe8fb);
+    network_label = ui_label(chat, &lv_font_montserrat_16, 0xc2b4ee);
+    scroll = chat ? lv_obj_create(chat) : NULL;
+    message_label = ui_label(scroll, &lv_font_montserrat_16, 0xe2edf6);
+    talk = pill(chat, 166, 0, 252, 0x5444a3, &lv_font_montserrat_20, NULL);
+    chat_cat = named_pill(chat, "Cat", -39, CHAT_ACTION_Y, 0xfffaee);
+    chat_new = named_pill(chat, "New", 39, CHAT_ACTION_Y, cat_face_accent());
+    chat_peer = pill(chat, 90, 0, CHAT_ACTION_Y, cat_face_accent(), &lv_font_montserrat_16, "");
+    if (!title || !network_label || !message_label || !talk || !chat_cat || !chat_new || !chat_peer) {
+        return false;
+    }
     lv_label_set_text_fmt(title, "%s (%s)", cat_face_name(), device_suffix);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 31);
-    network_label = label(chat, &lv_font_montserrat_16, 0xc2b4ee);
     lv_label_set_text(network_label, "Connecting...");
     lv_obj_align(network_label, LV_ALIGN_TOP_MID, 0, 61);
-
-    scroll = lv_obj_create(chat);
     lv_obj_set_size(scroll, 232, 158);
     lv_obj_align(scroll, LV_ALIGN_TOP_MID, 0, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_hex(0x292042), 0);
@@ -663,42 +454,74 @@ esp_err_t ui_init(const char *device_suffix, const uint8_t mac[6], ui_action_cb_
     lv_obj_set_style_pad_all(scroll, 13, 0);
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_AUTO);
-    message_label = label(scroll, &lv_font_montserrat_16, 0xe2edf6);
     lv_obj_set_width(message_label, lv_pct(100));
     lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP);
 
     lv_label_set_text(message_label, "Our chat will appear here.");
-    talk = pill(chat, 166, 36, 252, 0x5444a3);
-    talk_label = label(talk, &lv_font_montserrat_20, 0xf1f6fb);
-    lv_obj_center(talk_label);
-    chat_cat = named_pill(chat, "Cat", -39, CHAT_ACTION_Y, 0xfffaee);
-    chat_new = named_pill(chat, "New", 39, CHAT_ACTION_Y, cat_face_accent());
-    chat_peer = named_pill(chat, "", 0, CHAT_ACTION_Y, cat_face_accent());
-    lv_obj_set_width(chat_peer, 90);
     chat_peer_label = lv_obj_get_child(chat_peer, 0);
-    lv_obj_set_width(chat_peer_label, 82);
-    lv_obj_set_style_text_align(chat_peer_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(chat_peer_label, LV_LABEL_LONG_MODE_DOTS);
+    ui_fit_label(chat_peer_label, 82, LV_SIZE_CONTENT);
     lv_obj_set_hidden(chat_peer, true);
-    init_diagram(screen);
-    init_volume(screen);
-    lv_indev_add_event_cb(bsp_display_get_input_dev(), touch_started, LV_EVENT_PRESSED, NULL);
-    last_activity = lv_tick_get();
-    lv_timer_create(idle_check, 500, NULL);
+    return true;
+}
+
+esp_err_t ui_init(const char *device_suffix, const uint8_t mac[6], ui_action_cb_t action_cb)
+{
+    lv_display_t *display = bsp_display_start();
+    lv_indev_t *input = bsp_display_get_input_dev();
+    if (!display || !input || !bsp_display_lock(0)) {
+        return ESP_FAIL;
+    }
+    dispatch = action_cb;
+    lv_obj_t *screen = lv_display_get_screen_active(display);
+    lv_timer_t *idle_timer = NULL;
+    if (!screen || !init_cat(screen, mac) || !init_chat(screen, device_suffix) || !init_diagram(screen)) {
+        goto fail;
+    }
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x16132b), 0);
+    lv_obj_set_scrollable(screen, false);
+    volume_pill = ui_comic_box(screen, 103, 214, 154, 34, cat_face_accent());
+    volume_label = ui_label(volume_pill, &lv_font_montserrat_16, CAT_INK);
+    if (!volume_label) {
+        goto fail;
+    }
+    lv_obj_center(volume_label);
+    volume_timer = lv_timer_create(hide_volume, 1500, NULL);
+    highlight_timer = lv_timer_create(clear_highlight, 200, NULL);
     notice_timer = lv_timer_create(restore_caption, 2200, NULL);
+    idle_timer = lv_timer_create(idle_check, 500, NULL);
+    if (!volume_timer || !highlight_timer || !notice_timer || !idle_timer ||
+        !lv_indev_add_event_cb(input, touch_started, LV_EVENT_PRESSED, NULL)) {
+        goto fail;
+    }
+    hide_volume(volume_timer);
+    hide_screen();
+    last_activity = lv_tick_get();
     set_phase(UI_IDLE, "Starting…");
     bsp_display_unlock();
+    return bsp_display_brightness_set(85);
 
-    esp_err_t err = bsp_display_brightness_set(85);
-    if (err == ESP_OK) {
-        ESP_LOGI("ui", "Display and touch initialized (%dx%d)", BSP_LCD_H_RES, BSP_LCD_V_RES);
+fail:;
+    lv_timer_t *timers[] = { idle_timer, notice_timer, highlight_timer, volume_timer };
+    lv_obj_t *views[] = { volume_pill, diagram, chat, cat };
+    for (size_t i = 0; i < sizeof(timers) / sizeof(timers[0]); ++i) {
+        if (timers[i]) {
+            lv_timer_delete(timers[i]);
+        }
     }
-    return err;
+    for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) {
+        if (views[i]) {
+            lv_obj_delete(views[i]);
+        }
+    }
+    bsp_display_unlock();
+    return ESP_ERR_NO_MEM;
 }
 
 void ui_set_network(bool connected, const char *ip)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     online = connected;
     lv_label_set_text(network_label, connected ? ip : "Connecting...");
     if (phase == UI_IDLE) {
@@ -711,47 +534,67 @@ void ui_set_network(bool connected, const char *ip)
 
 void ui_set_audio_ready(bool ready)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     audio_ready = ready;
     set_phase(UI_IDLE, NULL);
     bsp_display_unlock();
 }
 
-void ui_set_peer(const char *name)
+void ui_set_peer(const char *id, const char *character)
 {
-    bsp_display_lock(0);
-    snprintf(displayed_peer, sizeof(displayed_peer), "%s", name);
-    bool known = displayed_peer[0] != '\0';
-    lv_label_set_text_fmt(chat_peer_label, "Msg %s", displayed_peer);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
+    snprintf(displayed_peer.id, sizeof(displayed_peer.id), "%s", id);
+    snprintf(displayed_peer.character, sizeof(displayed_peer.character), "%s", character);
+    bool known = displayed_peer.id[0] != '\0';
+    lv_label_set_text_fmt(chat_peer_label, "Msg %s", displayed_peer.character);
     lv_obj_set_hidden(chat_peer, !known);
     lv_obj_align(chat_cat, LV_ALIGN_TOP_MID, known ? -81 : -39, CHAT_ACTION_Y);
     lv_obj_align(chat_new, LV_ALIGN_TOP_MID, known ? 81 : 39, CHAT_ACTION_Y);
     bsp_display_unlock();
 }
 
-void ui_show_intercom_sent(const char *target)
+void ui_finish_turn(bool (*mark_idle)(void), const char *message, const char *sent_to)
 {
-    char message[sizeof("Sent to !") + BRIDGE_TARGET_CAP];
-    snprintf(message, sizeof(message), "Sent to %s!", target);
-    bsp_display_lock(0);
-    set_phase(UI_IDLE, message);
-    lv_timer_reset(notice_timer);
-    lv_timer_resume(notice_timer);
+    if (!bsp_display_lock(0)) {
+        mark_idle();
+        return;
+    }
+    // Input callbacks use the same lock, so they cannot start a new turn before this caption is applied.
+    if (mark_idle()) {
+        char sent[sizeof("Sent to !") + BRIDGE_TARGET_CAP];
+        if (sent_to) {
+            snprintf(sent, sizeof(sent), "Sent to %s!", sent_to);
+            message = sent;
+        }
+        set_phase(UI_IDLE, message);
+        if (sent_to) {
+            lv_timer_reset(notice_timer);
+            lv_timer_resume(notice_timer);
+        }
+    }
     bsp_display_unlock();
 }
 
 void ui_set_phase(ui_phase_t next, const char *message)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     set_phase(next, message);
     bsp_display_unlock();
 }
 
 void ui_show_reply(const char *transcript, const char *reply, const cJSON *screen)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     lv_label_set_text_fmt(message_label, "You: %.*s\n\nAI: %.*s",
-                          utf8_prefix(transcript, 1024), transcript, utf8_prefix(reply, 4096), reply);
+                          ui_utf8_prefix(transcript, 1024), transcript, ui_utf8_prefix(reply, 4096), reply);
     lv_obj_scroll_to_y(scroll, 0, LV_ANIM_OFF);
     if (show_screen(screen) != ESP_OK) {
         hide_screen();
@@ -761,7 +604,9 @@ void ui_show_reply(const char *transcript, const char *reply, const cJSON *scree
 
 void ui_clear_reply(void)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return;
+    }
     lv_label_set_text(message_label, "Our chat will appear here.");
     lv_obj_scroll_to_y(scroll, 0, LV_ANIM_OFF);
     hide_screen();
@@ -770,7 +615,9 @@ void ui_clear_reply(void)
 
 esp_err_t ui_show_screen(const cJSON *screen_json)
 {
-    bsp_display_lock(0);
+    if (!bsp_display_lock(0)) {
+        return ESP_ERR_TIMEOUT;
+    }
     esp_err_t err = show_screen(screen_json);
     bsp_display_unlock();
     return err;
@@ -778,8 +625,9 @@ esp_err_t ui_show_screen(const cJSON *screen_json)
 
 void ui_hide_screen(void)
 {
-    bsp_display_lock(0);
-    text_view = false;
-    hide_screen();
+    if (!bsp_display_lock(0)) {
+        return;
+    }
+    show_cat();
     bsp_display_unlock();
 }

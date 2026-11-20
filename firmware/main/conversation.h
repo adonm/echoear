@@ -10,7 +10,7 @@ enum { CONVERSATION_QUESTION_MAX = 512 };
 // Ownership of the upload transfers only on success.
 esp_err_t conversation_submit_speech(int16_t *pcm, size_t samples);
 esp_err_t conversation_ask(const char *question);
-esp_err_t conversation_start_intercom(const char *target);
+esp_err_t conversation_start_intercom(const char *target, const char *character);
 void conversation_chime(void);
 
 // Called only by the conversation worker, with borrowed PCM.

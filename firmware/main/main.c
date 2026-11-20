@@ -41,9 +41,7 @@ static esp_err_t submit(job_t job, bool followup)
         }
         audio_stop_playback();
     }
-    // Only the idle reservation or one follow-up can enqueue a job.
-    BaseType_t sent = xQueueSend(actions, &job, 0);
-    ESP_ERROR_CHECK(sent == pdPASS ? ESP_OK : ESP_ERR_INVALID_STATE);
+    ESP_ERROR_CHECK(xQueueSend(actions, &job, 0) == pdPASS ? ESP_OK : ESP_ERR_INVALID_STATE);
     return ESP_OK;
 }
 
@@ -72,18 +70,20 @@ esp_err_t conversation_ask(const char *question)
     return err;
 }
 
-esp_err_t conversation_start_intercom(const char *target)
+esp_err_t conversation_start_intercom(const char *target, const char *character)
 {
     if (!audio_ready) {
         return ESP_ERR_NOT_SUPPORTED;
     }
-    if (!bridge_client_valid_target(target)) {
+    if (!bridge_client_valid_target(target) || !bridge_client_valid_target(character)) {
         return ESP_ERR_INVALID_ARG;
     }
-    char *copy = strdup(target);
+    bridge_peer_t *copy = malloc(sizeof(*copy));
     if (!copy) {
         return ESP_ERR_NO_MEM;
     }
+    strcpy(copy->id, target);
+    strcpy(copy->character, character);
     esp_err_t err = submit((job_t){ .kind = JOB_RECORD, .data = copy }, true);
     if (err != ESP_OK) {
         free(copy);
@@ -161,7 +161,7 @@ static void on_wifi(bool connected, const char *ip)
     }
 }
 
-static const char *record_and_send(const char *target, char error[128])
+static const char *record_and_send(const bridge_peer_t *target, char error[128])
 {
     audio_tone(target ? AUDIO_HAPPY_TONE : AUDIO_START_TONE);
     const int16_t *pcm;
@@ -183,9 +183,15 @@ static const char *record_and_send(const char *target, char error[128])
     }
     audio_tone(AUDIO_THINK_TONE);
     if (target) {
-        return bridge_client_send_intercom(target, pcm, bytes / sizeof(*pcm)) == ESP_OK ? NULL : "Couldn't send";
+        return bridge_client_send_intercom(target->id, pcm, bytes / sizeof(*pcm)) == ESP_OK ? NULL : "Couldn't send";
     }
     return bridge_voice(pcm, bytes, error, 128) == ESP_OK ? NULL : error;
+}
+
+static bool mark_idle(void)
+{
+    work_mode_t busy = WORK_BUSY;
+    return atomic_compare_exchange_strong(&mode, &busy, WORK_IDLE);
 }
 
 static void conversation_task(void *arg)
@@ -229,14 +235,8 @@ static void conversation_task(void *arg)
             audio_tone(AUDIO_HAPPY_TONE);
             break;
         }
-        work_mode_t busy = WORK_BUSY;
-        if (atomic_compare_exchange_strong(&mode, &busy, WORK_IDLE)) {
-            if (job.kind == JOB_RECORD && job.data && !caption) {
-                ui_show_intercom_sent(job.data);
-            } else {
-                ui_set_phase(UI_IDLE, caption);
-            }
-        }
+        const bridge_peer_t *target = job.kind == JOB_RECORD ? job.data : NULL;
+        ui_finish_turn(mark_idle, caption, target && !caption ? target->character : NULL);
         free(job.data);
     }
 }
@@ -268,5 +268,5 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(wifi_start(on_wifi));
     ESP_ERROR_CHECK(ota_server_start());
-    ESP_LOGI("echoear", "Initialization complete for %s (%s)", device_id, device_mac);
+    ESP_LOGI("echoear", "%s ready", device_id);
 }

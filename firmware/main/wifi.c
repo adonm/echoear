@@ -79,10 +79,8 @@ static esp_err_t start_mdns(void)
     }
     if (err != ESP_OK) {
         mdns_free();
-        return err;
     }
-    ESP_LOGI(TAG, "mDNS %s.local: %s (_http._tcp:80)", device_id, instance);
-    return ESP_OK;
+    return err;
 }
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -99,7 +97,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const ip_event_got_ip_t *event = data;
         char ip[WIFI_IP_LEN];
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&event->ip_info.ip));
-        ESP_LOGI(TAG, "%s connected to %s; IP %s", device_id, CONFIG_ECHOEAR_WIFI_SSID, ip);
+        ESP_LOGI(TAG, "STA IP %s", ip);
         if (!sntp_started) {
             esp_err_t err = esp_netif_sntp_start();
             sntp_started = (err == ESP_OK);

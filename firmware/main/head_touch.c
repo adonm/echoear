@@ -27,7 +27,7 @@ static void step_volume(int direction)
 {
     const int levels[] = { 45, 65, 80, 95 };
     int current = audio_get_volume();
-    int target = direction > 0 ? levels[3] : levels[0];
+    int target = current;
     for (int i = 0; i < 4; ++i) {
         int level = levels[direction > 0 ? i : 3 - i];
         if ((direction > 0 && level > current) || (direction < 0 && level < current)) {
@@ -150,7 +150,6 @@ static void head_task(void *arg)
             for (int i = 0; i < PADS; ++i) {
                 baseline[i] = sum[i] / CALIBRATION_SAMPLES;
             }
-            ESP_LOGI(TAG, "Calibrated ESP32-S3 head pads %d and %d", channels[0], channels[1]);
             scan(pads, baseline);
         }
     }

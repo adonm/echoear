@@ -64,9 +64,9 @@ static void block(brush_t b, int x, int y, int w, int h, int radius, uint32_t co
     lv_draw_rect(b.layer, &shape, &area);
 }
 
-static void bean(brush_t b, int x, int y, int w, int h, uint32_t color, unsigned border)
+static void bean(brush_t b, int x, int y, int w, int h, uint32_t color)
 {
-    block(b, x, y, w, h, LV_RADIUS_CIRCLE, color, border);
+    block(b, x, y, w, h, LV_RADIUS_CIRCLE, color, 0);
 }
 
 static void ring(brush_t b)
@@ -97,7 +97,7 @@ static void stroke(brush_t b, int x1, int y1, int x2, int y2, unsigned width)
     lv_draw_line(b.layer, &line);
 }
 
-static void curve(brush_t b, int x, int y, int radius, int start, int end, uint32_t color, unsigned width)
+static void make_ink_arc(brush_t b, int x, int y, int radius, int start, int end)
 {
     lv_draw_arc_dsc_t arc;
     lv_draw_arc_dsc_init(&arc);
@@ -105,8 +105,8 @@ static void curve(brush_t b, int x, int y, int radius, int start, int end, uint3
     arc.radius = radius;
     arc.start_angle = start;
     arc.end_angle = end;
-    arc.color = lv_color_hex(color);
-    arc.width = width;
+    arc.color = lv_color_hex(CAT_INK);
+    arc.width = 7;
     arc.rounded = true;
     lv_draw_arc(b.layer, &arc);
 }
@@ -115,19 +115,19 @@ static void markings(brush_t b, const palette_t *p)
 {
     switch (character) {
     case CAKE:
-        bean(b, 147, 66, 14, 24, p->marking, 0);
-        bean(b, 173, 61, 14, 33, p->marking, 0);
-        bean(b, 199, 66, 14, 24, p->marking, 0);
+        bean(b, 147, 66, 14, 24, p->marking);
+        bean(b, 173, 61, 14, 33, p->marking);
+        bean(b, 199, 66, 14, 24, p->marking);
         break;
     case MINT:
-        bean(b, 156, 72, 48, 12, p->marking, 0);
+        bean(b, 156, 72, 48, 12, p->marking);
         break;
     case PLUM:
-        bean(b, 162, 61, 36, 36, p->marking, 0);
-        bean(b, 175, 55, 32, 32, p->face, 0);
+        bean(b, 162, 61, 36, 36, p->marking);
+        bean(b, 175, 55, 32, 32, p->face);
         break;
     case SUNNY:
-        bean(b, 164, 62, 32, 32, p->marking, 0);
+        bean(b, 164, 62, 32, 32, p->marking);
         break;
     }
 }
@@ -137,16 +137,16 @@ static void eyes(brush_t b)
     for (int i = 0; i < 2; ++i) {
         int x = i ? RIGHT_EYE_X : LEFT_EYE_X;
         if (sleeping) {
-            curve(b, x, EYE_Y - 4, 21, 0, 180, CAT_INK, 7);
+            make_ink_arc(b, x, EYE_Y - 4, 21, 0, 180);
         } else if (mood == UI_SPEAKING) {
-            curve(b, x, EYE_Y + 5, 22, 205, 335, CAT_INK, 7);
+            make_ink_arc(b, x, EYE_Y + 5, 22, 205, 335);
         } else if (mood == UI_BUSY ? i != 0 : blink) {
-            bean(b, x - 17, EYE_Y - 4, 34, 8, CAT_INK, 0);
+            bean(b, x - 17, EYE_Y - 4, 34, 8, CAT_INK);
         } else {
             int width = mood == UI_RECORDING ? MAX_EYE_W : 34;
             int height = mood == UI_RECORDING ? MAX_EYE_H : 38;
             int shift = mood == UI_BUSY ? 0 : gaze;
-            bean(b, x + shift - width / 2, EYE_Y - height / 2, width, height, CAT_INK, 0);
+            bean(b, x + shift - width / 2, EYE_Y - height / 2, width, height, CAT_INK);
         }
     }
 }
@@ -173,16 +173,16 @@ static void battery(brush_t b)
 static void mouth(brush_t b)
 {
     if (mood == UI_RECORDING) {
-        bean(b, 163, 191, 34, 34, CAT_INK, 0);
+        bean(b, 163, 191, 34, 34, CAT_INK);
     } else if (mood == UI_BUSY) {
         stroke(b, 166, 204, 194, 200, 6);
     } else if (mood == UI_SPEAKING && talking) {
-        bean(b, MOUTH_X, MOUTH_Y, MOUTH_W, MOUTH_H, CAT_INK, 0);
+        bean(b, MOUTH_X, MOUTH_Y, MOUTH_W, MOUTH_H, CAT_INK);
         block(b, MOUTH_X, MOUTH_Y, MOUTH_W, MOUTH_H / 2, 5, CAT_INK, 0);
-        bean(b, 164, 214, 32, 9, 0xf47e92, 0);
+        bean(b, 164, 214, 32, 9, 0xf47e92);
     } else {
-        curve(b, 163, 193, 21, 0, 165, CAT_INK, 7);
-        curve(b, 197, 193, 21, 15, 180, CAT_INK, 7);
+        make_ink_arc(b, 163, 193, 21, 0, 165);
+        make_ink_arc(b, 197, 193, 21, 15, 180);
     }
 }
 
@@ -198,7 +198,7 @@ static void draw_face(lv_event_t *event)
     stroke(b, 41, 212, 87, 199, 6);
     stroke(b, 273, 188, 322, 177, 6);
     stroke(b, 273, 199, 319, 212, 6);
-    bean(b, 165, 163, 30, 17, CAT_INK, 0);
+    bean(b, 165, 163, 30, 17, CAT_INK);
     mouth(b);
     battery(b);
 }
@@ -236,15 +236,31 @@ static void animate(lv_timer_t *timer)
     }
 }
 
-void cat_face_init(lv_obj_t *parent, const uint8_t mac[6])
+static void face_deleted(lv_event_t *event)
 {
+    lv_timer_delete(lv_event_get_user_data(event));
+    face = NULL;
+}
+
+bool cat_face_init(lv_obj_t *parent, const uint8_t mac[6])
+{
+    if (!lv_obj_add_event_cb(parent, draw_face, LV_EVENT_DRAW_MAIN, NULL)) {
+        return false;
+    }
+    lv_timer_t *timer = lv_timer_create(animate, 50, NULL);
+    if (!timer) {
+        return false;
+    }
+    if (!lv_obj_add_event_cb(parent, face_deleted, LV_EVENT_DELETE, timer)) {
+        lv_timer_delete(timer);
+        return false;
+    }
     face = parent;
     character = (mac[4] ^ mac[5]) % 4;
     lv_obj_set_style_bg_color(face, lv_color_hex(palettes[character].face), 0);
     lv_obj_set_style_bg_opa(face, LV_OPA_COVER, 0);
-    lv_obj_add_event_cb(face, draw_face, LV_EVENT_DRAW_MAIN, NULL);
     face_start = phase_start = lv_tick_get();
-    lv_timer_create(animate, 50, NULL);
+    return true;
 }
 
 void cat_face_set_phase(ui_phase_t phase)

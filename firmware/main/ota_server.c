@@ -24,6 +24,7 @@
 #include "wifi.h"
 
 static const char *TAG = "ota";
+enum { DISPLAY_MAX = 8192, SPEAK_MAX = 1536 * 1024 };
 
 static esp_err_t text_response(httpd_req_t *request, const char *status, const char *message)
 {
@@ -32,20 +33,61 @@ static esp_err_t text_response(httpd_req_t *request, const char *status, const c
     return httpd_resp_sendstr(request, message);
 }
 
-static bool authorized(httpd_req_t *request)
+static esp_err_t json_response(httpd_req_t *request, const char *json)
+{
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, json);
+}
+
+static bool require_token(httpd_req_t *request)
 {
     static const char expected[] = CONFIG_ECHOEAR_BRIDGE_TOKEN;
     char actual[sizeof(expected)];
     size_t len = httpd_req_get_hdr_value_len(request, "X-EchoEar-Token");
-    if (len == 0 || len != sizeof(expected) - 1 ||
-        httpd_req_get_hdr_value_str(request, "X-EchoEar-Token", actual, sizeof(actual)) != ESP_OK) {
-        return false;
+    if (len && len == sizeof(expected) - 1 &&
+        httpd_req_get_hdr_value_str(request, "X-EchoEar-Token", actual, sizeof(actual)) == ESP_OK) {
+        unsigned diff = 0;
+        for (size_t i = 0; i < len; ++i) {
+            diff |= (unsigned char)expected[i] ^ (unsigned char)actual[i];
+        }
+        if (!diff) {
+            return true;
+        }
     }
-    unsigned diff = 0;
-    for (size_t i = 0; i < len; ++i) {
-        diff |= (unsigned char)expected[i] ^ (unsigned char)actual[i];
+    text_response(request, "401 Unauthorized", "Invalid device token\n");
+    return false;
+}
+
+static size_t body_length(httpd_req_t *request, size_t max_len)
+{
+    size_t len = request->content_len;
+    if (!len) {
+        text_response(request, "400 Bad Request", "Expected a request body\n");
+    } else if (len > max_len) {
+        text_response(request, "413 Content Too Large", "Request body exceeds limit\n");
+    } else {
+        return len;
     }
-    return diff == 0;
+    return 0;
+}
+
+static esp_err_t read_bytes(httpd_req_t *request, char *buf, size_t len)
+{
+    for (size_t offset = 0; offset < len;) {
+        int count = httpd_req_recv(request, buf + offset, len - offset);
+        if (count <= 0) {
+            text_response(request, "408 Request Timeout", "Incomplete request body\n");
+            return ESP_FAIL;
+        }
+        offset += count;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t read_req_body(httpd_req_t *request, char *buf, size_t max_len, size_t *out_len)
+{
+    *out_len = body_length(request, max_len);
+    return *out_len ? read_bytes(request, buf, *out_len) : ESP_ERR_INVALID_SIZE;
 }
 
 static esp_err_t status_get(httpd_req_t *request)
@@ -61,10 +103,10 @@ static esp_err_t status_get(httpd_req_t *request)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char peer[BRIDGE_TARGET_CAP], peer_json[BRIDGE_TARGET_CAP + 2] = "null";
-    bridge_client_get_peer(peer);
-    if (peer[0]) {
-        snprintf(peer_json, sizeof(peer_json), "\"%s\"", peer);
+    bridge_peer_t peer = bridge_client_get_peer();
+    char peer_json[BRIDGE_TARGET_CAP + 2] = "null";
+    if (peer.character[0]) {
+        snprintf(peer_json, sizeof(peer_json), "\"%s\"", peer.character);
     }
     char json[448];
     snprintf(json, sizeof(json),
@@ -76,8 +118,7 @@ static esp_err_t status_get(httpd_req_t *request)
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label,
              audio_get_volume(), pct, mv, battery.charging ? "true" : "false",
              ui_is_sleeping() ? "true" : "false", peer_json);
-    httpd_resp_set_type(request, "application/json");
-    return httpd_resp_sendstr(request, json);
+    return json_response(request, json);
 }
 
 static esp_err_t respond_and_reboot(httpd_req_t *request, const char *message)
@@ -91,86 +132,61 @@ static esp_err_t respond_and_reboot(httpd_req_t *request, const char *message)
 
 static esp_err_t reboot_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     return respond_and_reboot(request, "Rebooting\n");
 }
 
 static esp_err_t display_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     ui_wake();
-    const size_t bytes = request->content_len;
+    size_t bytes = body_length(request, DISPLAY_MAX);
     if (!bytes) {
-        return text_response(request, "400 Bad Request", "Expected a screen JSON object\n");
-    }
-    if (bytes > 8192) {
-        return text_response(request, "413 Content Too Large", "Screen JSON exceeds 8192 bytes\n");
+        return ESP_OK;
     }
     char *body = malloc(bytes + 1);
     if (!body) {
         return text_response(request, "503 Service Unavailable", "Could not allocate request buffer\n");
     }
-    for (size_t offset = 0; offset < bytes;) {
-        int count = httpd_req_recv(request, body + offset, bytes - offset);
-        if (count <= 0) {
-            free(body);
-            text_response(request, "408 Request Timeout", "Incomplete screen JSON\n");
-            return ESP_FAIL;
-        }
-        offset += count;
+    esp_err_t err = read_req_body(request, body, bytes, &bytes);
+    if (err != ESP_OK) {
+        free(body);
+        return err;
     }
     body[bytes] = '\0';
     cJSON *screen = cJSON_ParseWithLengthOpts(body, bytes + 1, NULL, true);
     free(body);
-    esp_err_t err = ui_show_screen(screen);
+    err = ui_show_screen(screen);
     cJSON_Delete(screen);
-    if (err != ESP_OK) {
-        return text_response(request, "400 Bad Request", "Expected a screen object with up to 24 shapes\n");
-    }
-    return text_response(request, "200 OK", "Screen shown\n");
+    return err == ESP_OK ? text_response(request, "200 OK", "Screen shown\n")
+           : text_response(request, "400 Bad Request", "Expected a screen object with up to 24 shapes\n");
 }
 
 static esp_err_t display_clear_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     ui_hide_screen();
     return text_response(request, "200 OK", "Screen cleared\n");
 }
 
 static esp_err_t speak_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     size_t bytes = request->content_len;
     if (!bytes || bytes % sizeof(int16_t)) {
         return text_response(request, "400 Bad Request", "Expected 16-bit mono PCM\n");
     }
-    if (bytes > 1536 * 1024) {
-        return text_response(request, "413 Content Too Large", "PCM exceeds 1.5 MiB\n");
+    if (!body_length(request, SPEAK_MAX)) {
+        return ESP_OK;
     }
     ui_wake();
     uint8_t *pcm = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!pcm) {
         return text_response(request, "503 Service Unavailable", "Could not allocate speech buffer\n");
     }
-    for (size_t offset = 0; offset < bytes;) {
-        int count = httpd_req_recv(request, (char *)pcm + offset, bytes - offset);
-        if (count <= 0) {
-            free(pcm);
-            text_response(request, "408 Request Timeout", "Incomplete PCM upload\n");
-            return ESP_FAIL;
-        }
-        offset += count;
+    esp_err_t err = read_req_body(request, (char *)pcm, bytes, &bytes);
+    if (err != ESP_OK) {
+        free(pcm);
+        return err;
     }
     size_t samples = bytes / sizeof(int16_t);
-    esp_err_t err = conversation_submit_speech((int16_t *)pcm, samples);
+    err = conversation_submit_speech((int16_t *)pcm, samples);
     if (err != ESP_OK) {
         free(pcm);
         return err == ESP_ERR_NOT_SUPPORTED
@@ -179,27 +195,19 @@ static esp_err_t speak_post(httpd_req_t *request)
     }
     char json[48];
     snprintf(json, sizeof(json), "{\"ok\":true,\"samples\":%zu}", samples);
-    httpd_resp_set_type(request, "application/json");
-    return httpd_resp_sendstr(request, json);
+    return json_response(request, json);
 }
 
 static esp_err_t volume_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     char body[64];
     size_t bytes = request->content_len;
     if (!bytes || bytes >= sizeof(body)) {
         return text_response(request, "400 Bad Request", "Expected {\"level\":0..100}\n");
     }
-    for (size_t offset = 0; offset < bytes;) {
-        int count = httpd_req_recv(request, body + offset, bytes - offset);
-        if (count <= 0) {
-            text_response(request, "408 Request Timeout", "Incomplete volume request\n");
-            return ESP_FAIL;
-        }
-        offset += count;
+    esp_err_t err = read_req_body(request, body, sizeof(body) - 1, &bytes);
+    if (err != ESP_OK) {
+        return err;
     }
     body[bytes] = '\0';
     cJSON *json = cJSON_ParseWithLengthOpts(body, bytes + 1, NULL, true);
@@ -218,8 +226,7 @@ static esp_err_t volume_post(httpd_req_t *request)
     conversation_chime();
     char reply[32];
     snprintf(reply, sizeof(reply), "{\"ok\":true,\"volume\":%d}", value);
-    httpd_resp_set_type(request, "application/json");
-    return httpd_resp_sendstr(request, reply);
+    return json_response(request, reply);
 }
 
 static esp_err_t pull_headers(esp_http_client_handle_t client)
@@ -229,9 +236,6 @@ static esp_err_t pull_headers(esp_http_client_handle_t client)
 
 static esp_err_t ota_pull_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     const esp_http_client_config_t http = {
         .url = CONFIG_ECHOEAR_BRIDGE_URL "/ota/latest.bin",
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -251,9 +255,6 @@ static esp_err_t ota_pull_post(httpd_req_t *request)
 
 static esp_err_t ota_upload_post(httpd_req_t *request)
 {
-    if (!authorized(request)) {
-        return text_response(request, "401 Unauthorized", "Invalid device token\n");
-    }
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (!target) {
         return text_response(request, "500 Internal Server Error", "No OTA partition\n");
@@ -271,10 +272,9 @@ static esp_err_t ota_upload_post(httpd_req_t *request)
     char chunk[2048];
     size_t remaining = request->content_len;
     while (remaining > 0) {
-        int len = httpd_req_recv(request, chunk, remaining < sizeof(chunk) ? remaining : sizeof(chunk));
-        if (len <= 0) {
+        size_t len = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        if (read_bytes(request, chunk, len) != ESP_OK) {
             esp_ota_abort(update);
-            text_response(request, "408 Request Timeout", "Incomplete OTA upload\n");
             return ESP_FAIL;
         }
         err = esp_ota_write(update, chunk, len);
@@ -296,25 +296,31 @@ static esp_err_t ota_upload_post(httpd_req_t *request)
         ESP_LOGE(TAG, "Set boot partition: %s", esp_err_to_name(err));
         return text_response(request, "500 Internal Server Error", "Could not activate OTA image\n");
     }
-    ESP_LOGI(TAG, "Validated %zu bytes in %s", request->content_len, target->label);
     return respond_and_reboot(request, "OTA installed; rebooting\n");
+}
+
+typedef struct {
+    const char *uri;
+    esp_err_t (*handler)(httpd_req_t *);
+} post_route_t;
+
+static esp_err_t checked_post(httpd_req_t *request)
+{
+    const post_route_t *route = request->user_ctx;
+    return require_token(request) ? route->handler(request) : ESP_OK;
 }
 
 esp_err_t ota_server_start(void)
 {
-    static const httpd_uri_t routes[] = {
-        { .uri = "/status", .method = HTTP_GET, .handler = status_get },
-        { .uri = "/ota", .method = HTTP_POST, .handler = ota_pull_post },
-        { .uri = "/ota/upload", .method = HTTP_POST, .handler = ota_upload_post },
-        { .uri = "/reboot", .method = HTTP_POST, .handler = reboot_post },
-        { .uri = "/display", .method = HTTP_POST, .handler = display_post },
-        { .uri = "/display/clear", .method = HTTP_POST, .handler = display_clear_post },
-        { .uri = "/speak", .method = HTTP_POST, .handler = speak_post },
-        { .uri = "/volume", .method = HTTP_POST, .handler = volume_post },
+    static const post_route_t posts[] = {
+        { "/ota", ota_pull_post }, { "/ota/upload", ota_upload_post }, { "/reboot", reboot_post },
+        { "/display", display_post }, { "/display/clear", display_clear_post },
+        { "/speak", speak_post }, { "/volume", volume_post },
     };
+    const httpd_uri_t status = { .uri = "/status", .method = HTTP_GET, .handler = status_get };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    config.max_uri_handlers = sizeof(routes) / sizeof(routes[0]);
+    config.max_uri_handlers = 1 + sizeof(posts) / sizeof(posts[0]);
     config.recv_wait_timeout = 15;
     config.lru_purge_enable = true;
     httpd_handle_t server;
@@ -322,15 +328,17 @@ esp_err_t ota_server_start(void)
     if (err != ESP_OK) {
         return err;
     }
-    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
-        err = httpd_register_uri_handler(server, &routes[i]);
-        if (err != ESP_OK) {
-            httpd_stop(server);
-            return err;
-        }
+    err = httpd_register_uri_handler(server, &status);
+    for (size_t i = 0; err == ESP_OK && i < sizeof(posts) / sizeof(posts[0]); ++i) {
+        const httpd_uri_t route = {
+            .uri = posts[i].uri, .method = HTTP_POST, .handler = checked_post, .user_ctx = (void *)&posts[i],
+        };
+        err = httpd_register_uri_handler(server, &route);
     }
-    ESP_LOGI(TAG, "Device HTTP server is listening on port %u", config.server_port);
-    return ESP_OK;
+    if (err != ESP_OK) {
+        httpd_stop(server);
+    }
+    return err;
 }
 
 void ota_confirm_boot(void)

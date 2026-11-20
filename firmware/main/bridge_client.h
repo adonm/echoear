@@ -7,10 +7,14 @@
 #include "esp_err.h"
 
 enum { BRIDGE_TARGET_CAP = 16 };
+typedef struct {
+    char id[BRIDGE_TARGET_CAP];
+    char character[BRIDGE_TARGET_CAP];
+} bridge_peer_t;
 
 esp_err_t bridge_client_start_registration(void);
 void bridge_client_network_changed(bool connected);
-void bridge_client_get_peer(char peer[BRIDGE_TARGET_CAP]);
+bridge_peer_t bridge_client_get_peer(void);
 bool bridge_client_valid_target(const char *target);
 
 // Blocking bridge operations, used only by the conversation worker.

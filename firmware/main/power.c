@@ -40,7 +40,7 @@ static void power_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    bool first = true;
+    bool warned = false;
     for (;;) {
         uint16_t mv, soc, current;
         battery_status_t next = { .pct = -1 };
@@ -51,13 +51,12 @@ static void power_task(void *arg)
             next = (battery_status_t){ .pct = soc, .millivolts = mv, .charging = (int16_t)current > 0 };
         }
         portENTER_CRITICAL(&status_lock);
-        bool availability_changed = (status.pct >= 0) != (next.pct >= 0);
         status = next;
         portEXIT_CRITICAL(&status_lock);
-        if (first || availability_changed) {
-            ESP_LOGI(TAG, "BQ27220 at 0x55: %s", next.pct >= 0 ? "valid battery reading" : "unavailable");
-            first = false;
+        if (next.pct < 0 && !warned) {
+            ESP_LOGW(TAG, "BQ27220 unavailable");
         }
+        warned = next.pct < 0;
         ui_set_battery(next.pct, next.charging);
         vTaskDelay(pdMS_TO_TICKS(30000));
     }

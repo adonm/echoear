@@ -84,13 +84,14 @@ esp_err_t audio_init(void)
     ESP_RETURN_ON_ERROR(bsp_audio_init(&i2s), TAG, "Init duplex I2S");
     mic = bsp_audio_codec_microphone_init();
     speaker = bsp_audio_codec_speaker_init();
-    ESP_RETURN_ON_FALSE(mic && speaker, ESP_FAIL, TAG, "Init mic and speaker");
+    esp_err_t ret;
+    ESP_GOTO_ON_FALSE(mic && speaker, ESP_FAIL, fail, TAG, "Init mic and speaker");
 
     esp_codec_dev_sample_info_t format = {
         .sample_rate = AUDIO_RATE, .channel = CHANNELS, .bits_per_sample = 16,
     };
     volume_lock = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(volume_lock, ESP_ERR_NO_MEM, TAG, "Create volume lock");
+    ESP_GOTO_ON_FALSE(volume_lock, ESP_ERR_NO_MEM, fail, TAG, "Create volume lock");
     nvs_handle_t nvs;
     if (nvs_open("echoear", NVS_READONLY, &nvs) == ESP_OK) {
         uint8_t saved;
@@ -100,17 +101,25 @@ esp_err_t audio_init(void)
         nvs_close(nvs);
     }
     applied_volume = audio_get_volume();
-    ESP_RETURN_ON_ERROR(esp_codec_dev_set_out_vol(speaker, applied_volume), TAG, "Set speaker volume");
-    ESP_RETURN_ON_ERROR(esp_codec_dev_open(speaker, &format), TAG, "Open ES8311");
-    ESP_RETURN_ON_ERROR(esp_codec_dev_open(mic, &format), TAG, "Open ES7210");
+    ESP_GOTO_ON_ERROR(esp_codec_dev_set_out_vol(speaker, applied_volume), fail, TAG, "Set speaker volume");
+    ESP_GOTO_ON_ERROR(esp_codec_dev_open(speaker, &format), fail, TAG, "Open ES8311");
+    ESP_GOTO_ON_ERROR(esp_codec_dev_open(mic, &format), fail, TAG, "Open ES7210");
     int16_t probe[FRAMES * CHANNELS];
-    ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, probe, sizeof(probe)), TAG, "Read initial I2S frames");
+    ESP_GOTO_ON_ERROR(esp_codec_dev_read(mic, probe, sizeof(probe)), fail, TAG, "Read initial I2S frames");
 
     recording = heap_caps_malloc(MAX_FRAMES * sizeof(*recording), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ESP_RETURN_ON_FALSE(recording, ESP_ERR_NO_MEM, TAG, "Allocate recording in PSRAM");
-    ESP_LOGI(TAG, "ES7210 mic and ES8311 speaker open: %u Hz, 16-bit stereo I2S; channel 0 to mono",
-             AUDIO_RATE);
+    ESP_GOTO_ON_FALSE(recording, ESP_ERR_NO_MEM, fail, TAG, "Allocate recording in PSRAM");
     return ESP_OK;
+
+fail:
+    esp_codec_dev_delete(mic);
+    esp_codec_dev_delete(speaker);
+    mic = speaker = NULL;
+    if (volume_lock) {
+        vSemaphoreDelete(volume_lock);
+        volume_lock = NULL;
+    }
+    return ret;
 }
 
 static int16_t tone_sample(int n, int length, float hz, float amplitude)
