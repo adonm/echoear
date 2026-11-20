@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -73,51 +72,12 @@ func rpcTest(t *testing.T, base, method string, params object) object {
 
 func toolTest(t *testing.T, base, tool string, args object, failed bool) object {
 	t.Helper()
-	if tool == "memory" {
-		tool = "store"
-	}
-	if !slices.Contains([]string{"inspect", "run_app", "act", "store"}, tool) {
-		result := testObject(t, testRequest(t, "POST", base+"/test-legacy", "unit", object{"name": tool, "args": args}, 200))
-		if (result["error"] != nil) != failed {
-			t.Fatalf("%s: %v (expected error=%v)", tool, result, failed)
-		}
-		return result
-	}
 	result := rpcTest(t, base, "tools/call", object{"name": tool, "arguments": args})
 	value, _ := result["structuredContent"].(object)
 	if value == nil || result["isError"] != failed {
 		t.Fatalf("%s: %+v (expected error: %v)", tool, result, failed)
 	}
 	return value
-}
-
-// Exercise the legacy scene engine below the public MCP transport.
-func legacyTestServer(b *bridge) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/test-legacy" {
-			b.ServeHTTP(w, r)
-			return
-		}
-		req, err := jsonBody(r)
-		if err != nil {
-			sendError(w, err)
-			return
-		}
-		args, _ := req["args"].(object)
-		out, err := b.callLegacyMCP(r.Context(), str(req["name"]), args)
-		if err != nil {
-			out = object{"error": err.Error()}
-			var version *versionConflict
-			var scene *sceneConflict
-			if errors.As(err, &version) {
-				out["version"] = version.version
-			}
-			if errors.As(err, &scene) {
-				out["rev"] = scene.rev
-			}
-		}
-		sendJSON(w, 200, out)
-	})
 }
 
 func fakeTTS(ctx context.Context, requests *atomic.Int32) *synthWorker {
@@ -140,10 +100,8 @@ func fakeTTS(ctx context.Context, requests *atomic.Int32) *synthWorker {
 	return w
 }
 
-func TestMCPProtocolAndScene(t *testing.T) {
-	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.history = &chatHistory{b.db}
-	})
+func TestMCPProtocol(t *testing.T) {
+	_, base := wsHarness(t, nil)
 	const id = "echoear-test"
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, id, "Cake")
@@ -183,182 +141,6 @@ func TestMCPProtocolAndScene(t *testing.T) {
 	if v := toolTest(t, base, "store", object{"op": "delete", "scope": "app:scores", "key": "best", "expected_version": 0}, true); v["version"] != json.Number("1") {
 		t.Fatal(v)
 	}
-	list := toolTest(t, base, "devices", object{}, false)
-	d := list["devices"].([]any)[0].(object)
-	if len(d) != len(mcpDeviceFields) || d["device_id"] != id || d["kind"] != "physical" || d["ws_connected"] != true {
-		t.Fatal(d)
-	}
-	args := object{"device_id": id}
-	face := toolTest(t, base, "snapshot", args, false)
-	if scene := face["scene"].(object); scene["custom_scene"] != false || len(scene["nodes"].([]any)) < 10 {
-		t.Fatal(scene)
-	}
-	create := toolTest(t, base, "scene", object{"device_id": id, "bg": "#000000", "title": "Quiz", "nodes": []object{
-		{"id": "a", "t": "btn", "x": -4, "y": 500, "w": 90, "h": 35, "s": "Old", "ask": "Would launch a turn"},
-		{"id": "b", "t": "text", "x": 180, "y": 200, "s": "Gone"},
-	}}, false)
-	c.until(t, hasWS("scene", `"id":"echoear-exit"`))
-	snapshot := toolTest(t, base, "snapshot", args, false)["scene"].(object)
-	node := snapshot["nodes"].([]any)[1].(object)
-	if snapshot["custom_scene"] != true || node["x"] != json.Number("0") || node["y"] != json.Number("359") || node["on"] != "tap" {
-		t.Fatal(snapshot)
-	}
-	expected := create["rev"]
-	patched := toolTest(t, base, "patch", object{"device_id": id, "expected_rev": expected,
-		"set": object{"a": object{"s": "New"}}, "del": []string{"b"}}, false)
-	c.until(t, hasWS("patch", `"s":"New"`))
-	if conflict := toolTest(t, base, "patch", object{"device_id": id, "expected_rev": expected}, true); conflict["rev"] != patched["rev"] {
-		t.Fatal(conflict)
-	}
-	toolTest(t, base, "scene", object{"device_id": id, "preset": "face"}, false)
-	if toolTest(t, base, "snapshot", args, false)["scene"].(object)["custom_scene"] != false {
-		t.Fatal("face preset left custom scene set")
-	}
-	nodes := make([]object, maxNodes+4)
-	for i := range nodes {
-		nodes[i] = object{"id": fmt.Sprintf("n%d", i), "t": "text", "s": "x"}
-	}
-	toolTest(t, base, "scene", object{"device_id": id, "nodes": nodes}, false)
-	snapshot = toolTest(t, base, "snapshot", args, false)["scene"].(object)
-	if capped := snapshot["nodes"].([]any); len(capped) != maxNodes || capped[maxNodes-1].(object)["id"] != exitNode {
-		t.Fatal("node cap did not preserve Cat exit")
-	}
-	messages := testObject(t, testRequest(t, "GET", base+"/api/devices/"+id+"/messages", "unit", nil, 200))["messages"].([]any)
-	if first := messages[0].(object); first["card_title"] != "Quiz" || first["source"] != "mcp" {
-		t.Fatal(first)
-	}
-	entries, err := b.history.list(t.Context(), id)
-	if err != nil || len(entries) != 1 {
-		t.Fatal(entries, err)
-	}
-}
-
-func TestMCPWaiterDoesNotCancelCustomTap(t *testing.T) {
-	b, base := wsHarness(t, nil)
-	const id = "echoear-quiz"
-	c := testConnectWS(t, base, "unit", false)
-	c.hello(t, id, "Cake")
-	running := make(chan context.Context, 1)
-	b.ws.mu.Lock()
-	d := b.ws.devices[id]
-	b.ws.startTurn(d, time.Now(), false, func(ctx context.Context, _ uint64) { running <- ctx })
-	turn := d.turn
-	b.ws.mu.Unlock()
-	active := <-running
-	scene := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
-		{"id": "answer", "t": "btn", "x": 80, "y": 100, "w": 200, "h": 40, "s": "Answer", "ask": "Do not submit this"}}}, false)
-	done := make(chan object, 1)
-	go func() {
-		out, err := b.ws.waitEvent(t.Context(), id, nil, time.Second)
-		if err != nil {
-			t.Error(err)
-		}
-		done <- out
-	}()
-	eventually(t, func() bool {
-		b.ws.mu.Lock()
-		defer b.ws.mu.Unlock()
-		return b.ws.hasWaiter(d)
-	})
-	c.json(t, object{"ev": "tap", "id": "answer", "x": 100, "y": 120})
-	ev, _ := (<-done)["event"].(deviceEvent)
-	if ev.Type != "tap" || ev.Data["id"] != "answer" {
-		t.Fatal(ev)
-	}
-	b.ws.mu.Lock()
-	stillRunning := d.turn == turn && d.busy && d.agentSetScene && active.Err() == nil
-	b.ws.mu.Unlock()
-	if !stillRunning {
-		t.Fatal("custom tap replaced the active turn")
-	}
-	after := toolTest(t, base, "wait_event", object{"device_id": id, "after_cursor": scene["event_cursor"], "timeout_ms": 0}, false)
-	if after["event"].(object)["type"] != "tap" {
-		t.Fatal(after)
-	}
-	if result := toolTest(t, base, "wait_event", object{"device_id": id, "timeout_ms": 10}, false); result["event"] != nil {
-		t.Fatal(result)
-	}
-	view := noticeScene("Should not show", "Legacy")
-	b.ws.finishTurn(d, turn, &view)
-	if snap := toolTest(t, base, "snapshot", object{"device_id": id}, false); snap["scene"].(object)["custom_scene"] != true {
-		t.Fatal("finish overwrote the custom scene")
-	}
-	for _, disconnect := range []bool{false, true} {
-		ctx, cancel := context.WithCancel(t.Context())
-		errCh := make(chan error, 1)
-		go func() {
-			_, err := b.ws.waitEvent(ctx, id, nil, time.Second)
-			errCh <- err
-		}()
-		eventually(t, func() bool {
-			b.ws.mu.Lock()
-			defer b.ws.mu.Unlock()
-			return b.ws.hasWaiter(d)
-		})
-		if disconnect {
-			c.conn.Close()
-		} else {
-			cancel()
-		}
-		if err := <-errCh; err == nil {
-			t.Fatal("wait not interrupted")
-		}
-		cancel()
-	}
-}
-
-func TestCustomSceneSurvivesRecordingAndPlainTurn(t *testing.T) {
-	b, base := wsHarness(t, nil)
-	const id = "echoear-drawing"
-	c := testConnectWS(t, base, "unit", false)
-	c.hello(t, id, "Mint")
-	args := object{"device_id": id}
-	created := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
-		{"id": "face", "t": "text", "x": 180, "y": 100, "s": "Tiramisu"},
-	}}, false)
-	c.until(t, hasWS("scene", "Tiramisu"))
-	rev := created["rev"]
-	assertScene := func(label string) {
-		t.Helper()
-		scene := toolTest(t, base, "snapshot", args, false)["scene"].(object)
-		var nodes sceneView
-		for _, n := range scene["nodes"].([]any) {
-			nodes.nodes = append(nodes.nodes, n.(object))
-		}
-		if scene["custom_scene"] != true || scene["rev"] != rev ||
-			nodeIn(nodes, "face")["s"] != label || nodeIn(nodes, exitNode)["s"] != "Cat" {
-			t.Fatal(scene)
-		}
-	}
-	c.json(t, object{"ev": "rec_start"})
-	c.until(t, func(f wsFrame) bool { return bytes.Contains(f.data, []byte(`"id":"rec-send"`)) })
-	assertScene("Tiramisu")
-	c.json(t, object{"ev": "rec_end", "cancelled": true})
-	c.until(t, hasWS("patch", `"s":"Cat"`))
-	assertScene("Tiramisu")
-
-	started := make(chan uint64, 1)
-	b.ws.mu.Lock()
-	d := b.ws.devices[id]
-	b.ws.startTurn(d, time.Now(), false, func(_ context.Context, id uint64) { started <- id })
-	b.ws.mu.Unlock()
-	turn := <-started
-	c.until(t, hasWS("patch", `"s":"Cat / ..."`))
-	assertScene("Tiramisu")
-	patch := func(label string) {
-		t.Helper()
-		rev = toolTest(t, base, "patch", object{"device_id": id, "expected_rev": rev,
-			"set": object{"face": object{"s": label}}}, false)["rev"]
-		c.until(t, hasWS("patch", label))
-		assertScene(label)
-	}
-	patch("Tiramisu, edited")
-	// A plain reply without TTS may have a fallback card; it must not replace art.
-	answer := noticeScene("Answer", "Hello!")
-	b.ws.finishTurn(d, turn, &answer)
-	c.until(t, hasWS("patch", `"s":"Cat"`))
-	assertScene("Tiramisu, edited")
-	patch("Still here")
 }
 
 func TestMCPControl(t *testing.T) {
@@ -373,18 +155,18 @@ func TestMCPControl(t *testing.T) {
 	watcher.until(t, hasWS("power", `"brightness":85`))
 
 	for _, invalid := range []object{
-		{"device_id": id}, {"device_id": id, "volume": -1}, {"device_id": id, "volume": 101},
-		{"device_id": id, "volume": 1.5}, {"device_id": id, "sleep": "true"},
+		{"to": id}, {"to": id, "volume": -1}, {"to": id, "volume": 101},
+		{"to": id, "volume": 1.5}, {"to": id, "sleep": "true"},
 	} {
-		toolTest(t, base, "control", invalid, true)
+		toolTest(t, base, "act", invalid, true)
 	}
 	b.ws.mu.Lock()
 	d := b.ws.devices[id]
 	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
 	turn := d.turn
 	b.ws.mu.Unlock()
-	out := toolTest(t, base, "control", object{"device_id": id, "volume": 0, "sleep": true}, false)
-	if out["ok"] != true || out["device_id"] != id || out["volume"] != json.Number("0") || out["sleeping"] != true {
+	out := toolTest(t, base, "act", object{"to": id, "volume": 0, "sleep": true}, false)
+	if out["ok"] != true || out["to"] != id || out["volume"] != json.Number("0") || out["sleeping"] != true {
 		t.Fatal(out)
 	}
 	for _, client := range []*testWS{c, watcher} {
@@ -394,17 +176,17 @@ func TestMCPControl(t *testing.T) {
 	b.ws.finishTurn(d, turn, nil)
 	checkStatus := func(mode, volume string) {
 		t.Helper()
-		device := toolTest(t, base, "snapshot", object{"device_id": id}, false)["device"].(object)
+		device := toolTest(t, base, "inspect", object{"device_id": id}, false)["me"].(object)
 		if device["mode"] != mode || device["volume"] != json.Number(volume) {
 			t.Fatal(device)
 		}
 	}
 	checkStatus("sleepy", "0")
-	if wake := toolTest(t, base, "control", object{"device_id": id, "sleep": false}, false); wake["sleeping"] != false || wake["volume"] != json.Number("0") {
+	if wake := toolTest(t, base, "act", object{"to": id, "sleep": false}, false); wake["sleeping"] != false || wake["volume"] != json.Number("0") {
 		t.Fatal(wake)
 	}
 	c.until(t, hasWS("power", `"brightness":85`))
-	if vol := toolTest(t, base, "control", object{"device_id": id, "volume": 42}, false); vol["sleeping"] != false || vol["volume"] != json.Number("42") {
+	if vol := toolTest(t, base, "act", object{"to": id, "volume": 42}, false); vol["sleeping"] != false || vol["volume"] != json.Number("42") {
 		t.Fatal(vol)
 	}
 	c.until(t, hasWS("volume", `"level":42`))
@@ -424,119 +206,6 @@ func eventually(t *testing.T, f func() bool) {
 func chatFrame(text string) func(wsFrame) bool {
 	return func(f wsFrame) bool {
 		return f.op == wsText && bytes.Contains(f.data, []byte(`"type":"chat"`)) && bytes.Contains(f.data, []byte(text))
-	}
-}
-
-func expectChatAndPCM(t *testing.T, client *testWS, text string) {
-	t.Helper()
-	match := chatFrame(text)
-	chat, audio := false, false
-	client.until(t, func(f wsFrame) bool {
-		chat = chat || match(f)
-		audio = audio || f.op == wsBinary && bytes.Equal(f.data, []byte{pcmPrefix, 1, 2, 3, 4})
-		return chat && audio
-	})
-}
-
-func TestMCPSceneInlineChimeAndSay(t *testing.T) {
-	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.worker = fakeTTS(b.root, nil)
-		b.history = &chatHistory{b.db}
-	})
-	const id = "phone-a071"
-	c := testConnectWS(t, base, "unit", false)
-	c.hello(t, id, "Cake")
-	b.ws.mu.Lock()
-	d := b.ws.devices[id]
-	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
-	b.ws.mu.Unlock()
-	for _, invalid := range []object{
-		{"device_id": id, "chime": "unknown"},
-		{"device_id": id, "chime": "tap", "say": true},
-	} {
-		toolTest(t, base, "scene", invalid, true)
-	}
-	toolTest(t, base, "scene", object{
-		"device_id": id, "title": "Look!", "say": "Hello, fish!", "chime": "celebrate",
-	}, false)
-	c.until(t, hasWS("svg", "Look!"))
-	c.until(t, hasWS("chime", `"kind":"intercom"`))
-	expectChatAndPCM(t, c, "Hello, fish!")
-	b.ws.mu.Lock()
-	spoke := d.agentSpoke
-	b.ws.mu.Unlock()
-	if !spoke {
-		t.Fatal("inline say did not suppress the turn's final text playback")
-	}
-	toolTest(t, base, "scene", object{"device_id": id, "preset": "face", "chime": "tap"}, false)
-	c.until(t, hasWS("svg", "cat-ring"))
-	c.until(t, hasWS("chime", `"kind":"tap"`))
-}
-
-func TestMCPSpeakChimeAndIntercom(t *testing.T) {
-	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.worker = fakeTTS(b.root, nil)
-		b.history = &chatHistory{b.db}
-		b.virtual = virtualStore(b.db)
-	})
-	const from = "echoear-source"
-	to := str(testObject(t, testRequest(t, "POST", base+"/api/virtual-clients", "unit", object{"character": "Plum", "theme": "plum"}, 201))["id"])
-	sender := testConnectWS(t, base, "unit", false)
-	sender.hello(t, from, "Cake")
-	recipient := testConnectWS(t, base, "unit", false)
-	recipient.hello(t, to, "Ignored")
-	watcher := testConnectWS(t, base, "unit", false)
-	watcher.json(t, object{"ev": "hello", "role": "web"})
-	watcher.until(t, hasWS("peers", to))
-	watcher.json(t, object{"ev": "watch", "device_id": to})
-	watcher.until(t, hasWS("svg", ""))
-	b.ws.mu.Lock()
-	d := b.ws.devices[to]
-	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
-	b.ws.mu.Unlock()
-	toolTest(t, base, "chime", object{"device_id": to, "kind": "tap"}, false)
-	recipient.until(t, hasWS("chime", `"kind":"tap"`))
-	toolTest(t, base, "speak", object{"device_id": to, "text": "Good listening!"}, false)
-	expectChatAndPCM(t, recipient, "Good listening!")
-	watcher.until(t, chatFrame("Good listening!"))
-	b.ws.mu.Lock()
-	spoke := d.agentSpoke
-	b.ws.mu.Unlock()
-	if !spoke {
-		t.Fatal("speak did not mark the active turn")
-	}
-	toolTest(t, base, "intercom", object{"from_device_id": from, "to_device_id": "Plum", "text": "Dinner is ready."}, true)
-	toolTest(t, base, "intercom", object{"from_device_id": from, "to_device_id": to, "text": "Dinner is ready."}, false)
-	expectChatAndPCM(t, recipient, "Dinner is ready.")
-	watcher.until(t, chatFrame("Dinner is ready."))
-	wait := toolTest(t, base, "wait_event", object{"device_id": to, "after_cursor": 0, "timeout_ms": 0}, false)
-	if wait["event"].(object)["type"] != "intercom" {
-		t.Fatal(wait)
-	}
-	for _, id := range []string{from, to} {
-		got := string(testRequest(t, "GET", base+"/api/devices/"+id+"/messages", "unit", nil, 200))
-		if !strings.Contains(got, `"source":"intercom"`) || !strings.Contains(got, "Dinner is ready.") {
-			t.Fatal(got)
-		}
-	}
-	pcm := make(chan []byte, 2)
-	httpDevice := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/speak" || r.Header.Get("X-EchoEar-Token") != "unit" {
-			t.Error("incorrect PCM fallback request")
-		}
-		raw, _ := io.ReadAll(r.Body)
-		pcm <- raw
-		w.WriteHeader(204)
-	}))
-	defer httpDevice.Close()
-	host, port := httpDevice.Listener.Addr().(*net.TCPAddr).IP.String(), httpDevice.Listener.Addr().(*net.TCPAddr).Port
-	if err := b.peers.register(peer{"legacy", "Mint", host, port, time.Now().Unix()}); err != nil {
-		t.Fatal(err)
-	}
-	toolTest(t, base, "speak", object{"device_id": "legacy", "text": "Hello!"}, false)
-	toolTest(t, base, "chime", object{"device_id": "legacy", "kind": "celebrate"}, false)
-	if !bytes.Equal(<-pcm, []byte{1, 2, 3, 4}) || !bytes.Equal(<-pcm, chimePCM("celebrate")) {
-		t.Fatal("invalid HTTP speech/chime PCM")
 	}
 }
 

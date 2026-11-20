@@ -14,12 +14,10 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -232,7 +230,8 @@ func liveIsolated(t *testing.T, home, data string, conf map[string]string, token
 	}
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+root, "ECHOEAR_BRIDGE_TOKEN="+token, "ECHOEAR_BRIDGE_HOST=127.0.0.1",
-		"ECHOEAR_BRIDGE_PORT=0", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_TTS_WORKER="+worker,
+		"ECHOEAR_BRIDGE_PORT=0", "ECHOEAR_DB_PATH="+filepath.Join(state, "echoear.db"),
+		"ECHOEAR_TURSO_URL=", "ECHOEAR_TURSO_AUTH_TOKEN=", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_TTS_WORKER="+worker,
 		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"], "ECHOEAR_OPENCODE_MODEL="+conf["ECHOEAR_OPENCODE_MODEL"],
 		"ECHOEAR_OPENCODE_URL="+conf["ECHOEAR_OPENCODE_URL"], "ECHOEAR_OPENCODE_PASSWORD="+conf["ECHOEAR_OPENCODE_PASSWORD"],
 		"ECHOEAR_OPENCODE_DIR="+liveOpenCodeDir(home, conf), "ECHOEAR_OPENCODE_PAIR_PORT=0",
@@ -316,7 +315,7 @@ func TestLive(t *testing.T) {
 	unauthorized := c
 	unauthorized.token = ""
 	unauthorized.read(t, "/api/devices", nil, "", nil, 401)
-	unauthorized.read(t, "/api/intercom", []byte("{}"), jsonType, nil, 401)
+	unauthorized.read(t, "/api/chat", []byte("{}"), jsonType, nil, 401)
 	unauthorized.read(t, "/ota/latest.bin", nil, "", nil, 401)
 	run := "echoear-live-" + hex.EncodeToString([]byte(strconv.FormatInt(time.Now().UnixNano(), 36)))
 	liveSessions(t, oc, run)
@@ -328,6 +327,8 @@ func TestLive(t *testing.T) {
 				DeviceID string `json:"device_id"`
 				IP       string `json:"ip"`
 				Kind     string `json:"kind"`
+				Port     int    `json:"port"`
+				LastSeen int64  `json:"last_seen"`
 			}
 		}](t, c, "/api/devices", nil, nil, "", nil)
 		devices := make(map[string]string, len(got.Devices))
@@ -335,7 +336,7 @@ func TestLive(t *testing.T) {
 			if p.Kind == "virtual" {
 				continue
 			}
-			if p.DeviceID == "" || net.ParseIP(p.IP) == nil || devices[p.DeviceID] != "" {
+			if p.DeviceID == "" || net.ParseIP(p.IP) == nil || p.Port <= 0 || p.LastSeen <= 0 || devices[p.DeviceID] != "" {
 				t.Fatal("invalid or duplicate peer in live registry")
 			}
 			devices[p.DeviceID] = p.IP
@@ -348,182 +349,83 @@ func TestLive(t *testing.T) {
 		t.Logf("%d registered peer addresses", len(before))
 	})
 	t.Run("OTA", func(t *testing.T) {
-		manifest := liveJSON[struct {
-			Exists bool
-			Size   int64
-			SHA256 string
-			Mtime  int64
-		}](t, c, "/ota/version.json", nil, nil, "", nil)
-		firmware, res := c.read(t, "/ota/latest.bin", nil, "", nil, 200)
-		digest := fmt.Sprintf("%x", sha256.Sum256(firmware))
-		if !manifest.Exists || manifest.Mtime <= 0 || manifest.Size != int64(len(firmware)) ||
-			manifest.Size != res.ContentLength || digest != manifest.SHA256 || digest != res.Header.Get("X-Firmware-Sha256") {
-			t.Fatal("OTA image and manifest differ")
+		for _, path := range []string{"/ota", "/ota/box3"} {
+			manifest := liveJSON[struct {
+				Exists bool
+				Size   int64
+				SHA256 string
+				Mtime  int64
+			}](t, c, path+"/version.json", nil, nil, "", nil)
+			firmware, res := c.read(t, path+"/latest.bin", nil, "", nil, 200)
+			digest := fmt.Sprintf("%x", sha256.Sum256(firmware))
+			if !manifest.Exists || manifest.Mtime <= 0 || manifest.Size != int64(len(firmware)) ||
+				manifest.Size != res.ContentLength || digest != manifest.SHA256 || digest != res.Header.Get("X-Firmware-Sha256") {
+				t.Fatal("OTA image and manifest differ", path)
+			}
+			t.Logf("%s verified: %d bytes, SHA-256 %s", path, manifest.Size, digest)
 		}
-		t.Logf("OTA verified: %d bytes, SHA-256 %s", manifest.Size, digest)
 	})
 
 	direct, res := c.read(t, "/api/tts", []byte(`{"text":"The Moon reflects sunlight."}`), jsonType, nil, 200)
 	if res.Header.Get("Content-Type") != pcmType || !livePCMOK(direct) {
 		t.Fatal("direct TTS returned invalid PCM")
 	}
-	var recording []byte
-	if path := os.Getenv("ECHOEAR_TEST_WAV"); path != "" {
-		wav, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal("cannot read test WAV", err)
+	t.Run("VoiceAndChat", func(t *testing.T) {
+		iso := liveIsolated(t, home, data, conf, run, client)
+		id := run + "-voice"
+		board := testConnectWS(t, iso.base, iso.token, false)
+		board.timeout = 100 * time.Second
+		board.helloV2(t, id, "LiveVoice")
+		viewer := testConnectWS(t, iso.base, iso.token, true)
+		viewer.timeout = 100 * time.Second
+		viewer.watch(t, id)
+		input, _ := json.Marshal(object{"text": liveVoicePrompt})
+		recording, _ := iso.read(t, "/api/tts", input, jsonType, nil, 200)
+		board.json(t, object{"ev": "rec_start"})
+		for offset := 0; offset < len(recording); offset += pcmPacket {
+			chunk := recording[offset:min(offset+pcmPacket, len(recording))]
+			board.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, chunk...)))
 		}
-		recording, err = wavPCM(wav)
-		if err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		in, _ := json.Marshal(object{"text": liveVoicePrompt})
-		recording, _ = c.read(t, "/api/tts", in, jsonType, nil, 200)
-	}
-	t.Run("Voice", func(t *testing.T) {
-		device := run + "-voice"
-		t.Cleanup(func() {
-			liveJSON[object](t, c, "/api/reset", object{"device_id": device}, nil, "", nil)
+		board.json(t, object{"ev": "rec_end"})
+		board.until(t, hasWS("tts", `"state":"start"`))
+		var spoken []byte
+		end := board.until(t, func(f wsFrame) bool {
+			if f.op == wsBinary && f.data[0] == pcmPrefix {
+				spoken = append(spoken, f.data[1:]...)
+			}
+			return hasWS("tts", `"state":"end"`)(f)
 		})
-		start := time.Now()
-		got := liveJSON[voiceAnswer](t, c, "/api/voice", nil, recording, pcmType, map[string]string{"X-Device-Id": device})
-		jsonMS := time.Since(start).Milliseconds()
-		if !strings.Contains(strings.ToLower(got.Transcript), "right triangle") ||
-			got.AudioURL == nil || got.SampleRate != sampleRate || got.TTSFirstMS != got.TTSMS {
-			t.Fatalf("voice response did not contain transcript and audio (speech=%t audio=%t)",
-				strings.Contains(strings.ToLower(got.Transcript), "right triangle"), got.AudioURL != nil)
+		if !livePCMOK(spoken) {
+			t.Fatal("voice turn did not return playable PCM")
 		}
-		pcm, audio := c.read(t, *got.AudioURL, nil, "", nil, 200)
-		total := time.Since(start).Milliseconds()
-		replay, fixed := c.read(t, *got.AudioURL, nil, "", nil, 200)
-		if !livePCMOK(pcm) || !bytes.Equal(pcm, replay) || fixed.ContentLength != int64(len(pcm)) {
-			t.Fatal("live audio was silent, corrupt, or not byte-identical on replay")
+		board.json(t, object{"ev": "tts_ack", "state": "done", "audio": testObject(t, end.data)["audio"]})
+		board.write(t, maskedFrame(wsClose, true, wsCloseFrame(1000).data))
+		board.until(t, func(f wsFrame) bool { return f.op == wsClose })
+		viewer.until(t, hasWS("peers", `"ws":false`))
+		entries := liveJSON[struct{ Messages []chatEntry }](t, iso, "/api/devices/"+id+"/messages", nil, nil, "", nil).Messages
+		if len(entries) != 2 || entries[0].Source != "voice" || !strings.Contains(strings.ToLower(entries[0].Text), "right triangle") {
+			t.Fatal("voice question and answer not in canonical history")
 		}
-		if got.AudioStreaming && got.AudioBytes != 0 || !got.AudioStreaming && got.AudioBytes != len(pcm) ||
-			slices.Contains(audio.TransferEncoding, "chunked") && !got.AudioStreaming {
-			t.Fatal("inconsistent stream metadata")
+
+		follow := liveJSON[struct {
+			Reply     string
+			SessionID string `json:"session_id"`
+			AudioURL  string `json:"audio_url"`
+		}](t, iso, "/api/chat", object{"device_id": id, "text": "Repeat in one sentence, without tools: Paris is the capital of France."}, nil, "", nil)
+		assertLiveActor(t, oc, follow.SessionID, settings)
+		if !strings.Contains(strings.ToLower(follow.Reply), "paris") || !strings.HasPrefix(follow.AudioURL, "/api/audio/") {
+			t.Fatal("remembered device could not chat and play a text reply")
 		}
-		t.Logf("hex_ms=%d opencode_ms=%d tts_first_ms=%d json_ms=%d total_ms=%d chunked=%t pcm_bytes=%d",
-			got.HexMS, got.OpenCodeMS, got.TTSFirstMS, jsonMS, total, slices.Contains(audio.TransferEncoding, "chunked"), len(pcm))
-		assertLiveActor(t, oc, got.SessionID, settings)
-		// An unpunctuated tail cannot be queued until the final message is verified.
-		follow := liveJSON[answer](t, c, "/api/text", object{"device_id": device, "text": "Please repeat the following text verbatim, with no diagram and no punctuation after the last word:\nParis is the capital of France. The city has a famous tower. People can walk along the river and see bridges reaching across the water"}, nil, "", nil)
-		if follow.SessionID != got.SessionID || !strings.Contains(strings.ToLower(follow.Reply), "paris") || follow.AudioURL == nil {
-			t.Fatal("follow-up did not reuse the session")
+		pcm, res := iso.read(t, follow.AudioURL, nil, "", nil, 200)
+		replay, fixed := iso.read(t, follow.AudioURL, nil, "", nil, 200)
+		if !livePCMOK(pcm) || res.Header.Get("Content-Type") != pcmType || !bytes.Equal(pcm, replay) || fixed.ContentLength != int64(len(pcm)) {
+			t.Fatal("live chat audio was silent, corrupt, or not byte-identical on replay")
 		}
-		pcm, audio = c.read(t, *follow.AudioURL, nil, "", nil, 200)
-		replay, fixed = c.read(t, *follow.AudioURL, nil, "", nil, 200)
-		if !livePCMOK(pcm) || !bytes.Equal(pcm, replay) || fixed.ContentLength != int64(len(pcm)) {
-			t.Fatal("live follow-up audio did not replay intact")
+		messages, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+follow.SessionID+"/message?order=asc&limit=10&type=user", nil)
+		if err != nil || len(messages) != 2 || !strings.HasPrefix(messages[0].Text, "[LiveVoice ("+id+") · hardware · voice]") {
+			t.Fatal("HTTP chat did not reuse the WebSocket voice session or preserve provenance")
 		}
-		chunked := slices.Contains(audio.TransferEncoding, "chunked")
-		t.Logf("follow_up opencode_ms=%d tts_first_ms=%d chunked=%t replay_bytes=%d", follow.OpenCodeMS, follow.TTSFirstMS, chunked, len(replay))
-		liveJSON[object](t, c, "/api/reset", object{"device_id": device}, nil, "", nil)
-		silence := liveJSON[voiceAnswer](t, c, "/api/voice", nil, make([]byte, 64000), pcmType, map[string]string{"X-Device-Id": device})
-		if silence.Transcript != "" || silence.SessionID != "" || silence.AudioURL != nil {
-			t.Fatal("silence opened an OpenCode session")
-		}
-	})
-	t.Run("Intercom", func(t *testing.T) {
-		// The mock peer is only visible to this bridge, not the dedicated
-		// server's MCP proxy. Deny tools to exercise the legacy text path.
-		legacyConf := maps.Clone(conf)
-		legacyConf["ECHOEAR_OPENCODE_AGENT"] = "build"
-		legacySettings, err := openCodeSettings("build", conf["ECHOEAR_OPENCODE_MODEL"])
-		if err != nil {
-			t.Fatal(err)
-		}
-		iso := liveIsolated(t, home, data, legacyConf, run, client)
-		type deliveryPart struct {
-			path string
-			raw  []byte
-		}
-		received := make(chan deliveryPart, 8)
-		peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("X-EchoEar-Token") != run {
-				w.WriteHeader(401)
-				return
-			}
-			raw, err := io.ReadAll(io.LimitReader(r.Body, maxPeerPCM+1))
-			if err != nil || len(raw) > maxPeerPCM {
-				w.WriteHeader(400)
-				return
-			}
-			received <- deliveryPart{r.URL.Path, raw}
-			w.WriteHeader(204)
-		}))
-		defer peerServer.Close()
-		_, port, _ := net.SplitHostPort(peerServer.Listener.Addr().String())
-		p, _ := strconv.Atoi(port)
-		sender, target := run+"-cake", run+"-mock"
-		liveJSON[object](t, iso, "/api/register", object{"device_id": target, "character": "MockPeer", "port": p}, nil, "", nil)
-		liveJSON[object](t, iso, "/api/register", object{"device_id": sender, "character": "Cake", "ip": "127.0.0.2"}, nil, "", nil)
-		checkDelivery := func() []byte {
-			t.Helper()
-			parts := make(map[string][]byte)
-			for range 2 {
-				select {
-				case d := <-received:
-					parts[d.path] = d.raw
-				case <-time.After(time.Second):
-					t.Fatal("timed out waiting for peer delivery")
-				}
-			}
-			var card struct {
-				Title  string
-				Shapes []map[string]any
-			}
-			if err := json.Unmarshal(parts["/display"], &card); err != nil || card.Title != "From Cake!" || len(card.Shapes) == 0 {
-				t.Fatal("missing or invalid peer display")
-			}
-			btn := card.Shapes[len(card.Shapes)-1]
-			audio := parts["/speak"]
-			if btn["s"] != "Reply to Cake" || btn["reply_to"] != sender || !bytes.HasPrefix(audio, MakeIntercomChimePCM()) || !livePCMOK(audio) {
-				t.Fatal("invalid reply button or intercom audio")
-			}
-			return audio
-		}
-		voice := liveJSON[voiceAnswer](t, iso, "/api/intercom", nil, recording, pcmType, map[string]string{"X-Device-Id": sender, "X-Target": target})
-		if voice.OK == nil || !*voice.OK || voice.OpenCodeMS != 0 || !bytes.HasSuffix(checkDelivery(), NormalizeVoicePCM(recording)) {
-			t.Fatal("raw voice intercom regression")
-		}
-		start := time.Now()
-		fast := liveJSON[answer](t, iso, "/api/text", object{"device_id": sender, "text": "Tell MockPeer dinner is ready!"}, nil, "", nil)
-		elapsed := time.Since(start).Milliseconds()
-		if fast.SessionID != "" || fast.OpenCodeMS != 0 || fast.SentTo == nil || !slices.Equal(*fast.SentTo, []string{target}) {
-			t.Fatal("fast path did not deliver or called OpenCode")
-		}
-		checkDelivery()
-		t.Logf("fast_path_intercom_ms=%d tts_first_ms=%d", elapsed, fast.TTSFirstMS)
-		start = time.Now()
-		ai := liveJSON[answer](t, iso, "/api/text", object{"device_id": sender,
-			"text": "Reply using exactly this legacy intercom payload:\n```echoear-message\n" +
-				`{"to":"MockPeer","text":"Why did the dinosaur cross the road? Because chickens hadn't evolved yet!"}` + "\n```"},
-			nil, "", nil)
-		if ai.SentTo == nil || !slices.Equal(*ai.SentTo, []string{target}) || strings.Contains(ai.Reply, "```") {
-			t.Fatal("AI echoear-message was not delivered or leaked into reply")
-		}
-		checkDelivery()
-		t.Logf("ai_intercom_ms=%d opencode_ms=%d tts_first_ms=%d", time.Since(start).Milliseconds(), ai.OpenCodeMS, ai.TTSFirstMS)
-		assertLiveActor(t, oc, ai.SessionID, legacySettings)
-		prompt, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+ai.SessionID+"/message?order=desc&limit=1&type=user", nil)
-		if err != nil || len(prompt) != 1 || !strings.HasPrefix(prompt[0].Text,
-			"[Cake ("+sender+") · hardware · typed]\n") {
-			t.Fatal("OpenCode prompt identity or provenance is incorrect")
-		}
-		reg := liveJSON[struct {
-			Devices []struct {
-				DeviceID string `json:"device_id"`
-				IP       string `json:"ip"`
-			}
-		}](t, iso, "/api/devices", nil, nil, "", nil)
-		for _, who := range reg.Devices {
-			if who.DeviceID == sender && who.IP == "127.0.0.2" {
-				return
-			}
-		}
-		t.Fatal("traffic overwrote the sender's registered IP")
+		t.Logf("validated voice capture, playback, canonical history, HTTP follow-up and %d replayed PCM bytes", len(pcm))
 	})
 	t.Run("DevicesAfter", func(t *testing.T) {
 		if !maps.Equal(before, liveDevices(t)) {

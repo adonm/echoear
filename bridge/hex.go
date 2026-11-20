@@ -184,28 +184,24 @@ func hexQuery(raw []byte) (string, error) {
 
 var hexSilence [sampleRate * 150 / 1000 * 2]byte // 150 ms of 16-bit mono PCM.
 
-func (h hexClient) transcribe(ctx context.Context, audio []byte, kind string) (string, error) {
+func (h hexClient) transcribe(ctx context.Context, audio []byte) (string, error) {
 	query, err := h.query.get(false)
 	if err != nil {
 		return "", h.invalid()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	size := len(audio)
-	body := func() io.Reader { return bytes.NewReader(audio) }
-	if kind == pcmType {
-		var pad []byte
-		for _, b := range audio {
-			if b != 0 {
-				pad = hexSilence[:]
-				break
-			}
+	var pad []byte
+	for _, b := range audio {
+		if b != 0 {
+			pad = hexSilence[:]
+			break
 		}
-		header := wavHeader(size + 2*len(pad))
-		size += len(header) + 2*len(pad)
-		body = func() io.Reader {
-			return io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(pad), bytes.NewReader(audio), bytes.NewReader(pad))
-		}
+	}
+	header := wavHeader(len(audio) + 2*len(pad))
+	size := len(header) + len(audio) + 2*len(pad)
+	body := func() io.Reader {
+		return io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(pad), bytes.NewReader(audio), bytes.NewReader(pad))
 	}
 	var result struct{ Transcript *string }
 	if err := h.json(ctx, http.MethodPost, "/transcriptions?"+query, wavType, int64(size), body, &result); err != nil {

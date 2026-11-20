@@ -370,9 +370,7 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		} else if len(pcm) == 0 {
 			h.chime(d, t.Chime)
 		}
-		view := noticeScene("Time's up!", message)
-		view.nodes[len(view.nodes)-1]["s"] = "OK"
-		view.actions["cat"] = sceneAction{"dismiss", ""}
+		view := timerScene(message)
 		d.card, d.drawer = &view, ""
 		if t.Say != "" {
 			h.speakLocalAfter(d, t.Say, pcm)
@@ -386,20 +384,6 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 		defer cancel()
 		_, _ = b.generateReply(ctx, ctx, who, "Timer fired: "+message, turnOptions{source: "timer"})
-	} else if who.Port != 0 && !t.WakeAgent {
-		pcm, _ := synthesizeMelody(t.Notes)
-		if len(pcm) == 0 {
-			pcm = chimePCM(t.Chime)
-		}
-		if t.Say != "" && b.worker != nil && b.worker.ready.Load() {
-			speechCtx, cancel := context.WithTimeout(ctx, ttsWait)
-			spoken, err := b.worker.synthesize(speechCtx, b.voiceFor(who), t.Say)
-			cancel()
-			if err == nil {
-				pcm = append(pcm, spoken...)
-			}
-		}
-		b.postPeer(ctx, who, "/speak", pcmType, pcm)
 	}
 }
 

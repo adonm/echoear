@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -50,7 +52,7 @@ func TestDeviceVoiceDefaults(t *testing.T) {
 		want              string
 	}{
 		{"echoear-33d8", "Cake", heartVoice},
-		{"ECHOEAR-2CAC", "Other", fableVoice},
+		{"ECHOEAR-2CAC", "Other", heartVoice},
 		{"echoear-other", "Mint", fableVoice},
 		{"virt-01234567", "Green Cat", fableVoice},
 		{"virt-1234abcd", "Greg", heartVoice},
@@ -116,7 +118,7 @@ func TestDeviceVoiceAPI(t *testing.T) {
 	testRequest(t, "GET", scoped.URL+path, "scoped-test", nil, 404)
 	testRequest(t, "POST", scoped.URL+path, "scoped-test", object{"voice": heartVoice}, 200)
 	scope := testObject(t, testRequest(t, "GET", scoped.URL+"/api/scope", "scoped-test", nil, 200))
-	if scope["voice"] != heartVoice || b.voices.get("echoear-33d8", "cake") != fableVoice {
+	if scope["voice"] != heartVoice || !reflect.DeepEqual(profile["voices"], scope["voices"]) || len(scope["voices"].([]any)) != len(voiceCatalog) || b.voices.get("echoear-33d8", "cake") != fableVoice {
 		t.Fatal("scoped update did not stay on the scoped cat")
 	}
 }
@@ -128,25 +130,22 @@ func TestMenuVoicePicker(t *testing.T) {
 	const id = "echoear-33d8"
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, id, "Cake")
-	c.json(t, object{"ev": "tap", "id": "text", "x": 180, "y": 300})
-	c.until(t, hasWS("patch", `"sub":"Heart"`))
-	c.json(t, object{"ev": "tap", "id": "menu-voice"})
-	c.until(t, hasWS("patch", `"voice-george"`))
-	choose := func(idKey, voice string) {
-		t.Helper()
-		c.json(t, object{"ev": "tap", "id": idKey})
-		c.until(t, hasWS("chime", `"kind":"tap"`))
-		c.until(t, hasWS("patch", `"icon":"check"`))
-		if reloaded := deviceVoiceStore(b.db, heartVoice); reloaded.get(id, "cake") != voice {
-			t.Errorf("voice picker did not persist %s", voice)
+	web := testConnectWS(t, base, "unit", true)
+	web.watch(t, id)
+	web.json(t, object{"ev": "tap", "id": "menu"})
+	web.until(t, hasWS("svg", "Heart"))
+	web.json(t, object{"ev": "tap", "id": "menu-voice"})
+	web.until(t, hasWS("svg", "voice-george"))
+	for _, voice := range []int{1, 2, 3, 0} {
+		choice := voiceCatalog[voice]
+		web.json(t, object{"ev": "tap", "id": "voice-" + strings.ToLower(choice.Name)})
+		web.until(t, hasWS("svg", "#FFD68B"))
+		if reloaded := deviceVoiceStore(b.db, heartVoice); reloaded.get(id, "cake") != choice.ID {
+			t.Errorf("voice picker did not persist %s", choice.ID)
 		}
 	}
-	choose("voice-fable", fableVoice)
-	choose("voice-emma", emmaVoice)
-	choose("voice-george", "bm_george")
-	choose("voice-heart", heartVoice)
-	c.json(t, object{"ev": "tap", "id": "menu-back"})
-	c.until(t, hasWS("patch", `"sub":"Heart"`))
+	web.json(t, object{"ev": "tap", "id": "menu-back"})
+	web.until(t, hasWS("svg", "menu-voice"))
 	testRequest(t, "POST", base+"/api/devices/"+id+"/voice", "unit", object{"voice": "bf_alice"}, 200)
-	c.until(t, hasWS("patch", `"sub":"Alice"`))
+	web.until(t, hasWS("svg", "Alice"))
 }

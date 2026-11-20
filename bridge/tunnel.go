@@ -370,7 +370,7 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			sendResult(w, value, err)
 		case path == "/api/scope":
 			cat := b.catFor(peer{DeviceID: v.ID, Character: v.Character})
-			out := object{"scoped": true, "device_id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme,
+			out := object{"scoped": true, "device_id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme, "voices": voiceCatalog,
 				"voice": b.voices.get(v.ID, v.Theme)}
 			if b.ws != nil {
 				b.ws.mu.Lock()

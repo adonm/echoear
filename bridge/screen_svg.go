@@ -33,20 +33,38 @@ var uiIcons = map[string]string{
 	"minus":    "M4 12h16",
 }
 
-func uiLabel(id string, x, baseline, size int, text, color string) object {
-	n := label(id, x, baseline-4, max(1, size/14), text, color)
-	n["size"], n["baseline"] = size, baseline
-	return n
-}
-
 func (s *sceneView) control(id, action, value string, x, y, w, h int, text, sub, icon, bg, fg string) {
-	n := comicButton(id, x, y, w, h, text, bg)
-	n["bc"], n["sw"], n["tc"], n["icon"], n["sub"] = fg, 2, fg, icon, sub
+	r, tx, ty, size := h/2, x+w/2, y+h/2+6, 16
+	ix, iy, is := x+w/2-10, y+h/2-10, 20
 	if h == 78 {
-		n["r"], n["tile"] = 18, true
+		r, iy, ty, size = 18, y+13, y+57, 18
+		if sub != "" {
+			iy, ty = y+9, y+47
+		}
+	} else if icon == "plus" || icon == "minus" {
+		is, ix, iy = 30, x+w/2-15, y+h/2-15
+	} else if icon != "" {
+		size = 18
+		ix, tx = x+w/2-(runeLen(text)*size/2+26)/2, tx+12
 	}
-	s.nodes = append(s.nodes, n)
-	s.actions[id] = sceneAction{action, value}
+	art := svgRect(x, y, w, h, r, bg, fg, 2)
+	if path := uiIcons[icon]; path != "" {
+		art += fmt.Sprintf(`<path d="%s" transform="translate(%d %d) scale(%.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, float64(is)/24, fg)
+	}
+	if icon != "plus" && icon != "minus" {
+		art += svgLabel(tx, ty, size, text, fg)
+	}
+	if sub != "" {
+		art += svgText(tx, y+66, 13, sub, menuMuted, "")
+	}
+	name := text
+	switch icon {
+	case "plus":
+		name = "Raise volume"
+	case "minus":
+		name = "Lower volume"
+	}
+	s.button(id, name, sceneAction{action, value}, x, y, w, h, art)
 }
 
 func (s *sceneView) stopControl() {
@@ -54,8 +72,7 @@ func (s *sceneView) stopControl() {
 }
 
 func menuScene(title string) sceneView {
-	s := sceneView{bg: menuBG, title: title, actions: map[string]sceneAction{},
-		nodes: []object{uiLabel("menu-title", 180, 76, 28, title, menuInk)}}
+	s := sceneView{bg: menuBG, title: title, art: svgLabel(180, 76, 28, title, menuInk)}
 	s.control("menu-back", "menu-back", "", 120, 292, 120, 46, "Back", "", "back", "#262E43", menuInk)
 	return s
 }
@@ -68,7 +85,7 @@ func menuHome(voice string, auto bool, level int, scoped bool) sceneView {
 	s := menuScene("Menu")
 	s.menuTile(0, "menu-intercom", "menu-open", "intercom", "Talk to…", "", "intercom", "#372530", "#FFADAC")
 	s.menuTile(1, "menu-volume", "menu-open", "volume", "Volume", volumeLabel(auto, level), "volume", "#203144", "#A6DCFF")
-	s.menuTile(2, "menu-voice", "menu-open", "voice", "Voice", voiceNames[voice], "voice", "#322741", "#E2C5FF")
+	s.menuTile(2, "menu-voice", "menu-open", "voice", "Voice", voiceName(voice), "voice", "#322741", "#E2C5FF")
 	if !scoped {
 		s.menuTile(3, "menu-stats", "menu-open", "stats", "Stats", "", "stats", "#193833", "#80F1C5")
 	}
@@ -77,9 +94,10 @@ func menuHome(voice string, auto bool, level int, scoped bool) sceneView {
 
 func volumeScene(auto bool, level int) sceneView {
 	s := menuScene("Volume")
-	s.nodes = append(s.nodes, uiLabel("vol-level", 180, 125, 31, volumeLabel(auto, level), menuInk),
-		box("vol-track", 71, 145, 218, 12, 6, "#323D52"),
-		visible(box("vol-progress", 71, 145, max(1, 218*level/100), 12, 6, "#7BD3FF"), level > 0))
+	s.art += svgLabel(180, 125, 31, volumeLabel(auto, level), menuInk) + svgRect(71, 145, 218, 12, 6, "#323D52", "none", 0)
+	if level > 0 {
+		s.art += svgRect(71, 145, max(1, 218*level/100), 12, 6, "#7BD3FF", "none", 0)
+	}
 	s.control("vol-minus", "vol-minus", "", 91, 174, 68, 56, "−", "", "minus", "#203144", "#A6DCFF")
 	s.control("vol-plus", "vol-plus", "", 201, 174, 68, 56, "+", "", "plus", "#203144", "#A6DCFF")
 	icon, tint := "", menuMuted
@@ -92,12 +110,12 @@ func volumeScene(auto bool, level int) sceneView {
 
 func voiceScene(current string) sceneView {
 	s := menuScene("Voice")
-	for i, voice := range []string{heartVoice, "bm_fable", "bf_emma", "bm_george"} {
-		name, icon, tint := voiceNames[voice], "voice", "#E2C5FF"
-		if current == voice {
+	for i, voice := range voiceCatalog[:4] {
+		icon, tint := "voice", "#E2C5FF"
+		if current == voice.ID {
 			icon, tint = "check", "#FFD68B"
 		}
-		s.menuTile(i, "voice-"+strings.ToLower(name), "voice-select", voice, name, "", icon, "#322741", tint)
+		s.menuTile(i, "voice-"+strings.ToLower(voice.Name), "voice-select", voice.ID, voice.Name, "", icon, "#322741", tint)
 	}
 	return s
 }
@@ -117,12 +135,10 @@ func intercomSceneMenu(peers []menuPeer, page int) sceneView {
 			id = "intercom:" + strconv.Itoa(start+i)
 		}
 		fg := menuPeerInk(p.face)
-		s.control(id, "reply", p.id, x, y, 114, 62, truncate(p.name, 11), "", "", p.face, fg)
-		n := s.nodes[len(s.nodes)-1]
-		n["size"], n["dy"], n["bc"] = 14, 9, menuMuted
-		accent := box("peer-accent-"+strconv.Itoa(i), x+46, y+11, 22, 9, 4, p.accent)
-		accent["bc"], accent["sw"] = fg, 1
-		s.nodes = append(s.nodes, accent)
+		s.button(id, p.name, sceneAction{"reply", p.id}, x, y, 114, 62,
+			svgRect(x, y, 114, 62, 31, p.face, menuMuted, 2)+
+				svgRect(x+46, y+11, 22, 9, 4, p.accent, fg, 1)+
+				svgLabel(x+57, y+46, 14, truncate(p.name, 11), fg))
 	}
 	if start > 0 {
 		s.control("intercom-prev", "intercom-page", "-1", 85, 231, 84, 46, "Prev", "", "", "#262E43", menuInk)
@@ -151,7 +167,7 @@ func menuPeerInk(tint string) string {
 
 func (h *wsHub) statsScene(d *wsDevice) sceneView {
 	s := menuScene("Stats")
-	s.nodes = append(s.nodes, box("stats-card", 38, 93, 284, 185, 18, "#0E111B"))
+	s.art += svgRect(38, 93, 284, 185, 18, "#0E111B", "none", 0)
 	device := d.diagDevice()
 	h.b.diag.mu.Lock()
 	sys := h.b.diag.system
@@ -214,9 +230,7 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 		if i == 0 {
 			tint = "#80F1C5"
 		}
-		n := uiLabel(fmt.Sprintf("stats-row-%d", i), 180, 121+i*27, min(15, 438/max(1, runeLen(row))), row, tint)
-		n["mono"] = true
-		s.nodes = append(s.nodes, n)
+		s.art += svgText(180, 121+i*27, min(15, 438/max(1, runeLen(row))), row, tint, `font-family="monospace"`)
 	}
 	return s
 }
@@ -291,7 +305,6 @@ func parseFaceSVG(raw string) (*svgNode, error) {
 	var stripControls func(*svgNode)
 	stripControls = func(n *svgNode) {
 		delete(n.attr, "data-id")
-		delete(n.attr, "data-on")
 		delete(n.attr, "data-hit")
 		for _, child := range n.children {
 			stripControls(child)
@@ -315,8 +328,8 @@ func sanitizeFaceSVG(raw string) (string, error) {
 	}
 	// Validate all poses together with chrome, including the compositor's depth
 	// and node overhead, so no accepted face can crowd out the system controls.
-	chrome := catChrome(blankCat(), catPose{battery: 100, charge: true, meter: true})
-	if _, _, err := renderSVG(sceneSVG(chrome, svgString(wrapFaceLayer(root)))); err != nil {
+	chrome := catChrome(blankCat(), catPose{mood: "listening", battery: 100, charge: true, meter: true})
+	if _, _, err := renderSVG(chrome.svg(svgString(wrapFaceLayer(root)))); err != nil {
 		return "", problem(400, err.Error())
 	}
 	return clean, nil
@@ -408,128 +421,18 @@ func wrapFaceLayer(root *svgNode) *svgNode {
 }
 
 func catSVG(cat catState, pose catPose) string {
+	return catChrome(cat, pose).svg(catArt(cat, pose))
+}
+
+func catArt(cat catState, pose catPose) string {
 	root, err := parseFaceSVG(cat.FaceSVG)
 	if err != nil {
 		root, _ = parseFaceSVG(cat.defaultFace())
 	}
-	return composedCatSVG(catChrome(cat, pose), root, pose.facePose())
-}
-
-func composedCatSVG(chrome sceneView, root *svgNode, pose string) string {
-	art := ""
-	if layer := faceLayer(root, pose); layer != nil {
-		art = svgString(layer)
+	if layer := faceLayer(root, pose.facePose()); layer != nil {
+		return svgString(layer)
 	}
-	return sceneSVG(chrome, art)
-}
-
-func sceneSVG(s sceneView, art string) string {
-	var out strings.Builder
-	out.WriteString(svgStart)
-	fmt.Fprintf(&out, `<rect width="360" height="360" fill="%s"/>`, s.bg)
-	out.WriteString(art)
-	fmt.Fprintf(&out, `<g>`)
-	for _, n := range s.nodes {
-		if n["vis"] == false {
-			continue
-		}
-		id, kind := str(n["id"]), str(n["t"])
-		v := func(k string) int { return nodeInt(n, k) }
-		x, y, w, h := v("x"), v("y"), v("w"), v("h")
-		text, tint := html.EscapeString(str(n["s"])), str(n["c"])
-		if tint == "" {
-			tint = "#FFFAEE"
-		}
-		attr := ""
-		if s.actions[id].kind != "" {
-			attr = fmt.Sprintf(` data-id="%s" data-on="%s"`, id, str(n["on"]))
-		}
-		sw, stroke, fill := max(1, v("sw")), str(n["bc"]), tint
-		if stroke == "" {
-			stroke = "none"
-		}
-		if n["fill"] == false {
-			fill, stroke = "none", tint
-		}
-		paint := fmt.Sprintf(` fill="%s" stroke="%s" stroke-width="%d"`, fill, stroke, sw)
-		switch kind {
-		case "rect", "btn":
-			fmt.Fprintf(&out, `<rect x="%d" y="%d" width="%d" height="%d" rx="%d"%s%s/>`, x, y, w, h, v("r"), paint, attr)
-			if kind == "btn" {
-				tc := str(n["tc"])
-				if tc == "" {
-					tc = catInk
-				}
-				ix, iy, is := x+w/2-10, y+h/2-10, 20
-				tx, ty, size := x+w/2, y+h/2+6+v("dy"), 16
-				icon, sub := str(n["icon"]), str(n["sub"])
-				if n["tile"] == true {
-					iy, ty = y+13, y+57
-					if sub != "" {
-						iy, ty = y+9, y+47
-					}
-					size = 18
-				} else if icon == "plus" || icon == "minus" {
-					text, is, ix, iy = "", 30, x+w/2-15, y+h/2-15
-				} else if icon != "" {
-					size = 18
-					ix, tx = x+w/2-(runeLen(str(n["s"]))*size/2+26)/2, tx+12
-				}
-				if v("size") > 0 {
-					size = v("size")
-				}
-				if path := uiIcons[icon]; path != "" {
-					fmt.Fprintf(&out, `<path d="%s" transform="translate(%d %d) scale(%.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, float64(is)/24, tc)
-				}
-				if text != "" {
-					fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="%d" font-weight="bold">%s</text>`, tx, ty, tc, size, text)
-				}
-				if sub != "" {
-					fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="13">%s</text>`, tx, y+66, menuMuted, html.EscapeString(sub))
-				}
-			}
-		case "circle":
-			fmt.Fprintf(&out, `<circle cx="%d" cy="%d" r="%d"%s%s/>`, x, y, v("r"), paint, attr)
-		case "line":
-			fmt.Fprintf(&out, `<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="%d" stroke-linecap="round"%s/>`, v("x1"), v("y1"), v("x2"), v("y2"), tint, sw, attr)
-		case "tri":
-			fmt.Fprintf(&out, `<polygon points="%d,%d %d,%d %d,%d"%s%s/>`, v("x1"), v("y1"), v("x2"), v("y2"), v("x3"), v("y3"), paint, attr)
-		case "arc":
-			r, a, b := v("r"), v("a1"), v("a2")
-			if b < a {
-				b += 360
-			}
-			if b-a == 360 {
-				fmt.Fprintf(&out, `<circle cx="%d" cy="%d" r="%d" fill="none" stroke="%s" stroke-width="%d"%s/>`, x, y, r, tint, sw, attr)
-				break
-			}
-			point := func(a int) (float64, float64) {
-				s, c := math.Sincos(float64(a) * math.Pi / 180)
-				return float64(x) + float64(r)*c, float64(y) + float64(r)*s
-			}
-			ax, ay := point(a)
-			bx, by := point(b)
-			big := 0
-			if b-a > 180 {
-				big = 1
-			}
-			fmt.Fprintf(&out, `<path d="M%.3f %.3f A%d %d 0 %d 1 %.3f %.3f" fill="none" stroke="%s" stroke-width="%d" stroke-linecap="round"%s/>`, ax, ay, r, r, big, bx, by, tint, sw, attr)
-		case "text":
-			size, baseline := v("size"), v("baseline")
-			if size == 0 {
-				size = 14 * max(1, v("fs"))
-				baseline = y + size/3
-			}
-			font := `font-weight="bold"`
-			if n["mono"] == true {
-				font = `font-family="monospace"`
-			}
-			fmt.Fprintf(&out, `<text x="%d" y="%d" fill="%s" text-anchor="middle" font-size="%d" %s%s>%s</text>`, x, baseline, tint, size, font, attr, text)
-		}
-	}
-	out.WriteString("</g>")
-	out.WriteString("</svg>")
-	return out.String()
+	return ""
 }
 
 type svgScreen struct {
@@ -562,8 +465,8 @@ func (h *wsHub) svgFrame(d *wsDevice) wsFrame {
 	return textFrame(object{"op": "svg", "rev": d.rev, "svg": d.svg.source})
 }
 
-func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, legacy object, full bool) {
-	if !full && screen.source == d.svg.source && legacy == nil {
+func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, full bool) {
+	if !full && screen.source == d.svg.source {
 		return
 	}
 	d.rev++
@@ -572,7 +475,7 @@ func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, legacy object, full bo
 		frame := h.svgFrame(d)
 		d.client.enqueue(frame)
 		h.trackFrame(d, screen.render, len(frame.data), len(screen.source), "svg")
-	} else if d.proto >= 2 {
+	} else {
 		if screen.fb != nil {
 			rect := dirtyRect(d.svg.fb, screen.fb, d.screen)
 			if !rect.Empty() {
@@ -587,12 +490,6 @@ func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, legacy object, full bo
 			}
 		}
 		d.svg = screen
-	} else {
-		d.svg = screen
-		if legacy != nil {
-			legacy["rev"] = d.rev
-			d.client.enqueue(textFrame(legacy))
-		}
 	}
 	for c := range h.clients {
 		if c.watch == d.key {
@@ -601,21 +498,19 @@ func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, legacy object, full bo
 	}
 }
 
-func (h *wsHub) renderSVGView(d *wsDevice, raw string, legacy object, full bool) {
-	if !full && raw == d.svgRaw && legacy == nil {
+func (h *wsHub) renderSVGView(d *wsDevice, raw string, full bool) {
+	if !full && raw == d.svgRaw {
 		return
 	}
-	d.svgRaw = raw
 	var geometry screenGeometry
-	if d.proto >= 2 && d.client.role != "web" {
+	if d.client.role == "device" {
 		geometry = d.screen
 	}
 	screen, err := buildScreen(raw, false, geometry)
 	if err != nil {
 		log.Printf("EchoEar screen: %v", err)
-		if legacy == nil || d.proto >= 2 || d.client.role == "web" {
-			return
-		}
+		return
 	}
-	h.pushScreen(d, screen, legacy, full)
+	d.svgRaw = raw
+	h.pushScreen(d, screen, full)
 }

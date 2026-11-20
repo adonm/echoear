@@ -88,7 +88,7 @@ func TestTursoMigration(t *testing.T) {
 		}
 	}
 	for name, n := range map[string]int{"meta": 5, "cats": 3, "saved_cats": 3, "devices": 2, "virtual_clients": 1, "tunnels": 1, "sessions": 3,
-		"voices": 2, "chat_events": 2, "messages": 1, "memory": 0, "assets": 0, "apps": 0, "timers": 0} {
+		"voices": 2, "chat_events": 2, "messages": 1, "memory": 0, "apps": 0, "timers": 0} {
 		assertRows(name, n)
 	}
 	if got, _, err := deviceStore(db).get(cake.DeviceID); err != nil || got != cake {

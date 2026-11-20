@@ -100,7 +100,7 @@ func (p *workerProcess) stop() {
 }
 
 func ttsFrame(voice, text string) []byte {
-	if voiceNames[voice] == "" {
+	if voiceName(voice) == "" {
 		voice = heartVoice
 	}
 	request := make([]byte, 0, 8+len(voice)+len(text))

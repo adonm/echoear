@@ -197,6 +197,8 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	}
 	physical := testConnectWS(t, base, "unit", false)
 	physical.hello(t, "echoear-private", "Cake")
+	mirror := testConnectWS(t, base, "unit", true)
+	mirror.watch(t, "echoear-private")
 	testRequest(t, "GET", scoped+"/app", "", nil, 200)
 	testRequest(t, "GET", scoped+"/app/client.js", "", nil, 200)
 	testRequest(t, "GET", scoped+"/api/scope", "unit", nil, 401)
@@ -248,7 +250,7 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	testRequest(t, "GET", scoped+"/api/diagnostics", token, nil, 404)
 	testRequest(t, "GET", scoped+"/api/diagnostics", "unit", nil, 404)
 	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": id, "text": "Tell Cake Hi from HTTP."}, 200)
-	physical.until(t, hasWS("patch", "Hi from HTTP."))
+	mirror.until(t, hasWS("svg", "Hi from HTTP."))
 	_, rejected := dialTestWS(t, scoped, "unit", false, nil)
 	if rejected.StatusCode != 401 {
 		t.Fatal(rejected.StatusCode)
@@ -280,10 +282,10 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	assertPrompt("WebSocket question?")
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "text", "text": "Tell Cake Hi from text."})
-	physical.until(t, hasWS("patch", "Hi from text."))
+	mirror.until(t, hasWS("svg", "Hi from text."))
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "intercom", "target": "echoear-private", "text": "Hi from WS intercom."})
-	physical.until(t, hasWS("patch", "Hi from WS intercom."))
+	mirror.until(t, hasWS("svg", "Hi from WS intercom."))
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
 	conn.until(t, hasWS("svg", "cat-ring"))
@@ -300,18 +302,11 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	pcm := bytes.Repeat([]byte{12, 0}, 120)
 	conn.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm...)))
 	conn.json(t, object{"ev": "rec_end", "target": "echoear-private"})
-	caption := hasWS("patch", "Voice to Cake.")
-	sawCaption := false
-	got := physical.until(t, func(f wsFrame) bool {
-		sawCaption = sawCaption || caption(f)
-		return f.op == wsBinary
-	})
-	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], pcm) {
+	got := physical.until(t, func(f wsFrame) bool { return f.op == wsBinary && f.data[0] == pcmPrefix })
+	if !bytes.Equal(got.data[1:], pcm) {
 		t.Fatal("tunneled menu did not deliver recorded PCM")
 	}
-	if !sawCaption {
-		physical.until(t, caption)
-	}
+	mirror.until(t, hasWS("svg", "Voice to Cake."))
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
 	conn.until(t, hasWS("svg", "cat-ring"))

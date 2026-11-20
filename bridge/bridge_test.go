@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,54 +29,10 @@ func TestTurnPromptIdentifiesDeviceAndInput(t *testing.T) {
 		{"phone-1234", "tap", "web", false},
 		{"other-id", "tap", "web", true},
 	} {
-		live := turnContext{at: time.Date(2026, 1, 1, 14, 5, 0, 0, time.FixedZone("MST", -7*3600))}
-		if got := turnPrompt(peer{DeviceID: tc.id}, tc.web, tc.source, "Hi", legacyCat("Cake", "cake"), live); got !=
+		if got := turnPrompt(peer{DeviceID: tc.id}, tc.web, tc.source, "Hi", legacyCat("Cake", "cake")); got !=
 			"[Cake ("+tc.id+") · "+tc.kind+" · "+tc.source+"]\nHi" {
 			t.Fatal(got)
 		}
-	}
-}
-
-func TestPayloads(t *testing.T) {
-	button := object{"t": "btn", "x": -1, "y": 360, "w": 180, "h": 40, "c": "#abcdef", "s": "Explore",
-		"tap": "**Hi**", "ask": strings.Repeat("x", 130), "reply_to": "**echoear-ABCD**"}
-	spec := []object{button, {"t": "circle", "x": 0, "y": 1, "r": 2, "c": "bad"},
-		{"t": "arc", "x": 0, "y": 0, "r": 10, "a1": -3, "a2": 361, "c": "#ffffff"}}
-	for range 30 {
-		spec = append(spec, object{"t": "text", "x": 12.6, "y": 200, "c": "#010203", "s": "Large", "ask": strings.Repeat("🔥", 120)})
-	}
-	raw, _ := json.Marshal(object{"shapes": spec})
-	reply, screen, message := extractPayloads("Hi!\n```echoear-message\n{\"to\":\"Mint\",\"text\":\"**Hi**\"}\n```\n```echoear-screen\n" + string(raw) + "\n```")
-	if reply != "Hi!" || message == nil || *message != (intercomMessage{"Mint", "Hi"}) || screen == nil {
-		t.Fatalf("bad payload extraction: %q %v %v", reply, screen != nil, message)
-	}
-	want := object{"t": "btn", "x": 0, "y": 359, "w": 180, "h": 40, "c": "#ABCDEF", "s": "Explore",
-		"tap": "Hi", "ask": strings.Repeat("x", 120), "reply_to": "echoear-ABCD"}
-	shapes := screen["shapes"].([]object)
-	encoded, _ := json.Marshal(screen)
-	if len(shapes) < 3 || len(shapes) > 24 || len(encoded) >= maxScreen || !reflect.DeepEqual(shapes[0], want) {
-		t.Fatalf("bad sanitizer: %d shapes %d bytes, button %v", len(shapes), len(encoded), shapes[0])
-	}
-	if shapes[1]["a1"] != 0 || shapes[1]["a2"] != 360 || shapes[2]["x"] != 12 {
-		t.Fatalf("bad numeric coordinates: %v %v", shapes[1], shapes[2]["x"])
-	}
-	tooMany := slices.Repeat([]object{button}, 40)
-	for i := range tooMany {
-		tooMany[i] = object{"t": "line", "x1": 0, "y1": 1, "x2": 3, "y2": 4, "c": "#123456", "reply_to": "invalid"}
-	}
-	raw, _ = json.Marshal(object{"shapes": tooMany})
-	limited := sanitizeScreen(string(raw))["shapes"].([]object)
-	if len(limited) != 24 || limited[0]["reply_to"] != nil {
-		t.Fatal("shape limit or non-button action")
-	}
-	for _, bad := range []string{"```echoear-screen\n{\"title\":\"unclosed\"}", "```echoear-message\n{bad}\n```"} {
-		if r, s, m := extractPayloads("Hi!\n" + bad); r != "Hi!" || s != nil || m != nil {
-			t.Fatalf("accepted bad fence: %q", bad)
-		}
-	}
-	card := messageCard(peer{DeviceID: "echoear-ABCD", Character: "Cake"}, "Hi")
-	if parts := card["shapes"].([]object); parts[len(parts)-1]["reply_to"] != "echoear-ABCD" {
-		t.Fatal("reply not routed to sender ID")
 	}
 }
 
@@ -128,14 +83,7 @@ func TestAudioDSP(t *testing.T) {
 	if normalized < 25000 || normalized > 26100 || !bytes.Equal(NormalizeVoicePCM(quiet), quiet) {
 		t.Fatal("bad normalization or noise-floor guard")
 	}
-	wav := WrapWAV(pcm)
-	observed, err := wavPCM(wav)
-	if err != nil || !bytes.Equal(pcm, observed) || len(wav) != 44+len(pcm) {
-		t.Fatal("WAV round trip", err)
-	}
-	if a := MakeIntercomChimePCM(); len(a) != 7040 || rms(a) < 1000 {
-		t.Fatal("bad intercom chime")
-	}
+
 }
 
 func BenchmarkSincOneSecond(b *testing.B) {
@@ -236,14 +184,6 @@ func TestStateAndDirectMessage(t *testing.T) {
 	if err := p.register(mint); err != nil {
 		t.Fatal(err)
 	}
-	got, err := p.touch(mint.DeviceID, "127.0.0.3", "")
-	if err != nil || got.IP != mint.IP || got.Port != mint.Port {
-		t.Fatalf("traffic overwrote address: %+v %v", got, err)
-	}
-	mint = got
-	if _, err := p.touch("local", "127.0.0.1", ""); err != nil {
-		t.Fatal(err)
-	}
 	others, err := (peers{deviceStore(db)}).snapshot("cake")
 	if err != nil || !slices.Equal(targets(others, "everyone"), []peer{mint}) {
 		t.Fatalf("bad peer snapshot %+v %v", others, err)
@@ -275,7 +215,17 @@ func TestStateAndDirectMessage(t *testing.T) {
 
 func TestBridgeAuthAndBody(t *testing.T) {
 	b := &bridge{token: "correct", peers: peers{deviceStore(testDB(t, ":memory:", ""))}}
-	for _, path := range []string{"/api/devices", "/api/audio/unknown", "/api/intercom", "/ota/version.json"} {
+	for _, path := range []string{"/api/register", "/api/text", "/api/voice", "/api/intercom", "/api/assets"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		req.Header.Set("X-EchoEar-Token", "correct")
+		req.Header.Set("Content-Type", jsonType)
+		res := httptest.NewRecorder()
+		b.ServeHTTP(res, req)
+		if res.Code != 404 {
+			t.Fatalf("%s: retired bridge endpoint returned HTTP %d", path, res.Code)
+		}
+	}
+	for _, path := range []string{"/api/devices", "/api/audio/unknown", "/api/tts", "/ota/version.json"} {
 		for _, tokens := range [][]string{nil, {"wrong"}, {"correct", "correct"}} {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			for _, token := range tokens {
@@ -292,15 +242,14 @@ func TestBridgeAuthAndBody(t *testing.T) {
 		body, kind string
 		code       int
 	}{
-		{`{"device_id":"mint","character":"Mint","ip":"127.0.0.2"}`, jsonType, 200},
-		{`{"device_id":"mint","character":"Mint","port":80.0}`, jsonType, 400},
-		{`{"device_id":"mint","character":"Mint","ip":"http://127.0.0.1"}`, jsonType, 400},
+		{`{"text":"Hello"}`, jsonType, 503},
+		{`{"text":""}`, jsonType, 400},
 		{`[]`, jsonType, 400},
 		{`{} trailing`, jsonType, 400},
 		{`{}`, pcmType, 415},
 		{strings.Repeat(" ", maxJSON+1), jsonType, 413},
 	} {
-		req := httptest.NewRequest(http.MethodPost, "/api/register", strings.NewReader(c.body))
+		req := httptest.NewRequest(http.MethodPost, "/api/tts", strings.NewReader(c.body))
 		req.RemoteAddr = "127.0.0.1:10000"
 		req.Header.Set("Content-Type", c.kind)
 		req.Header.Set("X-EchoEar-Token", "correct")

@@ -161,15 +161,11 @@ func (d *bridgeDB) migrateCats(ctx context.Context, voices deviceVoices) error {
 		}
 		c := legacyCat(s.name, s.theme)
 		if !voices.allowed(s.voice) {
-			s.voice = voices.defaultFor(s.id, s.theme)
+			s.voice = voices.defaultFor(s.theme)
 		}
 		c.Voice = s.voice
 		if err := writeCat(ctx, tx, s.id, c); err != nil {
 			return err
-		}
-		if s.id == "virt-8458606f" && s.name == "greg" {
-			// The requested original Sunny profile is Heart; keep any live voice override intact.
-			c.Voice = heartVoice
 		}
 		if err := saveCatProfile(ctx, tx, c, false); err != nil {
 			return err
@@ -307,7 +303,7 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 		return catState{}, false, unavailable
 	}
 	if !b.voices.allowed(current.Voice) {
-		current.Voice = b.voices.defaultFor(id, theme)
+		current.Voice = b.voices.defaultFor(theme)
 	}
 	next := current
 	profilesChanged := false
@@ -556,7 +552,7 @@ func (b *bridge) transferCats(ctx context.Context, from, to peer, mode string) (
 			return a, err
 		}
 		if !b.voices.allowed(a.cat.Voice) {
-			a.cat.Voice = b.voices.defaultFor(key, theme)
+			a.cat.Voice = b.voices.defaultFor(theme)
 		}
 		err = tx.QueryRowContext(ctx, "SELECT COALESCE((SELECT session_id FROM sessions WHERE device_id=?),'')", who.DeviceID).Scan(&a.sid)
 		return a, err
@@ -581,7 +577,7 @@ func (b *bridge) transferCats(ctx context.Context, from, to peer, mode string) (
 				archived = true
 			}
 			nextFrom = assignment{cat: blankCat()}
-			nextFrom.cat.Voice = b.voices.defaultFor(strings.ToLower(from.DeviceID), "")
+			nextFrom.cat.Voice = b.voices.defaultFor("")
 		}
 		for id, a := range map[string]assignment{from.DeviceID: nextFrom, to.DeviceID: nextTo} {
 			key := strings.ToLower(id)

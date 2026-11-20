@@ -3,12 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -29,10 +27,22 @@ const (
 	heartVoice = "af_heart"
 )
 
-var voiceNames = map[string]string{
-	emmaVoice: "Emma", fableVoice: "Fable", heartVoice: "Heart",
-	"bf_alice": "Alice", "bf_isabella": "Isabella", "bf_lily": "Lily",
-	"bm_george": "George", "bm_daniel": "Daniel", "bm_lewis": "Lewis",
+// The first four voices fit on the device picker; the browser offers all of them.
+var voiceCatalog = [...]struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}{
+	{heartVoice, "Heart"}, {fableVoice, "Fable"}, {emmaVoice, "Emma"}, {"bm_george", "George"},
+	{"bf_alice", "Alice"}, {"bf_isabella", "Isabella"}, {"bf_lily", "Lily"}, {"bm_daniel", "Daniel"}, {"bm_lewis", "Lewis"},
+}
+
+func voiceName(id string) string {
+	for _, voice := range voiceCatalog {
+		if voice.ID == id {
+			return voice.Name
+		}
+	}
+	return ""
 }
 
 type deviceVoices struct {
@@ -41,18 +51,18 @@ type deviceVoices struct {
 }
 
 func deviceVoiceStore(db *bridgeDB, fallback string) deviceVoices {
-	if voiceNames[fallback] == "" {
+	if voiceName(fallback) == "" {
 		fallback = heartVoice
 	}
 	return deviceVoices{voiceStore(db), fallback}
 }
 
 func (v deviceVoices) allowed(voice string) bool {
-	return voiceNames[voice] != ""
+	return voiceName(voice) != ""
 }
 
-func (v deviceVoices) defaultFor(id, theme string) string {
-	if id == "echoear-2cac" || theme == "mint" {
+func (v deviceVoices) defaultFor(theme string) string {
+	if theme == "mint" {
 		return fableVoice
 	}
 	if v.fallback != "" {
@@ -70,7 +80,7 @@ func (v deviceVoices) get(id, theme string) string {
 			return voice
 		}
 	}
-	return v.defaultFor(id, theme)
+	return v.defaultFor(theme)
 }
 
 func (v deviceVoices) save(id, voice string) error {
@@ -80,21 +90,6 @@ func (v deviceVoices) save(id, voice string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.store.save(strings.ToLower(id), voice, voice == "")
-}
-
-func (v deviceVoices) toggle(id, theme string) error {
-	if v.store == nil {
-		return problem(503, "Voice settings unavailable")
-	}
-	id = strings.ToLower(id)
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	current := v.get(id, theme)
-	next := heartVoice
-	if current == heartVoice {
-		next = fableVoice
-	}
-	return v.store.save(id, next, false)
 }
 
 func lanIP(value string, loopback bool) (string, error) {
@@ -109,19 +104,6 @@ func lanIP(value string, loopback bool) (string, error) {
 		return ip.String(), nil
 	}
 	return "", problem(400, "Peer address must be on the LAN")
-}
-
-func isHostIP(ip string) bool {
-	if a, err := netip.ParseAddr(ip); err == nil && a.IsLoopback() {
-		return true
-	}
-	addrs, _ := net.InterfaceAddrs()
-	for _, addr := range addrs {
-		if host, _, ok := strings.Cut(addr.String(), "/"); ok && host == ip {
-			return true
-		}
-	}
-	return false
 }
 
 type peer struct {
@@ -162,28 +144,6 @@ func (p peers) register(who peer) error {
 	return p.store.save(who.DeviceID, who, false)
 }
 
-func (p peers) touch(id, ip, character string) (peer, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	who, known, err := p.store.get(id)
-	if err != nil {
-		return peer{}, err
-	}
-	who.DeviceID, who.LastSeen = id, time.Now().Unix()
-	if character != "" {
-		who.Character = character
-	} else if !known {
-		who.Character = truncate(id, 40)
-	}
-	if !known && !isHostIP(ip) {
-		who.IP, who.Port = ip, 80
-	}
-	if who.IP != "" {
-		return who, p.store.save(id, who, false)
-	}
-	return who, nil
-}
-
 func (p peers) snapshot(sender string) ([]peer, error) {
 	data, err := p.all()
 	if err != nil {
@@ -200,14 +160,15 @@ func (p peers) snapshot(sender string) ([]peer, error) {
 }
 
 func publicPeers(others []peer) []object {
-	now := time.Now()
 	out := make([]object, 0, len(others))
 	for _, p := range others {
 		out = append(out, object{"device_id": p.DeviceID, "character": p.Character, "ip": p.IP,
-			"online": now.Sub(time.Unix(p.LastSeen, 0)) <= 180*time.Second})
+			"port": p.Port, "last_seen": p.LastSeen, "online": false})
 	}
 	return out
 }
+
+type intercomMessage struct{ target, text string }
 
 var broadcastNames = []string{"all", "everyone", "everybody"}
 

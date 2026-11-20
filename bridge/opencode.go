@@ -275,11 +275,10 @@ type openCode struct {
 	store    *store[string]
 	turns    [64]chan struct{}
 
-	mu            sync.Mutex
-	active        map[string]context.CancelFunc
-	interrupts    map[string]bool
-	resets        map[string]*ocReset
-	cancelSceneUI func(string)
+	mu         sync.Mutex
+	active     map[string]context.CancelFunc
+	interrupts map[string]bool
+	resets     map[string]*ocReset
 }
 
 type ocReset struct {
@@ -439,11 +438,6 @@ func (o *openCode) prepareMappingChange(devices ...string) func(context.Context,
 				}
 			}
 		}()
-		if o.cancelSceneUI != nil {
-			for _, device := range devices {
-				o.cancelSceneUI(device)
-			}
-		}
 		for _, gate := range gates {
 			unlock, err := o.lockGate(ctx, gate)
 			if err != nil {
@@ -724,13 +718,12 @@ func (m ocMessage) chat(source string) chatEntry {
 			name = p.Tool
 		}
 		if action, ok := strings.CutPrefix(name, "echoear_"); p.Type == "tool" && ok {
-			label := map[string]string{"devices": "Listed cats", "snapshot": "Checked the screen", "scene": "Showed a scene",
-				"patch": "Updated the screen", "speak": "Spoke aloud", "chime": "Played a chime", "intercom": "Sent an intercom message",
-				"control": "Changed device controls", "wait_event": "Waited for an interaction"}[action]
+			label := map[string]string{"inspect": "Checked the cats and screen", "run_app": "Opened an app",
+				"act": "Used a device control", "store": "Used saved memory"}[action]
 			if label != "" && !slices.Contains(notes, label) {
 				notes = append(notes, label)
 			}
-			if action == "scene" {
+			if action == "run_app" {
 				entry.SceneTitle = shortText(p.State.Input.Title, 48, false)
 			}
 		}

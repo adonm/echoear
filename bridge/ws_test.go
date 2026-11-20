@@ -8,13 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,8 +22,9 @@ import (
 )
 
 type testWS struct {
-	conn net.Conn
-	in   *bufio.Reader
+	conn    net.Conn
+	in      *bufio.Reader
+	timeout time.Duration
 }
 
 const testKey = "dGhlIHNhbXBsZSBub25jZQ=="
@@ -66,7 +65,7 @@ func dialTestWS(t *testing.T, base, token string, query bool, headers object) (*
 	if err != nil {
 		t.Fatal("cannot read upgrade response")
 	}
-	return &testWS{conn, in}, res
+	return &testWS{conn: conn, in: in}, res
 }
 
 func testConnectWS(t *testing.T, base, token string, query bool) *testWS {
@@ -120,7 +119,7 @@ func (s *testWS) barrier(t *testing.T) {
 
 func (s *testWS) read(t *testing.T) wsFrame {
 	t.Helper()
-	_ = s.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = s.conn.SetReadDeadline(time.Now().Add(max(5*time.Second, s.timeout)))
 	var h [8]byte
 	if _, err := io.ReadFull(s.in, h[:2]); err != nil {
 		t.Fatal("cannot read WebSocket frame:", err)
@@ -152,7 +151,7 @@ func (s *testWS) read(t *testing.T) wsFrame {
 
 func (s *testWS) until(t *testing.T, match func(wsFrame) bool) wsFrame {
 	t.Helper()
-	deadline := time.Now().Add(6 * time.Second)
+	deadline := time.Now().Add(max(6*time.Second, s.timeout))
 	for range 256 {
 		if time.Now().After(deadline) {
 			break
@@ -177,14 +176,19 @@ func hasWS(op, sample string) func(wsFrame) bool {
 	}
 }
 
+func isPlayback(f wsFrame) bool { return f.op == wsBinary && len(f.data) > 1 && f.data[0] == pcmPrefix }
+
 func (s *testWS) hello(t *testing.T, id, character string) wsFrame {
 	t.Helper()
-	role, op := "device", "scene"
+	role := "device"
 	if webDeviceID(id) {
-		role, op = "web", "svg"
+		role = "web"
 	}
-	s.json(t, object{"ev": "hello", "role": role, "device_id": id, "character": character, "firmware": "0.7.0", "battery_pct": 100, "volume": 80})
-	return s.until(t, hasWS(op, ""))
+	s.json(t, object{"ev": "hello", "role": role, "device_id": id, "character": character, "firmware": "0.8.4", "proto": 2, "battery_pct": 100, "volume": 80})
+	if role == "web" {
+		return s.until(t, hasWS("svg", ""))
+	}
+	return s.until(t, isDisplay)
 }
 
 func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
@@ -192,51 +196,18 @@ func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	db := testDB(t, filepath.Join(dir, "echoear.db"), "")
-	b := &bridge{root: ctx, token: "unit", db: db, peers: peers{deviceStore(db)}, peerHTTP: pooledClient(), history: &chatHistory{db}}
+	b := &bridge{root: ctx, token: "unit", db: db, peers: peers{deviceStore(db)}, history: &chatHistory{db}}
 	if setup != nil {
 		setup(b, dir)
 	}
 	b.ws = newWSHub(b)
-	srv := httptest.NewServer(legacyTestServer(b))
+	srv := httptest.NewServer(b)
 	t.Cleanup(func() {
 		b.ws.shutdown()
 		cancel()
 		srv.Close()
 	})
 	return b, srv.URL
-}
-
-func TestLiveTurnContext(t *testing.T) {
-	b, base := wsHarness(t, func(b *bridge, _ string) {
-		b.timers = newTimerManager(b)
-		t.Cleanup(b.timers.close)
-	})
-	const a, other = "echoear-context", "echoear-from"
-	c, sender := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", false)
-	c.hello(t, a, "Cake")
-	sender.hello(t, other, "Mint")
-	toolTest(t, base, "timer", object{"device_id": a, "op": "set", "in_seconds": 60}, false)
-	toolTest(t, base, "scene", object{"device_id": a, "title": "Stars ]", "room": "sky"}, false)
-	ctx := turnContext{at: time.Now()}
-	b.ws.turnScreen(a, &ctx)
-	ctx.timers = b.timers.activeCount(t.Context(), a)
-	if got := turnPrompt(peer{DeviceID: a}, false, "tap", "pick", legacyCat("Cake", "cake"), ctx); ctx.timers != 1 ||
-		got != "[Cake ("+a+") · hardware · tap]\npick" || stripEchoEarHeader(got) != "pick" {
-		t.Fatal(got)
-	}
-	toolTest(t, base, "intercom", object{"from_device_id": other, "to_device_id": a, "text": "Hi"}, false)
-	toolTest(t, base, "scene", object{"device_id": a, "preset": "face"}, false)
-	ctx = turnContext{at: time.Now()}
-	b.ws.turnScreen(a, &ctx)
-	if got := turnPrompt(peer{DeviceID: a}, false, "typed", "hi", blankCat(), ctx); !strings.HasSuffix(got, " · hardware · typed · setup]\nhi") ||
-		stripEchoEarHeader(got) != "hi" {
-		t.Fatal(got)
-	}
-	ctx = turnContext{at: ctx.at.Add(10*time.Minute + time.Second)}
-	b.ws.turnScreen(a, &ctx)
-	if ctx.lastIntercom != "" {
-		t.Fatal("expired intercom appeared in live context")
-	}
 }
 
 func TestWSHandshakeAndRFC6455(t *testing.T) {
@@ -302,145 +273,68 @@ func TestWSHandshakeAndRFC6455(t *testing.T) {
 	}
 }
 
-func nodeIn(scene sceneView, id string) object {
-	for _, n := range scene.nodes {
-		if n["id"] == id {
-			return n
-		}
-	}
-	return nil
+func (s *testWS) watch(t *testing.T, id string) wsFrame {
+	t.Helper()
+	s.json(t, object{"ev": "hello", "role": "web"})
+	s.until(t, hasWS("peers", id))
+	s.json(t, object{"ev": "watch", "device_id": id})
+	return s.until(t, hasWS("svg", "cat-ring"))
 }
 
-func TestWSKeyedCatScenes(t *testing.T) {
-	now := time.Unix(5000, 0)
-	poses := []catPose{
-		poseFrame(now, now, now, "idle", 100, 80, true, false),
-		poseFrame(now.Add(3400*time.Millisecond), now, now, "idle", 100, 80, true, false),
-		{mood: "listening", battery: 100, charge: true},
-		{mood: "thinking", dot: 2, battery: 15},
-		{mood: "speaking", mouth: true, battery: 15, meter: true, volume: 72},
-		{mood: "sleepy", battery: 15},
+func TestWSHelloPersistsOnlyV2Hardware(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	dev := testConnectWS(t, base, "unit", false)
+	const id = "echoear-hello"
+	dev.json(t, object{"ev": "hello", "role": "device", "proto": 1, "device_id": id, "character": "Cake"})
+	dev.until(t, hasWS("error", "firmware upgrade required"))
+	if list := apiObjects(t, base+"/api/devices", "devices"); len(list) != 0 {
+		t.Fatal("old firmware registered a device", list)
 	}
-	for _, char := range []string{"Cake", "Mint", "Plum", "Sunny"} {
-		cat := legacyCat(char, char)
-		s := catScene(cat, poses[0])
-		if len(s.nodes) > 48 || s.bg != cat.FaceBG || nodeIn(s, "stripe-mid")["c"] != cat.MarkColor {
-			t.Fatalf("wrong character geometry or palette for %s", char)
-		}
-		ids := map[string]bool{}
-		for _, n := range s.nodes {
-			id := str(n["id"])
-			if id == "" || len(id) > 24 || ids[id] || color(n["c"]) == "" || strings.Contains(id, "cheek") || strings.Contains(id, "ear-") {
-				t.Fatalf("invalid keyed node %v", n)
-			}
-			ids[id] = true
-		}
-		if v := sceneDiff(s, s, 2); v != nil {
-			t.Fatal("identical scene generated a patch")
-		}
-		for i, pose := range poses[1:] {
-			next := catScene(cat, pose)
-			diff := sceneDiff(s, next, uint64(i+2))
-			if diff["op"] != "patch" || len(diff["add"].([]object))+len(diff["del"].([]string)) != 0 {
-				t.Fatalf("pose should patch same keys: %v", diff)
-			}
-			set := diff["set"].(map[string]object)
-			for j, old := range s.nodes {
-				updated := maps.Clone(old)
-				maps.Copy(updated, set[str(old["id"])])
-				if !reflect.DeepEqual(updated, next.nodes[j]) {
-					t.Fatalf("partial fields don't recreate %s", old["id"])
-				}
-			}
-		}
-		blink := sceneDiff(s, catScene(cat, poses[1]), 2)["set"].(map[string]object)
-		if len(blink) != 4 || blink["eye-l"]["vis"] != false || blink["lid-r"]["vis"] != true {
-			t.Fatal("blink should just toggle eyes/lids")
-		}
-		listening, thinking, speech, sleep := catScene(cat, poses[2]), catScene(cat, poses[3]), catScene(cat, poses[4]), catScene(cat, poses[5])
-		if nodeIn(listening, "cat-ring")["c"] != "#FF6978" || nodeIn(listening, "eye-l")["w"] != 40 ||
-			nodeIn(thinking, "lid-r")["vis"] != true || nodeIn(thinking, "dot-2")["y"] != 247 ||
-			nodeIn(speech, "tongue")["vis"] != true || nodeIn(speech, "volume-track")["on"] != nil ||
-			nodeIn(sleep, "eye-sleep-l")["vis"] != true || nodeIn(sleep, "doze-large")["vis"] != true {
-			t.Fatalf("incorrect mood details for %s", char)
-		}
+	dev.json(t, object{"ev": "hello", "role": "device", "proto": 2, "device_id": id, "character": "Cake",
+		"ip": "192.0.2.123", "port": 8080, "width": 320, "height": 240, "shape": "rect", "board": "esp-box-3"})
+	frame, _, _ := decodeDisplay(t, dev.until(t, isDisplay))
+	if frame.Dx() != 320 || frame.Dy() != 240 {
+		t.Fatal("unexpected initial framebuffer", frame)
 	}
-}
-
-func TestWSDiagramAndIntercomConversion(t *testing.T) {
-	payload := sanitizeScreen(`{"title":"Moon","shapes":[
-		{"t":"circle","x":180,"y":130,"r":25,"w":5,"c":"#ffdd55","tap":"Look up."},
-		{"t":"rect","x":0,"y":0,"w":35,"h":25,"c":"#001122","fill":true},
-		{"t":"btn","x":110,"y":213,"w":140,"h":37,"c":"#aabbcc","s":"Explore","tap":"Orbit!","ask":"Why does it orbit?"},
-		{"t":"btn","x":128,"y":260,"w":104,"h":31,"c":"#1177aa","s":"Reply","reply_to":"echoear-33d8"},
-		{"t":"arc","x":180,"y":180,"r":52,"a1":0,"a2":360,"w":9,"c":"#ff5555"}]}`)
-	s := screenScene(payload, "#FACC15")
-	check := func(id, kind, value string) {
-		t.Helper()
-		if _, a := s.action(id, 180, 180, "tap"); a != (sceneAction{kind, value}) {
-			t.Fatalf("wrong action %q: %+v", id, a)
-		}
+	dev.conn.Close()
+	eventually(t, func() bool {
+		list := apiObjects(t, base+"/api/devices", "devices")
+		return len(list) == 1 && list[0].(object)["ws_connected"] == false
+	})
+	p, ok, err := deviceStore(b.db).get(id)
+	if err != nil || !ok || p.Character != "Cake" || p.IP != "127.0.0.1" || p.Port != 8080 || p.LastSeen <= 0 {
+		t.Fatalf("incorrect remembered identity: %+v (%v)", p, err)
 	}
-	check("shape-0", "tap", "Look up.")
-	check("shape-2", "ask", "Why does it orbit?")
-	check("shape-3", "reply_to", "echoear-33d8")
-	if _, a := s.action("", 180, 231, "tap"); a.kind != "ask" {
-		t.Fatal("coordinate hit did not pick the button")
-	}
-	if from := nodeIn(s, "shape-0"); from["sw"] != 5 || from["w"] != nil {
-		t.Fatal("circle stroke is not sw")
-	}
-	if nodeIn(s, "shape-1")["w"] != 35 || nodeIn(s, "shape-1")["x"] != 0 ||
-		nodeIn(s, "shape-4")["a2"] != 360 || nodeIn(s, "shape-4")["sw"] != 9 {
-		t.Fatal("diagram did not preserve rect/arc coordinates")
-	}
-	hint := s.hint(s.feedback["shape-2"])
-	if n := nodeIn(*hint, "subtitle"); n["s"] != "Orbit!" || n["vis"] != true {
-		t.Fatal("diagram hint is missing")
-	}
-	card := intercomScene(peer{DeviceID: "echoear-33d8", Character: "Cake"}, "Tea is ready.", legacyCat("Cake", "cake"))
-	if _, a := card.action("reply", 180, 240, "tap"); a.value != "echoear-33d8" {
-		t.Fatal("reply routes by character instead of device ID")
+	web := testConnectWS(t, base, "unit", true)
+	web.hello(t, "phone-1234", "New Cat")
+	if _, exists, err := deviceStore(b.db).get("phone-1234"); exists || err != nil {
+		t.Fatal("web hello changed the physical device registry", err)
 	}
 }
 
 func TestWSMirrorAndControls(t *testing.T) {
 	_, base := wsHarness(t, nil)
+	const id = "echoear-33d8"
 	dev := testConnectWS(t, base, "unit", false)
-	first := dev.hello(t, "echoear-33d8", "Cake")
-	if bytes.Contains(first.data, []byte(`"id":"new"`)) {
-		t.Fatal("New is still on the cat face")
-	}
-	face := catScene(legacyCat("Cake", "cake"), catPose{})
-	if menu := nodeIn(face, "menu"); nodeInt(menu, "x")*2+nodeInt(menu, "w") != 360 || nodeInt(menu, "h") != 48 {
-		t.Fatal("Menu button is not centered or large enough")
-	}
+	_, rev, _ := decodeDisplay(t, dev.hello(t, id, "Cake"))
 	web := testConnectWS(t, base, "unit", true)
-	web.json(t, object{"ev": "hello", "role": "web"})
-	web.until(t, hasWS("peers", `"ws":true`))
-	web.json(t, object{"ev": "watch", "device_id": "echoear-33d8"})
-	if f := web.until(t, hasWS("svg", "cat-ring")); testObject(t, first.data)["rev"] != testObject(t, f.data)["rev"] {
-		t.Fatal("watch does not receive the current device revision")
+	first := web.watch(t, id)
+	if testObject(t, first.data)["rev"] != json.Number(strconv.FormatUint(uint64(rev), 10)) || !hasWS("svg", "120,292,120,48")(first) {
+		t.Fatal("watch did not receive current frame with centered Menu control")
 	}
 	dev.json(t, object{"ev": "status", "battery_pct": 25, "battery_mv": 3530, "charging": false, "volume": 80, "rssi": -45})
-	pick := hasWS("patch", `"battery-fill"`)
-	onDevice, onWeb := dev.until(t, pick), web.until(t, hasWS("svg", "#39D1A0"))
-	if testObject(t, onDevice.data)["rev"] != testObject(t, onWeb.data)["rev"] {
-		t.Fatal("mirror revision differs from device")
-	}
+	web.until(t, hasWS("svg", "#39D1A0"))
 	web.json(t, object{"ev": "tap", "x": 180, "y": 300})
-	drawer := func(f wsFrame) bool { return f.op == wsText && bytes.Contains(f.data, []byte(`"menu-title"`)) }
-	if a, b := dev.until(t, drawer), web.until(t, hasWS("svg", "menu-stats")); testObject(t, a.data)["rev"] != testObject(t, b.data)["rev"] ||
-		bytes.Contains(a.data, []byte(`"id":"new"`)) || !bytes.Contains(a.data, []byte(`"id":"menu-voice"`)) {
-		t.Fatal("menu did not mirror voice controls without New")
+	if f := web.until(t, hasWS("svg", "menu-stats")); !hasWS("svg", "menu-voice")(f) {
+		t.Fatal("menu did not mirror voice controls")
 	}
-	testRequest(t, "POST", base+"/api/devices/echoear-33d8/volume", "unit", object{"auto": false, "volume": 62}, 200)
+	testRequest(t, "POST", base+"/api/devices/"+id+"/volume", "unit", object{"auto": false, "volume": 62}, 200)
 	for _, c := range []*testWS{dev, web} {
 		c.until(t, hasWS("volume", `"level":62`))
 	}
-	web.json(t, object{"ev": "tap", "id": "menu-back", "x": 180, "y": 315})
-	dev.until(t, hasWS("patch", `"cat-ring"`))
-	web.json(t, object{"ev": "tap", "id": "", "x": 180, "y": 180})
+	web.json(t, object{"ev": "tap", "id": "menu-back"})
+	web.until(t, hasWS("svg", "cat-ring"))
+	web.json(t, object{"ev": "tap", "x": 180, "y": 180})
 	dev.until(t, hasWS("rec", `"action":"start"`))
 	dev.json(t, object{"ev": "rec_end", "cancelled": true})
 	dev.until(t, hasWS("chime", `"kind":"cancel"`))
@@ -466,14 +360,13 @@ func setupTestHex(t *testing.T, dir string, handle http.HandlerFunc) hexClient {
 func TestHexTranscriptionSilencePadding(t *testing.T) {
 	pcm := []byte{0, 0, 1, 0, 0, 128, 0, 0}
 	for _, tc := range []struct {
-		name, kind string
-		input      []byte
-		pcm, pad   int
+		name     string
+		input    []byte
+		pcm, pad int
 	}{
-		{"voiced", pcmType, pcm, len(pcm), 4800},
-		{"silent", pcmType, make([]byte, 320), 320, 0},
-		{"empty", pcmType, nil, 0, 0},
-		{"wav passthrough", wavType, WrapWAV(pcm), len(pcm), 0},
+		{"voiced", pcm, len(pcm), 4800},
+		{"silent", make([]byte, 320), 320, 0},
+		{"empty", nil, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := setupTestHex(t, t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
@@ -482,12 +375,8 @@ func TestHexTranscriptionSilencePadding(t *testing.T) {
 				if err != nil || len(got) != wantSize || r.ContentLength != int64(wantSize) {
 					t.Errorf("Hex WAV length: got %d (HTTP %d), want %d (%v)", len(got), r.ContentLength, wantSize, err)
 				} else {
-					payload := tc.input
-					if tc.kind == wavType {
-						payload = tc.input[44:]
-					}
 					pad := make([]byte, tc.pad)
-					want := WrapWAV(slices.Concat(pad, payload, pad))
+					want := WrapWAV(slices.Concat(pad, tc.input, pad))
 					if !bytes.Equal(got, want) {
 						t.Error("Hex WAV header, silence edges, or original PCM changed")
 					}
@@ -497,7 +386,7 @@ func TestHexTranscriptionSilencePadding(t *testing.T) {
 				}
 				_, _ = io.WriteString(w, `{"transcript":"Test"}`)
 			})
-			if text, err := h.transcribe(t.Context(), tc.input, tc.kind); err != nil || text != "Test" {
+			if text, err := h.transcribe(t.Context(), tc.input); err != nil || text != "Test" {
 				t.Fatalf("transcribe: %q, %v", text, err)
 			}
 		})
@@ -597,9 +486,9 @@ func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	}()
 	from, to := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
 	from.hello(t, "echoear-a", "Cake")
-	to.hello(t, "echoear-b", "Mint")
+	to.hello(t, "phone-000b", "Mint")
 	pcm := bytes.Repeat([]byte{12, 0}, 120)
-	from.json(t, object{"ev": "rec_start", "target": "echoear-b"})
+	from.json(t, object{"ev": "rec_start", "target": "phone-000b"})
 	from.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm[:100]...)))
 	from.write(t, maskedFrame(wsBinary, true, []byte{0x03, 1, 2})) // wrong audio direction is ignored
 	from.write(t, maskedFrame(wsBinary, false, append([]byte{micPrefix}, pcm[100:140]...)))
@@ -615,7 +504,7 @@ func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	to.json(t, object{"ev": "tts_ack", "state": "done"})
 	close(allowHex)
 	closed = true
-	to.until(t, hasWS("patch", "Voice caption."))
+	to.until(t, hasWS("svg", "Voice caption."))
 	to.json(t, object{"ev": "tap", "id": "reply", "x": 180, "y": 240})
 	to.until(t, hasWS("rec", `"target":"echoear-a"`))
 	to.json(t, object{"ev": "rec_end", "cancelled": true})
@@ -642,7 +531,7 @@ func TestWSLongPlaybackWithBackpressure(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		c := &wsClient{wire: &websocket{conn: server}, ctx: ctx, cancel: cancel, out: make(chan wsFrame, 12)}
-		dev := &testWS{client, bufio.NewReader(client)}
+		dev := &testWS{conn: client, in: bufio.NewReader(client)}
 		d := &wsDevice{client: c, key: "echoear-slow", screen: roundScreen, cat: blankCat()}
 		h := &wsHub{devices: map[string]*wsDevice{d.key: d}}
 		go c.write()
@@ -735,7 +624,7 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	const first = "Stars release their own light. "
 	const last = "That lights nearby planets."
 	const raw = first + last + "\n```echoear-screen\n{\"title\":\"Night sky\",\"shapes\":[{\"t\":\"btn\",\"x\":121,\"y\":212,\"w\":118,\"h\":34,\"c\":\"#ffaa33\",\"s\":\"Fact\",\"tap\":\"Stars are bright.\"}]}\n```"
-	_, base := wsHarness(t, func(b *bridge, dir string) {
+	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
 			got, _ := io.ReadAll(r.Body)
 			pad := make([]byte, 4800)
@@ -826,24 +715,36 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	}
 	dev.write(t, maskedFrame(wsPing, true, nil))
 	dev.until(t, func(f wsFrame) bool {
-		if f.op == wsBinary || hasWS("tts", `"state":"start"`)(f) {
+		if isPlayback(f) || hasWS("tts", `"state":"start"`)(f) {
 			t.Fatal("unverified speech was played")
 		}
 		return f.op == wsPong
 	})
 	closeRelease()
 	dev.until(t, hasWS("tts", `"state":"start"`))
-	got := dev.until(t, func(f wsFrame) bool { return f.op == wsBinary })
+	got := dev.until(t, isPlayback)
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], speech) {
 		t.Fatal("did not receive eager Kokoro frame")
 	}
-	got = dev.until(t, func(f wsFrame) bool { return f.op == wsBinary })
+	got = dev.until(t, isPlayback)
 	if len(got.data) != 1+sampleRate/5+len(speech) || !bytes.HasSuffix(got.data, speech) {
 		t.Fatal("did not receive tail sentence")
 	}
 	dev.until(t, hasWS("tts", `"state":"end"`))
 	dev.json(t, object{"ev": "tts_ack", "state": "done"})
-	dev.until(t, func(f wsFrame) bool { return hasWS("scene", "Night sky")(f) || hasWS("patch", "Night sky")(f) })
+	eventually(t, func() bool {
+		b.ws.mu.Lock()
+		defer b.ws.mu.Unlock()
+		d := b.ws.devices["echoear-a"]
+		return !d.busy && !d.awaitAck && d.scene.title == ""
+	})
+	entries := apiObjects(t, base+"/api/devices/echoear-a/messages", "messages")
+	if len(entries) != 2 || !slices.ContainsFunc(entries, func(v any) bool {
+		e := v.(object)
+		return e["id"] == "msg2" && e["text"] == first+last
+	}) {
+		t.Fatal("assistant fence leaked to canonical history", entries)
+	}
 	var diag diagReport
 	if err := json.Unmarshal(testRequest(t, "GET", base+"/api/diagnostics", "unit", nil, 200), &diag); err != nil {
 		t.Fatal(err)
@@ -856,9 +757,6 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 		turn.Total == nil || turn.TTS == nil || turn.E2E == nil || *turn.First > *turn.Total || *turn.Total > *turn.E2E {
 		t.Fatalf("voice milestones missing or out of order: %+v", turn)
 	}
-	dev.json(t, object{"ev": "tap", "id": "shape-0", "x": 180, "y": 226})
-	dev.until(t, hasWS("patch", "Stars are bright."))
-	dev.until(t, func(f wsFrame) bool { return f.op == wsBinary })
 }
 
 func syncOnceClose(ch chan struct{}) func() {

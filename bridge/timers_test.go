@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,18 @@ import (
 	"testing"
 	"time"
 )
+
+func actTimer(t *testing.T, base string, args object, failed bool) object {
+	t.Helper()
+	id := str(args["device_id"])
+	args = maps.Clone(args)
+	delete(args, "device_id")
+	result := toolTest(t, base, "act", object{"to": id, "timer": args}, failed)
+	if failed {
+		return result
+	}
+	return result["timer"].(object)
+}
 
 func TestTimerLocalFireAndCancel(t *testing.T) {
 	tts := make(chan string, 8)
@@ -43,11 +56,11 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.json(t, object{"ev": "watch", "device_id": id})
 	web.until(t, hasWS("svg", ""))
-	toolTest(t, base, "control", object{"device_id": id, "sleep": true}, false)
+	toolTest(t, base, "act", object{"to": id, "sleep": true}, false)
 	dev.until(t, hasWS("power", `"brightness":12`))
 
 	set := object{"op": "set", "device_id": id, "in_seconds": 1, "label": "Cake break", "say": "Take a break."}
-	timer := toolTest(t, base, "timer", set, false)
+	timer := actTimer(t, base, set, false)
 	hasUpdate := func(f wsFrame) bool { return bytes.Contains(f.data, []byte(`"type":"timers"`)) }
 	web.until(t, hasUpdate)
 	if got := apiObjects(t, base+"/api/timers?device_id="+id, "timers"); len(got) != 1 || got[0].(object)["id"] != timer["id"] {
@@ -55,26 +68,33 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 	}
 	dev.until(t, hasWS("power", `"brightness":85`))
 	dev.until(t, hasWS("chime", `"kind":"intercom"`))
-	card := dev.until(t, func(f wsFrame) bool { return bytes.Contains(f.data, []byte("Time's up!")) })
-	if !bytes.Contains(card.data, []byte(`"s":"OK"`)) || !bytes.Contains(card.data, []byte("Cake break")) {
+	var card wsFrame
+	updated := false
+	web.until(t, func(f wsFrame) bool {
+		if hasWS("svg", "up!")(f) {
+			card = f
+		}
+		updated = updated || hasUpdate(f)
+		return updated && card.data != nil
+	})
+	if !bytes.Contains(card.data, []byte("OK")) || !bytes.Contains(card.data, []byte("Cake break")) {
 		t.Fatal(string(card.data))
 	}
 	dev.until(t, func(f wsFrame) bool { return f.op == wsBinary && bytes.Equal(f.data, []byte{pcmPrefix, 1, 2, 3, 4}) })
-	web.until(t, hasUpdate)
 	expectValue(t, tts, fableVoice)
 	if len(tts) != 0 || len(apiObjects(t, base+"/api/timers", "timers")) != 0 {
 		t.Fatal("timer didn't synthesize and remove exactly once")
 	}
-	dev.json(t, object{"ev": "tap", "id": "cat"})
-	dev.until(t, func(f wsFrame) bool { return bytes.Contains(f.data, []byte(`"id":"cat-ring"`)) })
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 315})
+	web.until(t, hasWS("svg", "cat-ring"))
 	entries := apiObjects(t, base+"/api/devices/"+id+"/messages", "messages")
 	if len(entries) != 2 || entries[0].(object)["text"] != "Timer: Cake break" || entries[1].(object)["source"] != "timer" {
 		t.Fatal(entries)
 	}
 	set["in_seconds"] = 3600
-	timer = toolTest(t, base, "timer", set, false)
-	toolTest(t, base, "timer", object{"op": "cancel", "device_id": id, "id": timer["id"]}, false)
-	if got := toolTest(t, base, "timer", object{"op": "list", "device_id": id}, false)["timers"].([]any); len(got) != 0 {
+	timer = actTimer(t, base, set, false)
+	actTimer(t, base, object{"op": "cancel", "device_id": id, "id": timer["id"]}, false)
+	if got := apiObjects(t, base+"/api/timers?device_id="+id, "timers"); len(got) != 0 {
 		t.Fatal(got)
 	}
 }
@@ -176,12 +196,12 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, device, "Cake")
 	args := object{"device_id": device, "op": "set", "wake_agent": true, "in_seconds": 29}
-	toolTest(t, base, "timer", args, true)
+	actTimer(t, base, args, true)
 	args["in_seconds"] = 30
 	args["at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
-	toolTest(t, base, "timer", args, true)
+	actTimer(t, base, args, true)
 	delete(args, "at")
-	timer := toolTest(t, base, "timer", args, false)
+	timer := actTimer(t, base, args, false)
 	// Invoke the real callback now rather than waiting 30 seconds.
 	finished := make(chan struct{})
 	go func() { defer close(finished); b.timers.fire(str(timer["id"])) }()
@@ -193,17 +213,17 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("missing timer prompt")
 	}
-	conflict := toolTest(t, base, "timer", args, true)
+	conflict := actTimer(t, base, args, true)
 	if !strings.Contains(str(conflict["error"]), "timer-triggered") {
 		t.Fatal(conflict)
 	}
 	args["wake_agent"] = false
-	toolTest(t, base, "timer", args, false)
+	actTimer(t, base, args, false)
 	close(release)
 	expectValue(t, finished, struct{}{})
 	args["wake_agent"] = true
-	toolTest(t, base, "timer", args, false)
-	toolTest(t, base, "timer", object{"device_id": device, "op": "cancel", "all": true}, false)
+	actTimer(t, base, args, false)
+	actTimer(t, base, object{"device_id": device, "op": "cancel", "all": true}, false)
 }
 
 func TestScopedTimerIsolationAndCaps(t *testing.T) {
@@ -218,8 +238,8 @@ func TestScopedTimerIsolationAndCaps(t *testing.T) {
 			}
 		}
 	})
-	ownTimer := toolTest(t, base, "timer", object{"device_id": owner, "op": "set", "in_seconds": 3600}, false)
-	otherTimer := toolTest(t, base, "timer", object{"device_id": other, "op": "set", "in_seconds": 3600}, false)
+	ownTimer := actTimer(t, base, object{"device_id": owner, "op": "set", "in_seconds": 3600}, false)
+	otherTimer := actTimer(t, base, object{"device_id": other, "op": "set", "in_seconds": 3600}, false)
 	v, _ := b.virtualByID(owner)
 	scope := httptest.NewServer(b.scoped(v, "scoped"))
 	defer scope.Close()

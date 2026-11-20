@@ -174,17 +174,20 @@ func TestAccessibleRecordingControls(t *testing.T) {
 		})
 	})
 	dev := testConnectWS(t, base, "unit", false)
-	dev.hello(t, "echoear-mic-controls", "Cake")
-	tap := func(id string) { dev.json(t, object{"ev": "tap", "id": id}) }
+	const id = "echoear-mic-controls"
+	dev.hello(t, id, "Cake")
+	mirror := testConnectWS(t, base, "unit", true)
+	mirror.watch(t, id)
+	tap := func(x, y int) { dev.json(t, object{"ev": "tap", "x": x, "y": y}) }
 	record := func() {
-		tap("cat-ring")
+		tap(180, 180)
 		dev.until(t, hasWS("rec", `"action":"start"`))
-		dev.until(t, hasWS("patch", "rec-send"))
+		mirror.until(t, hasWS("svg", "rec-send"))
 		dev.json(t, object{"ev": "rec_start"})
 		dev.write(t, maskedFrame(wsBinary, true, []byte{micPrefix, 12, 0}))
 	}
 	record()
-	tap("rec-cancel")
+	tap(110, 310)
 	dev.until(t, hasWS("rec", `"cancelled":true`))
 	dev.until(t, hasWS("chime", `"kind":"cancel"`))
 	dev.json(t, object{"ev": "rec_end"})
@@ -195,7 +198,7 @@ func TestAccessibleRecordingControls(t *testing.T) {
 	default:
 	}
 	record()
-	tap("rec-send")
+	tap(250, 310)
 	dev.until(t, hasWS("rec", `"action":"stop"`))
 	select {
 	case <-transcribed:
@@ -216,6 +219,8 @@ func TestAccessibleStopAndFaceInterrupt(t *testing.T) {
 	const id = "echoear-stop"
 	dev := testConnectWS(t, base, "unit", false)
 	dev.hello(t, id, "Cake")
+	mirror := testConnectWS(t, base, "unit", true)
+	mirror.watch(t, id)
 	for _, target := range []string{"stop", "cat-ring"} {
 		cancelled := make(chan struct{})
 		b.ws.mu.Lock()
@@ -224,8 +229,8 @@ func TestAccessibleStopAndFaceInterrupt(t *testing.T) {
 			close(cancelled)
 		})
 		b.ws.mu.Unlock()
-		dev.until(t, hasWS("patch", `"stop":{"vis":true}`))
-		dev.json(t, object{"ev": "tap", "id": target})
+		mirror.until(t, hasWS("svg", `data-id=\"stop\"`))
+		mirror.json(t, object{"ev": "tap", "id": target})
 		dev.until(t, hasWS("chime", `"kind":"cancel"`))
 		select {
 		case <-cancelled:

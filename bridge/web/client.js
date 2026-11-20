@@ -35,7 +35,6 @@ const say = (id, text) => {
   if (element.textContent !== text) element.textContent = text;
 };
 let app, view, ws, watched, retry, poll, timerTick, rev = 0, pointer;
-const keyed = new Map();
 function send(event) {
   if (ws?.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(event));
@@ -96,13 +95,14 @@ async function authorize(token) {
       return;
     }
     const profile = res.ok ? await res.json() : null;
-    if (res.status !== 404 && (typeof profile?.scoped !== "boolean" || profile.scoped && !profile.device_id)) {
+    if (typeof profile?.scoped !== "boolean" || profile.scoped && !profile.device_id || !Array.isArray(profile.voices)) {
       throw new Error("Unexpected scope response");
     }
     const scope = profile?.scoped ? profile : null;
     stop();
     setLocal("echoear-token", token);
     app = {token, scope, devices:[], deviceVersion:0, sidebar:!scope && wide.matches, tunnel:null};
+    loadVoiceCatalog(profile.voices);
     timerTick = setInterval(tickTimers, 1000);
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
@@ -550,7 +550,7 @@ function renderDevices() {
       const {name, state, meta, badge} = rowParts.get(button);
       if (name.textContent !== d.character) name.textContent = d.character;
       state.dataset.status = isLive(d) ? "live" : d.online ? "http" : "off";
-      state.textContent = isLive(d) ? "Live WS" : d.online ? "HTTP" : "Offline";
+      state.textContent = isLive(d) ? "Live WS" : "Offline";
       meta.textContent = virtual ? "" : [
         isLive(d) ? d.mode : "",
         Number.isFinite(d.battery_pct) ? `Battery ${d.battery_pct}%` : "",
@@ -818,7 +818,6 @@ $("join").onclick = () => {
 function clearScene() {
   rev = 0;
   pointer = null;
-  keyed.clear();
   nodes.replaceChildren();
   $("canvas-bg").setAttribute("fill", "#202432");
   $("screen-placeholder").removeAttribute("display");
@@ -830,7 +829,7 @@ function select(d, quick = false) {
   const id = d?.device_id || "";
   if (id === view?.id) return;
   view?.loading?.abort();
-  // A fresh socket keeps unlabelled scene/patch frames from crossing selections.
+  // A fresh socket keeps unlabelled SVG frames from crossing selections.
   disconnect();
   view = {id, device:d, virtual:d?.kind === "virtual", quick, entries:new Map()};
   setVolume(d?.volume ?? 55);
@@ -859,12 +858,12 @@ function select(d, quick = false) {
 function renderCurrent() {
   const d = view?.device, ready = ws?.readyState === WebSocket.OPEN && rev > 0;
   const active = ready && view?.virtual;
-  const mode = d?.mode && !["offline", "http"].includes(d.mode) ? d.mode : "";
+  const mode = d?.mode && d.mode !== "offline" ? d.mode : "";
   colors($("workspace"), d?.cat);
   say("chat-name", d?.character || "Choose a cat");
   $("chat-mode").hidden = !d;
   say("chat-mode", !d ? "" : view.virtual ? active ? (modeLabel[view.mode] || "Idle") : "Connecting" :
-    isLive(d) ? mode || "Live WS" : d.online ? "HTTP" : "Offline");
+    isLive(d) ? mode || "Live WS" : "Offline");
   $("screen-controls").hidden = !ready;
   renderVolume();
   renderVoice(d, view?.voicePending);
@@ -883,12 +882,23 @@ function renderCurrent() {
   $("refresh").disabled = !d || view.quick && !active || !!view?.loading || !!view?.resetting;
 }
 
+const quickVoices = [$("voice-first"), $("voice-second")];
+function loadVoiceCatalog(voices) {
+  $("voice-select").replaceChildren(...voices.map(voice => new Option(voice.name, voice.id)));
+  for (const [i, button] of quickVoices.entries()) {
+    button.hidden = !voices[i];
+    button.value = voices[i]?.id ?? "";
+    button.textContent = voices[i]?.name ?? "";
+    button.onclick = () => setVoice(button.value);
+  }
+}
+
 function renderVoice(device, pending) {
   $("voice-controls").hidden = !device;
-  const voice = pending || device?.voice || "af_heart";
-  for (const [id, option] of [["voice-heart", "af_heart"], ["voice-fable", "bm_fable"]]) {
-    $(id).disabled = !!pending;
-    $(id).setAttribute("aria-pressed", String(voice === option));
+  const voice = pending || device?.voice || "";
+  for (const button of quickVoices) {
+    button.disabled = !!pending;
+    button.setAttribute("aria-pressed", String(voice === button.value));
   }
   $("voice-select").disabled = !!pending;
   $("voice-select").value = voice;
@@ -913,8 +923,6 @@ async function setVoice(voice) {
     if (view === cat) renderVoice(cat.device);
   }
 }
-$("voice-heart").onclick = () => setVoice("af_heart");
-$("voice-fable").onclick = () => setVoice("bm_fable");
 $("voice-select").onchange = e => setVoice(e.target.value);
 
 function disconnect() {
@@ -975,8 +983,7 @@ function syncWatch(live) {
     // Always subscribe by ID: the bridge may have reconnected since the peer snapshot.
     send({ev:"watch", device_id:view.id});
     const d = view.device;
-    updateStatus(id ? `Opening ${d.character}’s live screen…` : d.online ?
-      `${d.character} is online over HTTP. The live screen needs a WebSocket.` : `${d.character} is offline.`);
+    updateStatus(id ? `Opening ${d.character}’s live screen…` : `${d.character} is offline.`);
   }
 }
 
@@ -1035,22 +1042,26 @@ function command(msg) {
       }
       break;
     }
-    case "svg":
-    case "scene": {
+    case "svg": {
       const first = !rev;
-      let svg;
-      if (msg.op === "svg") {
-        svg = new DOMParser().parseFromString(msg.svg, "image/svg+xml").documentElement;
-        if (svg.localName !== "svg" || svg.namespaceURI !== svgNS || svg.getAttribute("viewBox") !== "0 0 360 360") return;
+      const svg = new DOMParser().parseFromString(msg.svg, "image/svg+xml").documentElement;
+      if (svg.localName !== "svg" || svg.namespaceURI !== svgNS || svg.getAttribute("viewBox") !== "0 0 360 360") return;
+      const focusedID = nodes.contains(document.activeElement) && document.activeElement.dataset.id;
+      const imported = document.importNode(svg, true);
+      const controls = [...imported.querySelectorAll("[data-id]")].filter(el => !el.closest("defs"));
+      for (const control of controls) {
+        control.setAttribute("tabindex", "0");
+        control.setAttribute("role", "button");
+        if (!control.hasAttribute("aria-label")) {
+          control.setAttribute("aria-label", control.querySelector("[aria-label]")?.getAttribute("aria-label") || control.dataset.id);
+        }
       }
-      keyed.clear();
-      nodes.replaceChildren();
+      nodes.replaceChildren(imported);
+      if (focusedID) (controls.find(el => el.dataset.id === focusedID) || controls[0])?.focus({preventScroll:true});
       rev = msg.rev;
-      $("canvas-bg").setAttribute("fill", svg ? "#000000" : msg.bg);
+      $("canvas-bg").setAttribute("fill", "#000000");
       $("screen-placeholder").setAttribute("display", "none");
       screen.dataset.interactive = "true";
-      if (svg) nodes.append(document.importNode(svg, true));
-      else for (const n of msg.nodes) put(n);
       if (first) {
         say("link-state", app.scope ? "Private live cat" : "LAN dashboard");
         updateStatus(view.virtual ? `${view.device.character} · Live Virtual Cat` : `Mirroring ${view.device.character}`);
@@ -1059,21 +1070,6 @@ function command(msg) {
       renderCurrent();
       break;
     }
-    case "patch":
-      if (msg.rev !== rev + 1) {
-        if (!view.virtual || app.scope) send({ev:"watch", device_id:view.id});
-        else connect();
-        break;
-      }
-      rev = msg.rev;
-      if (msg.bg) $("canvas-bg").setAttribute("fill", msg.bg);
-      for (const id of msg.del) { keyed.get(id)?.el.remove(); keyed.delete(id); }
-      for (const n of msg.add) put(n);
-      for (const [id, fields] of Object.entries(msg.set)) {
-        const old = keyed.get(id);
-        if (old) put({...old.node, ...fields, id});
-      }
-      break;
     case "power":
       screen.dataset.dim = String(msg.brightness < 20);
       break;
@@ -1239,100 +1235,33 @@ $("prompt").onsubmit = async e => {
   }
 };
 
-function el(tag, attrs) {
-  const element = document.createElementNS(svgNS, tag);
-  for (const [key, val] of Object.entries(attrs)) if (val != null) element.setAttribute(key, val);
-  return element;
-}
-function arcPath(n) {
-  const rad = a => a * Math.PI / 180;
-  const p = a => [n.x + n.r * Math.cos(rad(a)), n.y + n.r * Math.sin(rad(a))];
-  const span = (n.a2 - n.a1 + 360) % 360;
-  if (Math.abs(n.a2 - n.a1) >= 360) {
-    const start = p(n.a1), end = p(n.a1 + 180);
-    return `M ${start} A ${n.r} ${n.r} 0 0 1 ${end} A ${n.r} ${n.r} 0 0 1 ${start}`;
-  }
-  return `M ${p(n.a1)} A ${n.r} ${n.r} 0 ${span > 180 ? 1 : 0} 1 ${p(n.a2)}`;
-}
-function textMark(n, x, y) {
-  const t = el("text", {x,y,fill:n.tc || n.c,"text-anchor":"middle","dominant-baseline":"central","font-size":[0,15,22,28][n.fs || 1]});
-  t.textContent = n.s;
-  return t;
-}
-function put(n) {
-  const prev = keyed.get(n.id), group = prev?.el || el("g", {"data-id":n.id});
-  if (!prev) nodes.append(group);
-  keyed.set(n.id, {node:n, el:group});
-  group.setAttribute("display", n.vis === false ? "none" : "inline");
-  if (n.on) {
-    group.dataset.on = n.on;
-    if (n.on === "tap") {
-      group.setAttribute("role", "button");
-      group.setAttribute("tabindex", "0");
-      group.setAttribute("aria-label", n.s || (n.id === "cat-ring" ? "Talk" : "Use " + n.t));
-    }
-  } else {
-    delete group.dataset.on;
-    for (const attr of ["role","tabindex","aria-label"]) group.removeAttribute(attr);
-  }
-  const stroke = {stroke:n.bc || n.c, "stroke-width":n.sw || 1, "stroke-linecap":"round"};
-  const paint = {fill:n.fill || n.t === "btn" ? n.c : "none", ...(n.bc || !n.fill && n.t !== "btn" ? stroke : {})};
-  let marks;
-  switch (n.t) {
-    case "circle": marks = [el("circle",{cx:n.x,cy:n.y,r:n.r,...paint})]; break;
-    case "rect":
-    case "btn":
-      marks = [el("rect",{x:n.x,y:n.y,width:n.w,height:n.h,rx:n.r || 0,...paint})];
-      if (n.t === "btn") marks.push(textMark(n,n.x+n.w/2,n.y+n.h/2));
-      break;
-    case "line": marks = [el("line",{x1:n.x1,y1:n.y1,x2:n.x2,y2:n.y2,...stroke})]; break;
-    case "tri": {
-      const filled = n.fill !== false, color = n.c || "#F8FAFC";
-      marks = [el("polygon",{points:`${n.x1 ?? 0},${n.y1 ?? 0} ${n.x2 ?? 0},${n.y2 ?? 0} ${n.x3 ?? 0},${n.y3 ?? 0}`,
-        fill:filled ? color : "none", stroke:filled ? "none" : color, "stroke-width":n.sw ?? 2,
-        "stroke-linejoin":"round"})];
-      break;
-    }
-    case "arc": marks = [el("path",{d:arcPath(n),fill:"none",...stroke})]; break;
-    case "text": marks = [textMark(n,n.x,n.y)]; break;
-    default: return;
-  }
-  group.replaceChildren(...marks);
-}
-
 function xy(e) {
   const p = new DOMPoint(e.clientX,e.clientY).matrixTransform(screen.getScreenCTM().inverse());
   const int = v => Math.max(0,Math.min(359,Math.round(v)));
   return {x:int(p.x), y:int(p.y)};
 }
 screen.addEventListener("pointerdown", e => {
-  if (e.button !== 0 || pointer || !rev) return;
-  const g = e.target.closest("[data-id]");
-  pointer = {pointer:e.pointerId,id:g?.dataset.id || "",drag:g?.dataset.on === "drag",last:0};
-  screen.setPointerCapture(e.pointerId);
-  if (pointer.drag) send({ev:"drag",id:pointer.id,...xy(e)});
+  if (e.button !== 0 || pointer != null || !rev) return;
+  pointer = e.pointerId;
+  screen.setPointerCapture(pointer);
 });
-screen.addEventListener("pointermove", e => {
-  if (pointer?.drag && pointer.pointer === e.pointerId && e.timeStamp - pointer.last >= 32) {
-    pointer.last = e.timeStamp;
-    send({ev:"drag",id:pointer.id,...xy(e)});
-  }
-});
-function pointerEnd(e, cancelled) {
-  if (!pointer || pointer.pointer !== e.pointerId) return;
-  if (view.virtual && !cancelled) audioReady();
-  if (!cancelled && !pointer.drag) send({ev:"tap",id:pointer.id,...xy(e)});
-  send({ev:"up",id:pointer.id,...xy(e)});
+screen.addEventListener("pointerup", e => {
+  if (pointer !== e.pointerId) return;
   pointer = null;
-}
-screen.addEventListener("pointerup", e => pointerEnd(e, false));
-screen.addEventListener("pointercancel", e => pointerEnd(e, true));
-screen.addEventListener("keydown", e => {
-  const g = e.target.closest("[data-on=tap]");
-  if (!g || (e.key !== " " && e.key !== "Enter")) return;
-  e.preventDefault();
   if (view.virtual) audioReady();
-  send({ev:"tap",id:g.dataset.id,x:180,y:180});
+  send({ev:"tap",...xy(e)});
+});
+screen.addEventListener("pointercancel", e => {
+  if (pointer === e.pointerId) pointer = null;
+});
+screen.addEventListener("keydown", e => {
+  const control = e.target.closest("[data-id][role=button]");
+  if (!control || (e.key !== " " && e.key !== "Enter")) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  if (view.virtual) audioReady();
+  const {x, y, width, height} = control.getBoundingClientRect();
+  send({ev:"tap",id:control.dataset.id,...xy({clientX:x+width/2,clientY:y+height/2})});
 });
 $("volume").oninput = e => { $("volume-value").value = e.target.value + "%"; };
 $("volume").onchange = e => saveVolume({auto:false, volume:+e.target.value});

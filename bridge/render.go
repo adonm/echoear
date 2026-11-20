@@ -70,7 +70,7 @@ type svgNode struct {
 
 var (
 	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text")
-	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor data-id data-hit data-on data-pose")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor aria-label data-id data-hit data-pose")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
 	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
@@ -172,8 +172,8 @@ func cleanSVGAttr(k, v string) (string, bool) {
 		return v, svgID.MatchString(v)
 	case "data-id":
 		return v, svgID.MatchString(v)
-	case "data-on":
-		return v, v == "tap" || v == "drag"
+	case "aria-label":
+		return shortText(v, 128, false), v != ""
 	case "data-pose":
 		return v, true
 	case "fill", "stroke", "stop-color":
@@ -545,7 +545,7 @@ func (root *svgNode) background() imagecolor.Color {
 				for _, attrs := range []map[string]string{root.attr, n.attr} {
 					for _, key := range []string{"opacity", "fill-opacity"} {
 						if v := attrs[key]; v != "" {
-							opacity *= clampFloat(svgNum(v), 0, 1)
+							opacity *= min(1, max(0, svgNum(v)))
 						}
 					}
 				}

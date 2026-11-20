@@ -9,6 +9,7 @@ import (
 	"image"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestLiveWebSocket(t *testing.T) {
 	defer client.CloseIdleConnections()
 	c := liveClient{client, base, token}
 	html, res := c.read(t, "/app", nil, "", nil, 200)
-	if !bytes.Contains(html, []byte(`<svg id="screen" viewBox="0 0 360 360"`)) ||
+	if !bytes.Contains(html, []byte(`<svg id="stage" viewBox="0 0 360 360"`)) ||
 		!bytes.Contains(html, []byte("Join as Phone Cat")) ||
 		!bytes.Contains(html, []byte("+ New Cat")) ||
 		!bytes.Contains(html, []byte("Reassign / Load Cat")) ||
@@ -42,20 +43,10 @@ func TestLiveWebSocket(t *testing.T) {
 	for _, asset := range []string{"/app/style.css", "/app/client.js", "/app/mic.js"} {
 		c.read(t, asset, nil, "", nil, 200)
 	}
-	addresses := func() map[string]string {
-		got := liveJSON[struct {
-			Devices []struct {
-				DeviceID string `json:"device_id"`
-				IP       string `json:"ip"`
-			}
-		}](t, c, "/api/devices", nil, nil, "", nil)
-		ips := make(map[string]string, len(got.Devices))
-		for _, p := range got.Devices {
-			ips[p.DeviceID] = p.IP
-		}
-		return ips
-	}
-	before := addresses()
+	c.read(t, "/api/diagnostics", nil, "", nil, 200)
+	token = "echoear-live-ws-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	iso := liveIsolated(t, home, env("XDG_DATA_HOME", filepath.Join(home, ".local/share")), conf, token, client)
+	base = iso.base
 
 	var suffix [2]byte
 	_, _ = rand.Read(suffix[:])
@@ -93,7 +84,7 @@ func TestLiveWebSocket(t *testing.T) {
 function render(){return '<svg viewBox="0 0 360 360"><rect data-id="flip" x="140" y="95" width="80" height="50" fill="gold"/><text x="180" y="195" fill="white" text-anchor="middle">'+text+'</text></svg>';}
 function onTap(s,p,id){if(id==="flip")text="Live tap";}
 function onTick(){if(text==="Live tap")text="Live reset";}`
-	result := liveJSON[struct{ Result struct{ IsError bool } }](t, c, "/mcp", object{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+	result := liveJSON[struct{ Result struct{ IsError bool } }](t, iso, "/mcp", object{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
 		"params": object{"name": "run_app", "arguments": object{"devices": deviceID, "title": "Live flip", "code": code, "tick_ms": 500, "max_ticks": 12}}}, nil, "", nil)
 	if result.Result.IsError {
 		t.Fatal("live MCP run_app rejected local interactivity")
@@ -154,11 +145,14 @@ function onTick(){if(text==="Live tap")text="Live reset";}`
 	if len(spoken) == 0 {
 		t.Fatal("no live intercom payload")
 	}
-	after := addresses()
-	for id, ip := range before {
-		if after[id] != ip {
-			t.Fatal("WebSocket test changed a previously registered peer address")
+	devices := liveJSON[struct {
+		Devices []struct {
+			ID        string `json:"device_id"`
+			IP        string `json:"ip"`
+			Connected bool   `json:"ws_connected"`
 		}
+	}](t, iso, "/api/devices", nil, nil, "", nil).Devices
+	if len(devices) != 1 || devices[0].ID != deviceID || devices[0].IP != "127.0.0.1" || devices[0].Connected {
+		t.Fatal("isolated registry did not remember only the disconnected physical board")
 	}
-	t.Logf("%d previously registered peer addresses unchanged", len(before))
 }

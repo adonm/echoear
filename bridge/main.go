@@ -122,7 +122,7 @@ func run() error {
 	python := env("ECHOEAR_TTS_PYTHON", filepath.Join(home, ".local/share/echoear/tts-venv/bin/python"))
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
-		hex: hex, oc: oc, pairPort: pairPort, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
+		hex: hex, oc: oc, pairPort: pairPort, worker: worker,
 		voices:  deviceVoiceStore(db, fallbackVoice),
 		virtual: virtualStore(db), history: &chatHistory{db},
 		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")},
@@ -212,7 +212,6 @@ func run() error {
 	<-worker.done
 	oc.client.CloseIdleConnections()
 	hex.client.CloseIdleConnections()
-	b.peerHTTP.CloseIdleConnections()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

@@ -20,9 +20,7 @@ import (
 const (
 	mcpProtocol = "2025-11-25"
 	mcpLimit    = 128 << 10
-	maxNodes    = 48
 	exitNode    = "echoear-exit"
-	eventLimit  = 64
 
 	mcpInstructions = "Use the exact EchoEar device ID. Inspect live context, run an SVG drawing or sandboxed JS app, act on a device, or store persistent JSON. Only final assistant prose is spoken."
 )
@@ -151,10 +149,6 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 		out, err := b.callMCP(r.Context(), name, args)
 		if err != nil {
 			out = object{"error": err.Error()}
-			var conflict *sceneConflict
-			if errors.As(err, &conflict) {
-				out["rev"] = conflict.rev
-			}
 			var version *versionConflict
 			if errors.As(err, &version) {
 				out["version"] = version.version
@@ -211,152 +205,6 @@ var mcpTools = func() []object {
 	}
 }()
 
-type deviceEvent struct {
-	Cursor    uint64    `json:"cursor"`
-	Type      string    `json:"type"`
-	DeviceID  string    `json:"device_id"`
-	Timestamp time.Time `json:"timestamp"`
-	Data      object    `json:"data"`
-}
-
-type eventRing struct {
-	cursor uint64
-	recent [eventLimit]deviceEvent
-	subs   map[chan deviceEvent]eventSubscription
-}
-
-type eventSubscription struct {
-	after       uint64
-	ctx, device context.Context
-}
-
-func (s eventSubscription) active() bool { return s.ctx.Err() == nil && s.device.Err() == nil }
-
-func (h *wsHub) cancelWaiters(key string) {
-	if e := h.events[key]; e != nil {
-		for ch := range e.subs {
-			delete(e.subs, ch)
-			close(ch)
-		}
-	}
-}
-
-func (h *wsHub) cancelSceneUI(id string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	key := strings.ToLower(id)
-	h.cancelWaiters(key)
-	if d := h.devices[key]; d != nil {
-		h.stopSceneTimers(d)
-	}
-}
-
-func (h *wsHub) hasWaiter(d *wsDevice) bool {
-	if e := h.events[d.key]; e != nil {
-		for _, sub := range e.subs {
-			if sub.active() {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (h *wsHub) ring(key string) *eventRing {
-	e := h.events[key]
-	if e == nil {
-		e = &eventRing{subs: make(map[chan deviceEvent]eventSubscription)}
-		h.events[key] = e
-	}
-	return e
-}
-
-func (h *wsHub) emit(id, kind string, data object) bool {
-	key := strings.ToLower(id)
-	e := h.ring(key)
-	e.cursor++
-	event := deviceEvent{e.cursor, kind, id, time.Now().UTC(), data}
-	e.recent[(e.cursor-1)%eventLimit] = event
-	waiting := false
-	for ch, sub := range e.subs {
-		if !sub.active() {
-			continue
-		}
-		waiting = true
-		if event.Cursor > sub.after {
-			select {
-			case ch <- event:
-			default:
-			}
-		}
-	}
-	return waiting
-}
-
-func (b *bridge) deviceEvent(id, kind string, data object) {
-	if b.ws != nil {
-		b.ws.mu.Lock()
-		defer b.ws.mu.Unlock()
-		b.ws.emit(id, kind, data)
-	}
-}
-
-func (e *eventRing) last(n uint64) []deviceEvent {
-	first := e.cursor - min(e.cursor, n)
-	out := make([]deviceEvent, 0, e.cursor-first)
-	for i := first; i < e.cursor; i++ {
-		out = append(out, e.recent[i%eventLimit])
-	}
-	return out
-}
-
-func (h *wsHub) waitEvent(ctx context.Context, id string, after *uint64, timeout time.Duration) (object, error) {
-	key := strings.ToLower(id)
-	h.mu.Lock()
-	e := h.ring(key)
-	cursor := e.cursor
-	if after != nil {
-		cursor = *after
-		for _, event := range e.last(eventLimit) {
-			if event.Cursor > cursor {
-				h.mu.Unlock()
-				return object{"event": event, "event_cursor": event.Cursor}, nil
-			}
-		}
-	}
-	d := h.devices[key]
-	if d == nil || !h.active(d) {
-		h.mu.Unlock()
-		return nil, problem(409, "Device is not connected")
-	}
-	ch := make(chan deviceEvent, 1)
-	e.subs[ch] = eventSubscription{cursor, ctx, d.client.ctx}
-	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		delete(e.subs, ch)
-		h.mu.Unlock()
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-d.client.ctx.Done():
-		return nil, problem(409, "Device disconnected")
-	case <-timer.C:
-		return object{"event": nil, "event_cursor": cursor}, nil
-	case ev, ok := <-ch:
-		if d.client.ctx.Err() != nil {
-			return nil, problem(409, "Device disconnected")
-		}
-		if !ok {
-			return object{"event": nil, "event_cursor": cursor, "cancelled": true}, nil
-		}
-		return object{"event": ev, "event_cursor": ev.Cursor}, nil
-	}
-}
-
 func (b *bridge) lookupDevice(id string) (peer, error) {
 	if v, ok := b.virtualByID(id); ok {
 		who := peer{DeviceID: v.ID, Character: v.Character}
@@ -381,25 +229,16 @@ func (b *bridge) lookupDevice(id string) (peer, error) {
 func (h *wsHub) deviceStatus(entry object, id string) {
 	key := strings.ToLower(id)
 	entry["ws_connected"], entry["ws"], entry["mode"] = false, false, "offline"
-	entry["room"] = ""
-	entry["battery_pct"], entry["volume"], entry["scene_rev"], entry["event_cursor"] = nil, nil, uint64(0), uint64(0)
+	entry["battery_pct"], entry["volume"], entry["scene_rev"] = nil, nil, uint64(0)
 	entry["sleeping"] = false
-	if entry["online"] == true {
-		entry["mode"] = "http"
-	}
-	if e := h.events[key]; e != nil {
-		entry["event_cursor"] = e.cursor
-	}
 	if d := h.devices[key]; d != nil && h.active(d) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
 		entry["character"], entry["cat"] = d.cat.Name, d.cat.catLook
-		_, rev := d.sceneState()
-		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, rev, d.firmware
+		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, d.rev, d.firmware
 		entry["auto_volume"], entry["sleeping"] = d.autoVol, d.asleep
 		if d.board != "" {
 			entry["board"], entry["shape"], entry["width"], entry["height"] = d.board, d.screen.shape, d.screen.width, d.screen.height
 		}
-		entry["room"] = d.room
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct
 		}
@@ -410,16 +249,6 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 			entry["volume"] = level
 		}
 	}
-}
-
-var mcpDeviceFields = []string{"device_id", "character", "cat", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "auto_volume", "sleeping", "scene_rev", "event_cursor", "theme", "room"}
-
-func mcpDevice(entry object) object {
-	out := make(object, len(mcpDeviceFields))
-	for _, key := range mcpDeviceFields {
-		out[key] = entry[key]
-	}
-	return out
 }
 
 func mcpUint(args object, key string) (*uint64, error) {
@@ -624,7 +453,7 @@ func (b *bridge) act(ctx context.Context, args object) (object, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := b.mcpChime(ctx, who, kind, pcm); err != nil {
+		if err := b.playChime(who.DeviceID, kind, pcm); err != nil {
 			return nil, err
 		}
 		out["played"] = true
@@ -633,142 +462,6 @@ func (b *bridge) act(ctx context.Context, args object) (object, error) {
 		return nil, problem(400, "Expected an action")
 	}
 	return out, nil
-}
-
-func (b *bridge) callLegacyMCP(ctx context.Context, name string, args object) (object, error) {
-	switch name {
-	case "cat":
-		return b.catTool(ctx, args)
-	case "memory":
-		return b.memory(ctx, args, false)
-	case "asset":
-		return b.asset(ctx, args)
-	case "timer":
-		return b.timerMCP(ctx, args)
-	}
-	if b.ws == nil {
-		return nil, problem(503, "Device hub unavailable")
-	}
-	switch name {
-	case "devices", "snapshot":
-		devices, err := b.deviceList()
-		if err != nil {
-			return nil, err
-		}
-		if name == "devices" {
-			for i, entry := range devices {
-				devices[i] = mcpDevice(entry)
-			}
-			return object{"devices": devices}, nil
-		}
-		id := str(args["device_id"])
-		for _, entry := range devices {
-			if entry["device_id"] == id {
-				h := b.ws
-				h.mu.Lock()
-				defer h.mu.Unlock()
-				h.deviceStatus(entry, id)
-				events := h.ring(strings.ToLower(id))
-				view := sceneView{nodes: []object{}}
-				var rev uint64
-				custom := false
-				if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
-					view, rev = d.sceneState()
-					custom = d.customScene
-				}
-				return object{"device": mcpDevice(entry), "scene": object{"rev": rev, "bg": view.bg, "nodes": view.snapshotNodes(), "custom_scene": custom},
-					"event_cursor": events.cursor, "events": events.last(20)}, nil
-			}
-		}
-		return nil, problem(404, "Device not found")
-	case "intercom":
-		return b.mcpIntercom(ctx, args)
-	}
-	id := str(args["device_id"])
-	who, err := b.lookupDevice(id)
-	if err != nil {
-		return nil, err
-	}
-	switch name {
-	case "scene", "patch":
-		var say, chime string
-		var pcm []byte
-		if name == "scene" {
-			if _, present := args["asset"]; present {
-				if args["preset"] != nil {
-					return nil, problem(400, "Use asset or preset, not both")
-				}
-				args, err = b.sceneAsset(ctx, args)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if raw, ok := args["say"]; ok {
-				say, err = spokenText(str(raw))
-				if err != nil {
-					return nil, err
-				}
-			}
-			if raw, ok := args["chime"]; ok {
-				chime = str(raw)
-				if !validChime(chime) {
-					return nil, problem(400, "Unknown chime kind")
-				}
-			}
-			if raw, ok := args["notes"]; ok {
-				if say != "" {
-					return nil, fieldError("notes", "use notes or say, not both")
-				}
-				_, pcm, err = parseMelody(raw, "notes")
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-		result, err := b.ws.mcpScene(ctx, id, name, args, chime, pcm)
-		if err == nil && name == "scene" {
-			title := shortText(args["title"], 48, false)
-			text := "Showed a scene"
-			if args["preset"] == "face" {
-				text = "Returned to the cat face"
-			}
-			entry := newChat("system", who.Character, text, "mcp")
-			entry.SceneTitle, entry.ToolSummary = title, text
-			b.chat(id, entry, true)
-			if say != "" {
-				_, err = b.speakMCP(ctx, who, say)
-			}
-		}
-		return result, err
-	case "wait_event":
-		after, err := mcpUint(args, "after_cursor")
-		if err != nil {
-			return nil, err
-		}
-		ms, err := mcpUint(args, "timeout_ms")
-		if err != nil {
-			return nil, err
-		}
-		timeout := 15 * time.Second
-		if ms != nil {
-			timeout = time.Duration(min(60000, *ms)) * time.Millisecond
-		}
-		return b.ws.waitEvent(ctx, id, after, timeout)
-	case "speak":
-		return b.mcpSpeak(ctx, who, str(args["text"]))
-	case "chime":
-		var pcm []byte
-		if raw, ok := args["notes"]; ok {
-			_, pcm, err = parseMelody(raw, "notes")
-			if err != nil {
-				return nil, err
-			}
-		}
-		return b.mcpChime(ctx, who, str(args["kind"]), pcm)
-	case "control":
-		return b.ws.mcpControl(ctx, id, args)
-	}
-	return nil, problem(400, "Unknown tool")
 }
 
 func volumeCommand(args object, key string) (auto bool, level int, set bool, err error) {
@@ -840,237 +533,6 @@ func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object,
 	return object{"ok": true, "device_id": d.who.DeviceID, "volume": d.vol, "auto_volume": d.autoVol, "sleeping": d.asleep}, nil
 }
 
-type sceneConflict struct{ rev uint64 }
-
-func (e *sceneConflict) Error() string {
-	return fmt.Sprintf("Scene revision conflict; current rev is %d", e.rev)
-}
-
-func listNodes(v any) ([]object, error) {
-	return listNodesAt(v, "nodes")
-}
-
-func listNodesAt(v any, path string) ([]object, error) {
-	if v == nil {
-		return nil, nil
-	}
-	raw, ok := v.([]any)
-	if !ok {
-		return nil, fieldError(path, "expected an array of nodes")
-	}
-	nodes := make([]object, 0, min(len(raw), maxNodes))
-	for i, v := range raw[:min(len(raw), maxNodes)] {
-		value, ok := v.(object)
-		if !ok {
-			return nil, fieldError(fmt.Sprintf("%s[%d]", path, i), "expected a node object")
-		}
-		nodes = append(nodes, value)
-	}
-	return nodes, nil
-}
-
-// Keep only scalar protocol fields; sceneDiff compares the values directly.
-func visualNode(raw object, partial bool) (object, error) {
-	return visualNodeAt(raw, partial, "node")
-}
-
-func visualNodeAt(raw object, partial bool, path string) (object, error) {
-	n := object{}
-	if id := str(raw["id"]); !partial {
-		if !validSceneID(id) || id == exitNode || id == "echoear-title" {
-			return nil, fieldError(path+".id", "use an unreserved node ID (1–24 letters, numbers, dots, underscores or hyphens)")
-		}
-		n["id"] = id
-	}
-	if t, exists := raw["t"]; !partial || exists {
-		if _, ok := shapeFields[str(t)]; !ok {
-			return nil, fieldError(path+".t", "use circle, rect, line, tri, arc, text or btn")
-		}
-		n["t"] = t
-	}
-	for _, key := range strings.Fields("x y x1 y1 x2 y2 x3 y3 w h r sw fs a1 a2") {
-		value, exists := raw[key]
-		if !exists {
-			continue
-		}
-		limit := 359
-		switch key {
-		case "fs":
-			limit = 3
-		case "sw":
-			limit = 180
-		case "a1", "a2":
-			limit = 360
-		}
-		num, ok := value.(int)
-		if ok {
-			num = min(limit, max(0, num))
-		} else {
-			num, ok = coordinate(value, float64(limit))
-		}
-		if !ok {
-			return nil, fieldError(path+"."+key, "expected a number")
-		}
-		if key == "fs" {
-			num = max(1, num)
-		}
-		n[key] = num
-	}
-	for _, key := range []string{"c", "tc", "bc"} {
-		if value, exists := raw[key]; exists {
-			tint := color(value)
-			if tint == "" {
-				return nil, fieldError(path+"."+key, "expected #RRGGBB")
-			}
-			n[key] = tint
-		}
-	}
-	for _, key := range []string{"vis", "fill"} {
-		if value, ok := raw[key].(bool); ok {
-			n[key] = value
-		}
-	}
-	if !partial && n["t"] == "tri" && n["fill"] == nil {
-		n["fill"] = true
-	}
-	if v, ok := raw["s"].(string); ok {
-		n["s"] = shortText(v, 128, false)
-	}
-	return n, nil
-}
-
-func (h *wsHub) mcpScene(ctx context.Context, id, method string, args object, chime string, pcm []byte) (object, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	d := h.devices[strings.ToLower(id)]
-	if d == nil || !h.active(d) {
-		return nil, problem(409, "Device is not connected")
-	}
-	rev, err := mcpUint(args, "expected_rev")
-	if err != nil {
-		return nil, err
-	}
-	if _, current := d.sceneState(); rev != nil && *rev != current {
-		return nil, &sceneConflict{current}
-	}
-	status := func() object {
-		if len(pcm) != 0 {
-			h.playPCM(d, pcm)
-		} else if chime != "" {
-			h.chime(d, chime)
-		}
-		_, rev := d.sceneState()
-		return object{"ok": true, "device_id": id, "rev": rev, "room": d.room, "event_cursor": h.ring(d.key).cursor}
-	}
-	now := time.Now()
-	if preset, ok := args["preset"]; ok && method == "scene" {
-		if preset != "face" {
-			return nil, problem(400, "Unknown preset")
-		}
-		if args["save_as"] != nil || args["room"] != nil {
-			return nil, problem(400, "The face preset cannot be saved or join a room")
-		}
-		h.clearView(d)
-		d.agentSetScene = d.busy
-		h.wake(d, now)
-		h.render(d, now, true)
-		return status(), nil
-	}
-	if method == "patch" {
-		patch, err := parseScenePatch(args, d.states, 0)
-		if err != nil {
-			return nil, err
-		}
-		view, _ := d.sceneState()
-		targets := newSceneTargets(view, d.states)
-		targets.collectPatch(patch)
-		if err := targets.checkPatch(patch); err != nil {
-			return nil, err
-		}
-		if err := h.patchScene(d, patch, nil, now); err != nil {
-			return nil, err
-		}
-		return status(), nil
-	}
-	view, states, err := parseScene(args)
-	if err != nil {
-		return nil, err
-	}
-	room := str(args["room"])
-	if _, supplied := args["room"]; supplied && !slugRE.MatchString(room) {
-		return nil, problem(400, "Invalid room slug")
-	}
-	if name, supplied := args["save_as"]; supplied {
-		if _, err := h.b.saveAsset(ctx, str(name), "scene", d.who.Character, view, states); err != nil {
-			return nil, err
-		}
-	}
-	h.clearLocalScene(d)
-	d.room = room
-	d.states = states
-	h.showCustomScene(d, view, now, true)
-	return status(), nil
-}
-
-func (b *bridge) mcpSpeak(ctx context.Context, who peer, text string) (object, error) {
-	clean, err := spokenText(text)
-	if err != nil {
-		return nil, err
-	}
-	return b.speakMCP(ctx, who, clean)
-}
-
-func (b *bridge) speakMCP(ctx context.Context, who peer, clean string) (object, error) {
-	if b.worker == nil || !b.worker.ready.Load() {
-		return nil, problem(503, "TTS unavailable")
-	}
-	h := b.ws
-	key := strings.ToLower(who.DeviceID)
-	h.mu.Lock()
-	device := h.devices[key]
-	httpSpoke := h.httpSpeech[key]
-	var turn uint64
-	if device != nil {
-		turn = device.turn
-	}
-	h.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, ttsWait)
-	defer cancel()
-	voice := b.voiceFor(who)
-	pcm := b.clips.peek(voice, clean)
-	if pcm == nil {
-		var err error
-		pcm, err = b.worker.synthesize(ctx, voice, clean)
-		if err != nil {
-			return nil, problem(502, "TTS synthesis failed")
-		}
-	}
-	h.mu.Lock()
-	d := h.devices[key]
-	if d != nil && h.active(d) {
-		if device != d || d.turn != turn {
-			h.mu.Unlock()
-			return nil, problem(409, "Device turn changed while synthesizing")
-		}
-		if d.busy {
-			d.agentSpoke = true
-		}
-		h.wake(d, time.Now())
-		h.playPCM(d, pcm)
-		h.mu.Unlock()
-	} else {
-		h.mu.Unlock()
-		if who.Port == 0 || !b.postPeer(ctx, who, "/speak", pcmType, pcm) {
-			return nil, problem(502, "Device speech delivery failed")
-		}
-	}
-	if httpSpoke != nil {
-		httpSpoke.Store(true)
-	}
-	b.chat(who.DeviceID, newChat("assistant", who.Character, clean, "mcp"), true)
-	return object{"ok": true, "device_id": who.DeviceID}, nil
-}
-
 func validChime(kind string) bool {
 	return kind == "tap" || kind == "think" || kind == "intercom" || kind == "celebrate"
 }
@@ -1082,29 +544,23 @@ func (h *wsHub) chime(d *wsDevice, kind string) {
 	h.push(d, object{"op": "chime", "kind": kind}, false)
 }
 
-func (b *bridge) mcpChime(ctx context.Context, who peer, kind string, pcm []byte) (object, error) {
-	if len(pcm) == 0 && !validChime(kind) {
-		return nil, fieldError("kind", "use tap, think, intercom or celebrate, or supply notes")
+func (b *bridge) playChime(id, kind string, pcm []byte) error {
+	if b.ws == nil {
+		return problem(503, "Device hub unavailable")
 	}
 	h := b.ws
 	h.mu.Lock()
-	if d := h.devices[strings.ToLower(who.DeviceID)]; d != nil && h.active(d) {
-		if len(pcm) > 0 {
-			h.playPCM(d, pcm)
-		} else {
-			h.chime(d, kind)
-		}
-		h.mu.Unlock()
-	} else {
-		h.mu.Unlock()
-		if len(pcm) == 0 {
-			pcm = chimePCM(kind)
-		}
-		if who.Port == 0 || !b.postPeer(ctx, who, "/speak", pcmType, pcm) {
-			return nil, problem(502, "Device chime delivery failed")
-		}
+	defer h.mu.Unlock()
+	d := h.devices[strings.ToLower(id)]
+	if d == nil || !h.active(d) {
+		return problem(409, "Device is not connected")
 	}
-	return object{"ok": true, "device_id": who.DeviceID, "kind": kind}, nil
+	if len(pcm) > 0 {
+		h.playPCM(d, pcm)
+	} else {
+		h.chime(d, kind)
+	}
+	return nil
 }
 
 func (b *bridge) mcpIntercom(ctx context.Context, args object) (object, error) {
@@ -1121,15 +577,22 @@ func (b *bridge) mcpIntercom(ctx context.Context, args object) (object, error) {
 	if err != nil {
 		return nil, err
 	}
-	online := slices.DeleteFunc(others, func(p peer) bool {
-		return time.Since(time.Unix(p.LastSeen, 0)) > 180*time.Second || to != "all" && p.DeviceID != to
-	})
-	if len(online) == 0 {
-		return nil, problem(404, "Online recipient not found")
+	var recipients []peer
+	if to == "all" {
+		recipients = b.intercomTargets(others, to)
+	} else {
+		recipients = slices.DeleteFunc(others, func(p peer) bool { return p.DeviceID != to })
 	}
-	out := b.deliver(ctx, sender, online, text, nil)
+	if len(recipients) == 0 {
+		return nil, problem(404, "Recipient not found")
+	}
+	out := b.deliver(ctx, sender, recipients, text, nil)
 	if len(out.sent) == 0 {
-		return nil, problem(502, "Intercom delivery failed")
+		return nil, problem(409, "No recipients connected")
 	}
 	return object{"ok": true, "sent_to": out.sent, "delivered_to": out.delivered, "failed_to": out.failed}, nil
+}
+
+func fieldError(path, format string, args ...any) error {
+	return problem(400, path+": "+fmt.Sprintf(format, args...))
 }

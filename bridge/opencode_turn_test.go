@@ -61,16 +61,6 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 			})
 			c := testConnectWS(t, base, "unit", false)
 			c.hello(t, id, "Cake")
-			waitResult := make(chan bool, 1)
-			go func() {
-				out, err := b.ws.waitEvent(t.Context(), id, nil, time.Minute)
-				waitResult <- action == "disconnect" && err != nil || err == nil && out["cancelled"] == true && out["event"] == nil
-			}()
-			eventually(t, func() bool {
-				b.ws.mu.Lock()
-				defer b.ws.mu.Unlock()
-				return b.ws.hasWaiter(b.ws.devices[id])
-			})
 			reset := make(chan error, 1)
 			switch action {
 			case "cancel":
@@ -78,11 +68,15 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 				b.ws.cancelTurn(b.ws.devices[id])
 				b.ws.mu.Unlock()
 			case "reset":
-				go func() { reset <- b.oc.reset(t.Context(), id) }()
+				go func() {
+					req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/reset", strings.NewReader(`{"device_id":"`+id+`"}`))
+					req.Header.Set("Content-Type", jsonType)
+					_, err := b.chatAPI(req, "/api/reset", "")
+					reset <- err
+				}()
 			case "disconnect":
 				c.conn.Close()
 			}
-			expectValue(t, waitResult, true)
 			expectValue(t, interrupts, "/api/session/"+sid+"/interrupt")
 			if got, err := b.oc.get(id); err != nil || got != sid {
 				t.Fatalf("stored session changed before the interrupt finished: %q, %v", got, err)
@@ -173,7 +167,8 @@ func TestOpenCodeInterruptOrdersReplacementPrompt(t *testing.T) {
 	}
 }
 
-func TestOpenCodeFallbackTitlesAndLocalAsk(t *testing.T) {
+func TestOpenCodeFallbackTitlesAndChat(t *testing.T) {
+	const reply = "Done.\n```echoear-message\n{\"to\":\"Mint\",\"text\":\"Do not deliver\"}\n```"
 	titles, prompts := make(chan string, 4), make(chan string, 4)
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +184,7 @@ func TestOpenCodeFallbackTitlesAndLocalAsk(t *testing.T) {
 			case "/api/experimental/session/ses-ask/wait":
 				w.WriteHeader(204)
 			case "/api/session/ses-ask/message":
-				_, _ = io.WriteString(w, `{"data":[{"id":"msg2","type":"assistant","finish":"stop","content":[{"type":"text","text":"Done"}]},{"id":"msg1","type":"user"}]}`)
+				fmt.Fprintf(w, `{"data":[{"id":"msg2","type":"assistant","finish":"stop","content":[{"type":"text","text":%q}]},{"id":"msg1","type":"user"}]}`, reply)
 			default:
 				w.WriteHeader(404)
 			}
@@ -204,25 +199,31 @@ func TestOpenCodeFallbackTitlesAndLocalAsk(t *testing.T) {
 	const id = "echoear-ask"
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, id, "Cake")
-	toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
-		localButton("quiet", object{"tap": object{"chime": "tap"}}),
-		localButton("loud", object{"tap": object{"ask": "Next quiz round!"}}),
-	}}, false)
-	c.json(t, object{"ev": "tap", "id": "quiet"})
+	mint := testConnectWS(t, base, "unit", false)
+	mint.hello(t, "echoear-mint", "Mint")
+	mirror := testConnectWS(t, base, "unit", true)
+	mirror.watch(t, id)
+	toolTest(t, base, "act", object{"to": id, "chime": "tap"}, false)
 	c.until(t, hasWS("chime", `"kind":"tap"`))
 	select {
 	case created := <-titles:
 		t.Fatal("local-only tap started an AI session:", created)
 	default:
 	}
-	c.json(t, object{"ev": "tap", "id": "loud"})
+	testRequest(t, "POST", base+"/api/chat", "unit", object{"device_id": id, "text": "Next quiz round!"}, 200)
 	expectValue(t, titles, "EchoEar: Cake (echoear-ask)")
 	select {
 	case text := <-prompts:
 		if !strings.HasSuffix(text, "Next quiz round!") {
-			t.Fatal("local ask did not submit its explicit prompt")
+			t.Fatal("chat did not submit its explicit prompt")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("local ask did not start a turn")
+		t.Fatal("chat did not start a turn")
+	}
+	if frame := mirror.until(t, hasWS("svg", "Done.")); !hasWS("svg", "Answer")(frame) {
+		t.Fatal("no-audio answer notice was missing")
+	}
+	if got := apiObjects(t, base+"/api/devices/echoear-mint/messages", "messages"); len(got) != 0 {
+		t.Fatal("fenced prose triggered intercom")
 	}
 }

@@ -213,46 +213,45 @@ or connectivity are required for normal local operation.
 ## API
 
 HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
-Firmware `0.8.0` announces `proto: 2` in its `/ws` hello. The pure-Go
-SVG renderer streams dirty rectangles as `0x03` RGB565 binary frames, using
-RLE565 when smaller than raw pixels. The bridge defaults to a 360×360 round
-display for older hellos. BOX-3 announces its native size; the bridge centers
-the square artwork on its background and maps raw taps back into SVG space.
-The browser receives SVG instead.
+Hardware needs firmware `0.8.0` or newer and announces `proto: 2` in its
+authenticated `/ws` hello. The bridge remembers each board there, using the
+socket IP and port 80 unless the hello specifies a port. The SVG renderer
+streams dirty rectangles as `0x03` RGB565 binary frames, using RLE565 when
+smaller. BOX-3 announces its native size; the bridge centers the square
+artwork and maps raw taps back into SVG space. Browsers receive `op: "svg"`;
+their on-screen controls also work with Tab, Enter, and Space.
 `0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
-little-endian mono PCM. HTTP voice
-inputs also accept WAV, up to 2 MiB. The bridge appends 150 ms of silence to
-PCM sent to Hex for transcription. Kokoro starts synthesizing sentences while
-OpenCode streams its reply over SSE.
+little-endian mono PCM. Voice capture and intercom use WebSocket. The bridge
+pads voiced PCM sent to Hex with 150 ms of silence on each side. Kokoro starts
+synthesizing sentences while OpenCode streams its reply over SSE.
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
 | `GET /health` | Hex, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, and bridge, Kokoro, and host resource usage |
-| `POST /api/register` | `device_id`, `character`, optional `ip` and `port` → other `peers`; only registration can replace an existing address |
-| `GET /api/devices` | `devices` with `device_id`, `character`, `cat`, `ip`, `online`, `voice` |
+| `GET /api/devices` | Remembered devices with `device_id`, `character`, `cat`, `voice`, and current `ws_connected`; hardware also includes `ip`, `port`, and `last_seen` |
+| `GET /api/scope` | Current scope and ordered `voices` catalog |
 | `POST /api/virtual-clients` | `{}` creates a blank cat; optional legacy `character` and `theme` seed a designed cat |
 | `GET /api/cats`, `DELETE /api/cats/{slug}` | List or delete LAN-only saved cat profiles |
 | `POST /api/cats/reassign` | LAN-only `from_device_id`, `to_device_id`, and `mode` (`swap` or `move`) → transfer active cats, voices, and sessions |
 | `POST /api/devices/{id}/cat` | Update active cat fields or send `{"slug":"cake"}` to load a profile (LAN-only) |
 | `GET /api/devices/{id}/messages` | Canonical chronological chat for a device |
 | `POST /api/devices/{id}/voice` | `{"voice":"af_heart"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
-| `POST /api/voice`, `POST /api/text` | Audio or `{"text":"Explain a circle","device_id":"my-echoear"}` → `reply`, `screen`, `session_id`, `audio_url`, timing; voice adds `transcript` |
-| `POST /api/intercom` | Audio and `X-Target` (device ID or name) → transcript and delivery result |
+| `POST /api/chat` | `{"text":"Explain a circle","device_id":"my-echoear"}` → accepted on a connected device; otherwise returns `reply`, `session_id`, and `audio_url` (LAN only) |
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
 | `POST /api/tts` | `{"text":"Hello!"}`, optional `device_id` → complete PCM clip using that device's voice |
 | `POST /api/reset` | `{"device_id":"my-echoear"}` → save the designed cat, restore the blank starter, and start a fresh session |
 | `POST /api/opencode/compact` | LAN-only; optional `device_id` selects one session (default: all), optional `reconnect_mcp: true` refreshes MCP first → `ok`, `compacted`, and `skipped` device IDs |
 | `GET /api/memory?scope=…`, `GET /api/memory/scopes`, `DELETE /api/memory?scope=…&key=…` | LAN-only saved JSON and populated scopes |
-| `GET /api/assets`, `DELETE /api/assets/{name}` | LAN-only reusable visual assets |
-| `GET /api/apps`, `DELETE /api/apps/{name}` | LAN-only saved apps and drawings |
+| `GET /api/apps`, `DELETE /api/apps/{name}`, `POST /api/apps/run` | List, delete, or run saved apps and drawings (LAN only) |
 | `GET /api/timers?device_id=…`, `DELETE /api/timers/{id}` | List/cancel active timers; scoped links can see and cancel only their own cat's timers |
 | `GET /ota/version.json`, `GET /ota/latest.bin` | Build manifest or `firmware/build/echoear.bin` with SHA-256 |
 | `GET /ota/box3/version.json`, `GET /ota/box3/latest.bin` | BOX-3 manifest or `firmware/build-box3/echoear_box3.bin` with SHA-256 |
 
-Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body
-`device_id` overrides the header. Delivery reports names in `delivered_to` and IDs in `sent_to`/`failed_to`.
+Use the exact `device_id` in chat requests. To send an intercom without an
+agent turn, say or type “Tell Mint dinner is ready,” substituting a nearby
+cat’s name. Intercom requires a connected recipient.
 
 | Device · port 80 | Request → response |
 | --- | --- |

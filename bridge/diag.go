@@ -158,9 +158,9 @@ func (t *turnTrace) audioEnqueued(at time.Time) {
 	}
 }
 
-func (b *bridge) transcribe(ctx context.Context, pcm []byte, kind string) (string, error) {
+func (b *bridge) transcribe(ctx context.Context, pcm []byte) (string, error) {
 	start := time.Now()
-	text, err := b.hex.transcribe(ctx, pcm, kind)
+	text, err := b.hex.transcribe(ctx, pcm)
 	traceFrom(ctx).measure(diagSTT, time.Since(start))
 	return text, err
 }

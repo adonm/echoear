@@ -329,17 +329,15 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		b.ws.mu.Lock()
 		d := b.ws.devices[strings.ToLower(id)]
 		if d != nil && b.ws.active(d) {
-			if !b.ws.emit(sender.DeviceID, "speech", object{"text": text, "source": "text"}) {
-				b.ws.startTurn(d, time.Now(), false, func(ctx context.Context, turn uint64) {
-					b.ws.runTurn(ctx, d, turn, text, "typed", nil)
-				})
-			}
+			b.ws.startTurn(d, time.Now(), false, func(ctx context.Context, turn uint64) {
+				b.ws.runTurn(ctx, d, turn, text, "typed", nil)
+			})
 			b.ws.mu.Unlock()
 			return object{"ok": true, "device_id": sender.DeviceID}, nil
 		}
 		b.ws.mu.Unlock()
 	}
-	out, err := b.turn(ctx, sender, text, nil, "")
+	out, err := b.turn(ctx, sender, text)
 	if err != nil {
 		return nil, err
 	}

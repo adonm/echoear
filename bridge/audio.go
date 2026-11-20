@@ -72,34 +72,6 @@ func WrapWAV(pcm16k []byte) []byte {
 	return append(append(make([]byte, 0, len(h)+len(pcm16k)), h[:]...), pcm16k...)
 }
 
-func wavPCM(wav []byte) ([]byte, error) {
-	format := false
-	if len(wav) >= 12 && string(wav[:4]) == "RIFF" && string(wav[8:12]) == "WAVE" {
-		end := int(le.Uint32(wav[4:])) + 8
-		for i := 12; i+8 <= min(end, len(wav)); {
-			n := int(le.Uint32(wav[i+4:]))
-			start := i + 8
-			if n > min(end, len(wav))-start {
-				break
-			}
-			chunk := wav[start : start+n]
-			switch string(wav[i : i+4]) {
-			case "fmt ":
-				format = n >= 16 && (le.Uint16(chunk) == 1 ||
-					(le.Uint16(chunk) == 0xfffe && n >= 40 && string(chunk[24:40]) == "\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71")) &&
-					le.Uint16(chunk[2:]) == 1 && le.Uint32(chunk[4:]) == sampleRate && le.Uint16(chunk[14:]) == 16
-			case "data":
-				if format && n >= 2 {
-					return chunk[:n&^1], nil
-				}
-				return nil, problem(400, "Intercom requires 16 kHz mono 16-bit PCM")
-			}
-			i = start + n + n%2
-		}
-	}
-	return nil, problem(400, "Intercom requires 16 kHz mono 16-bit PCM")
-}
-
 // At an output position 3*n/2, the fractional input position is either 0 or 1/2.
 const sincRadius = 16
 
@@ -166,32 +138,6 @@ func synthPCM(raw []byte, rate uint32) ([]byte, error) {
 		return nil, errInvalidPCM
 	}
 	return pcm, nil
-}
-
-func MakeIntercomChimePCM() []byte {
-	return chimePCM("intercom")
-}
-
-func chimePCM(kind string) []byte {
-	tones := []float64{660, 880}
-	switch kind {
-	case "tap":
-		tones = []float64{740}
-	case "think":
-		tones = []float64{520, 620}
-	case "celebrate":
-		tones = []float64{660, 830, 990}
-	}
-	const length, fade, pause = sampleRate / 10, sampleRate / 80, sampleRate / 50
-	pcm := make([]byte, (length*len(tones)+pause*(len(tones)-1))*2)
-	for t, tone := range tones {
-		for i := range length {
-			envelope := min(1, float64(i)/fade, float64(length-1-i)/fade)
-			value := math.RoundToEven(4600 * envelope * math.Sin(2*math.Pi*tone*float64(i)/sampleRate))
-			le.PutUint16(pcm[2*(t*(length+pause)+i):], uint16(int16(value)))
-		}
-	}
-	return pcm
 }
 
 func NormalizeVoicePCM(pcm16k []byte) []byte {

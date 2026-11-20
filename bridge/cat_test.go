@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ func TestCatMigration(t *testing.T) {
 	cats := []struct{ id, slug, name, bg, mark, accent, voice string }{
 		{"echoear-33d8", "cake", "Cake", "#FFF3D1", "#F59E0B", "#FACC15", heartVoice},
 		{"echoear-2cac", "mint", "Mint", "#7BE3C6", "#228E81", "#FFD166", fableVoice},
-		{"virt-8458606f", "greg", "greg", "#FCD34D", "#EA580C", "#FFBB6E", heartVoice},
+		{"virt-0123abcd", "greg", "greg", "#FCD34D", "#EA580C", "#FFBB6E", fableVoice},
 	}
 	for _, c := range cats {
 		if virtualID.MatchString(c.id) {
@@ -51,12 +52,8 @@ func TestCatMigration(t *testing.T) {
 		got, err := b.catTool(t.Context(), object{"op": "get", "device_id": c.id})
 		want := catState{catLook: catLook{Name: c.name, Configured: true, FaceBG: c.bg, MarkColor: c.mark, AccentColor: c.accent}, Voice: c.voice}
 		want.FaceSVG = want.defaultFace()
-		active := want
-		if c.slug == "greg" {
-			active.Voice = fableVoice
-		}
-		if err != nil || !reflect.DeepEqual(got["cat"], active) {
-			t.Fatalf("active %s: got %+v, want %+v: %v", c.name, got, active, err)
+		if err != nil || !reflect.DeepEqual(got["cat"], want) {
+			t.Fatalf("active %s: got %+v, want %+v: %v", c.name, got, want, err)
 		}
 		p, err := readSavedCat(db.QueryRow("SELECT "+savedCatColumns+" FROM saved_cats WHERE slug=?", c.slug))
 		if err != nil || !reflect.DeepEqual(p.catState, want) {
@@ -139,6 +136,19 @@ func TestFaceSVGMigratesOldCakeAndKeepsEdits(t *testing.T) {
 	}
 }
 
+func catObject(t *testing.T, b *bridge, id string) object {
+	t.Helper()
+	result, err := b.catTool(t.Context(), object{"op": "get", "device_id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(result["cat"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testObject(t, raw)
+}
+
 func TestCatToolAndLiveFace(t *testing.T) {
 	title := make(chan string, 4)
 	b, base := wsHarness(t, func(b *bridge, dir string) {
@@ -167,15 +177,21 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	}
 	call := func(fail bool, op string, args object) object {
 		t.Helper()
-		args["op"], args["device_id"] = op, id
-		return toolTest(t, base, "cat", args, fail)
+		if op == "get" {
+			return object{"cat": catObject(t, b, id)}
+		}
+		if op == "load_saved" {
+			op = "load"
+		}
+		args["op"] = op
+		return toolTest(t, base, "act", object{"to": id, "cat": args}, fail)
 	}
 	blank := call(false, "get", object{})["cat"].(object)
 	if blank["name"] != "New Cat" || blank["face_bg"] != "#F3F4F6" || blank["mark_color"] != "#CBD5E1" ||
 		blank["accent_color"] != "#60A5FA" || blank["voice"] != heartVoice || blank["face_svg"] != blankCat().FaceSVG {
 		t.Fatal("invalid blank starter", blank)
 	}
-	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat(), turnContext{}); got != "[New Cat ("+id+") · web · voice · setup]\nHi" {
+	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat()); got != "[New Cat ("+id+") · web · voice · setup]\nHi" {
 		t.Fatal(got)
 	}
 	dev := testConnectWS(t, base, "unit", false)
@@ -219,16 +235,16 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	web.until(t, hasWS("svg", "#172344"))
 	web.until(t, hasWS("cat", `"character":"Cosmo"`))
 	web.until(t, hasWS("saved_cats", ""))
-	list := toolTest(t, base, "devices", object{}, false)["devices"].([]any)
+	list := apiObjects(t, base+"/api/devices", "devices")
 	if len(list) != 1 || list[0].(object)["character"] != "Cosmo" || list[0].(object)["cat"].(object)["face_bg"] != "#172344" {
 		t.Fatal("MCP devices did not reflect cat design", list)
 	}
-	profiles := toolTest(t, base, "cat", object{"op": "list_saved"}, false)["cats"].([]any)
+	profiles := apiObjects(t, base+"/api/cats", "cats")
 	if len(profiles) != 1 || profiles[0].(object)["slug"] != "cosmo" || profiles[0].(object)["voice"] != fableVoice {
 		t.Fatal("profile was not saved", profiles)
 	}
 	stored := b.catFor(peer{DeviceID: id})
-	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored, turnContext{}); got != "[Cosmo ("+id+") · web · voice · vibe: curious space explorer]\nHi" {
+	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored); got != "[Cosmo ("+id+") · web · voice · vibe: curious space explorer]\nHi" {
 		t.Fatal(got)
 	}
 	if c := call(false, "reset_blank", object{})["cat"].(object); c["configured"] != false || c["personality"] != "" || c["face_svg"] != blankCat().FaceSVG {
@@ -246,7 +262,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	if out := post(catPath, object{"personality": "stargazer"}, 200); out["cat"].(object)["personality"] != "stargazer" {
 		t.Fatal(out)
 	}
-	toolTest(t, base, "cat", object{"op": "delete_saved", "slug": "cosmo"}, false)
+	testRequest(t, "DELETE", base+"/api/cats/cosmo", "unit", nil, 204)
 	call(true, "load_saved", object{"slug": "cosmo"})
 	post(catPath, object{"save_profile": true}, 200)
 	post(catPath, object{"slug": "cosmo"}, 200)
@@ -275,12 +291,12 @@ func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	}
 	dev := testConnectWS(t, base, "unit", false)
 	dev.hello(t, id, "Ignored")
-	toolTest(t, base, "scene", object{"device_id": id, "room": "party", "nodes": []object{{"id": "caption", "t": "text", "s": "Party"}}}, false)
+	toolTest(t, base, "run_app", object{"devices": id, "svg": `<svg><text x="180" y="180">Party</text></svg>`}, false)
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
 	dev.until(t, hasWS("svg", "Say hi to design me!"))
-	s := toolTest(t, base, "snapshot", object{"device_id": id}, false)
-	if s["scene"].(object)["custom_scene"] != false || s["device"].(object)["room"] != "" {
-		t.Fatal("reset did not clear custom scene and room", s)
+	s := toolTest(t, base, "inspect", object{"device_id": id}, false)
+	if s["active_app"] != nil || s["screen"].(object)["title"] != "Cat" {
+		t.Fatal("reset did not close app", s)
 	}
 	if sid, err := b.oc.get(id); err != nil || sid != "" {
 		t.Fatal("reset did not clear active session mapping", sid, err)
@@ -428,9 +444,11 @@ func TestCatReassign(t *testing.T) {
 			from := testConnectWS(t, base, "unit", false)
 			to := testConnectWS(t, base, "unit", false)
 			from.hello(t, fromID, "Cake")
+			mirror := testConnectWS(t, base, "unit", true)
+			mirror.watch(t, fromID)
 			to.hello(t, toID, "Ignored")
 			source := post("/api/devices/"+fromID+"/cat", object{"name": "Source", "voice": "bf_emma", "face_bg": "#654321", "personality": "happy"}, 200)
-			from.until(t, hasWS("scene", `"bg":"#654321"`))
+			mirror.until(t, hasWS("svg", "#654321"))
 			for id, sid := range map[string]string{fromID: fromSID, toID: toSID} {
 				if err := b.oc.save(id, sid); err != nil {
 					t.Fatal(err)
@@ -467,12 +485,12 @@ func TestCatReassign(t *testing.T) {
 				expectValue(t, titles, toSID+":EchoEar: Target ("+fromID+")")
 			}
 			expectValue(t, titles, fromSID+":EchoEar: Source ("+toID+")")
-			from.until(t, hasWS("scene", `"bg":"`+wantBG+`"`))
+			mirror.until(t, hasWS("svg", wantBG))
 			to.until(t, hasWS("svg", "#654321"))
-			if gets := toolTest(t, base, "cat", object{"op": "get", "device_id": toID}, false)["cat"]; !reflect.DeepEqual(gets, testObject(t, source)["cat"]) {
+			if gets := catObject(t, b, toID); !reflect.DeepEqual(gets, testObject(t, source)["cat"]) {
 				t.Fatal("target did not receive source design and voice", gets)
 			}
-			cat := toolTest(t, base, "cat", object{"op": "get", "device_id": fromID}, false)["cat"].(object)
+			cat := catObject(t, b, fromID)
 			if cat["name"] != wantName || cat["face_bg"] != wantBG || cat["voice"] != wantVoice || cat["configured"] != (mode == "swap") {
 				t.Fatal("incorrect source state after reassignment", cat)
 			}

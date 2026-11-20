@@ -104,7 +104,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 			"'}), tools.echoear.store({op:'list',scope:'"+id+"'}), tools.echoear.act({to:'"+id+
 			"',chime:'tap'}), and tools.echoear.run_app({devices:'"+id+
 			"',title:'Code Mode Check',svg:'<svg viewBox=\"0 0 360 360\"><circle cx=\"180\" cy=\"180\" r=\"60\" fill=\"gold\"/></svg>'}). Return all four tool results from execute, then say one short sentence. Do not call any other tool.",
-		legacyCat(character, "cake"), turnContext{at: time.Now()})
+		legacyCat(character, "cake"))
 	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
 		t.Fatal(err)

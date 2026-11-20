@@ -31,33 +31,10 @@ func (b *bridge) loadApp(ctx context.Context, name string) (savedApp, error) {
 	}
 	err := b.db.QueryRowContext(ctx, `SELECT title,kind,svg,code,tick_ms,max_ticks,author FROM apps WHERE name=?`, name).
 		Scan(&a.Title, &a.Kind, &a.SVG, &a.Code, &a.TickMS, &a.MaxTicks, &a.Author)
-	if !errors.Is(err, sql.ErrNoRows) {
-		return a, err
+	if errors.Is(err, sql.ErrNoRows) {
+		err = problem(404, "App not found")
 	}
-	// Preserve legacy assets and expose their starting view as a v2 drawing.
-	legacy, err := b.asset(ctx, object{"op": "get", "name": name})
-	if err != nil {
-		return a, err
-	}
-	data, ok := legacy["data"].(object)
-	if !ok {
-		return a, problem(404, "App not found")
-	}
-	view, _, err := parseScene(data)
-	if err != nil {
-		return a, err
-	}
-	for i, n := range view.nodes {
-		if n["id"] == exitNode {
-			view.nodes = slices.Delete(view.nodes, i, i+1)
-			break
-		}
-	}
-	a.Title, a.Kind, a.SVG, a.Author = view.title, "drawing", sceneSVG(view, ""), str(legacy["author"])
-	if a.Title == "" {
-		a.Title = name
-	}
-	return a, nil
+	return a, err
 }
 
 func (b *bridge) saveApp(ctx context.Context, a savedApp) error {
@@ -84,8 +61,7 @@ func (b *bridge) listApps(ctx context.Context) ([]object, error) {
 	if b.db == nil {
 		return out, nil
 	}
-	rows, err := b.db.QueryContext(ctx, `SELECT name,title,kind,author,updated_at FROM apps
-		UNION ALL SELECT name,name,'drawing',author,updated_at FROM assets WHERE name NOT IN (SELECT name FROM apps) ORDER BY name`)
+	rows, err := b.db.QueryContext(ctx, `SELECT name,title,kind,author,updated_at FROM apps ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -121,14 +97,9 @@ func (b *bridge) appAPI(w http.ResponseWriter, r *http.Request, path string) (an
 		if b.db == nil {
 			return nil, problem(503, "Apps unavailable")
 		}
-		deleted, err := deleteRow(ctx, b.db, "DELETE FROM apps WHERE name=?", name)
+		_, err := deleteRow(ctx, b.db, "DELETE FROM apps WHERE name=?", name)
 		if err != nil {
 			return nil, err
-		}
-		if !deleted {
-			if _, err := deleteRow(ctx, b.db, "DELETE FROM assets WHERE name=?", name); err != nil {
-				return nil, err
-			}
 		}
 		w.WriteHeader(204)
 		return nil, nil
@@ -390,6 +361,9 @@ func (a *appInstance) screens() ([]svgScreen, error) {
 		geometry := roundScreen
 		if a.devices != nil {
 			geometry = a.devices[i].screen
+			if a.devices[i].virtual() {
+				geometry = screenGeometry{}
+			}
 		}
 		if a.vm == nil {
 			screen, ok := static[geometry]
@@ -505,11 +479,6 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 			}
 		}
 		return object{"ok": true, "devices": ids, "title": "", "hit_ids": []string{}}, nil
-	}
-	for _, d := range devices {
-		if d.proto < 2 && !d.virtual() {
-			return nil, problem(409, "Device needs firmware 0.8.0: "+d.who.DeviceID)
-		}
 	}
 	a := savedApp{SVG: str(args["svg"]), Code: str(args["code"]), Title: shortText(args["title"], 60, false), Author: players[0].name}
 	if name, provided := args["load"]; provided {

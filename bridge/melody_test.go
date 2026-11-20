@@ -56,14 +56,8 @@ func TestWSMelody(t *testing.T) {
 		}
 		c.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
 	}
-	toolTest(t, base, "chime", object{"device_id": id}, true)
-	toolTest(t, base, "chime", object{"device_id": id, "notes": notes}, false)
+	toolTest(t, base, "act", object{"to": id}, true)
+	toolTest(t, base, "act", object{"to": id, "notes": notes}, false)
 	check()
-	toolTest(t, base, "scene", object{"device_id": id, "notes": notes, "nodes": []object{
-		localButton("bell", object{"tap": object{"notes": notes}}),
-	}}, false)
-	c.until(t, hasWS("scene", `"id":"bell"`))
-	check()
-	c.json(t, object{"ev": "tap", "id": "bell"})
-	check()
+
 }
