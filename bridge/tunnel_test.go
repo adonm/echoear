@@ -219,12 +219,12 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	if chat["reply"] != "Hello!" || chat["device_id"] != id || chat["session_id"] != "ses_shared" || chat["audio_url"] != nil {
 		t.Fatal("tunneled chat did not return a scoped reply")
 	}
-	header := "[EchoEar: Plum (" + id + "), web, typed]\n"
+	header := "[EchoEar: Plum (" + id + "), web, typed, time="
 	assertPrompt := func(text string) {
 		t.Helper()
 		select {
 		case got := <-prompts:
-			if got != header+text {
+			if !strings.HasPrefix(got, header) || !strings.Contains(got, ", screen=face]") || stripEchoEarHeader(got) != text {
 				t.Fatal("virtual cat prompt identity or provenance is incorrect")
 			}
 		default:

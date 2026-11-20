@@ -185,7 +185,15 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	// Invoke the real callback now rather than waiting 30 seconds.
 	finished := make(chan struct{})
 	go func() { defer close(finished); b.timers.fire(str(timer["id"])) }()
-	expectValue(t, prompt, "[EchoEar: Cake (echoear-timer), hardware, timer]\nTimer fired: Timer")
+	select {
+	case got := <-prompt:
+		if !strings.HasPrefix(got, "[EchoEar: Cake (echoear-timer), hardware, timer, time=") ||
+			!strings.Contains(got, ", screen=face]") || stripEchoEarHeader(got) != "Timer fired: Timer" {
+			t.Fatal(got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("missing timer prompt")
+	}
 	conflict := toolTest(t, base, "timer", args, true)
 	if !strings.Contains(str(conflict["error"]), "timer-triggered") {
 		t.Fatal(conflict)

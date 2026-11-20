@@ -541,12 +541,32 @@ type turnOptions struct {
 	begin      func() func()
 }
 
-func turnPrompt(sender peer, web bool, source, text string, cat catState) string {
+type turnContext struct {
+	at                         time.Time
+	screen, room, lastIntercom string
+	timers                     int
+}
+
+func turnPrompt(sender peer, web bool, source, text string, cat catState, live turnContext) string {
 	kind := "hardware"
 	if web || webDeviceID(strings.ToLower(sender.DeviceID)) {
 		kind = "web"
 	}
-	return fmt.Sprintf("[EchoEar: %s (%s), %s, %s%s]\n%s", cat.Name, sender.DeviceID, kind, source, catPromptContext(cat), text)
+	if live.screen == "" {
+		live.screen = "face"
+	}
+	extra := ""
+	if live.room != "" {
+		extra += ", room=" + live.room
+	}
+	if live.timers > 0 {
+		extra += fmt.Sprintf(", timers=%d", live.timers)
+	}
+	if live.lastIntercom != "" {
+		extra += ", last_intercom=" + live.lastIntercom
+	}
+	return fmt.Sprintf("[EchoEar: %s (%s), %s, %s, time=%s, screen=%s%s%s]\n%s", cat.Name, sender.DeviceID, kind,
+		source, live.at.Format("15:04 MST"), live.screen, extra, catPromptContext(cat), text)
 }
 
 // HTTP verifies the final text before publishing an audio URL. A WebSocket can
@@ -584,7 +604,14 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text
 	start := time.Now()
 	prepare := func() (string, string) {
 		cat := b.catFor(sender)
-		return cat.Name, turnPrompt(sender, options.web, options.source, text, cat)
+		live := turnContext{at: time.Now()}
+		if b.ws != nil {
+			b.ws.turnScreen(sender.DeviceID, &live)
+		}
+		if b.timers != nil {
+			live.timers = b.timers.activeCount(ctx, sender.DeviceID)
+		}
+		return cat.Name, turnPrompt(sender, options.web, options.source, text, cat, live)
 	}
 	raw, sid, err := b.oc.askPrepared(ctx, sender.DeviceID, prepare, onSentence, options.source, options.begin, func(entry chatEntry) {
 		if entry.Role == "assistant" {

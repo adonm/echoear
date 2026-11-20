@@ -191,6 +191,40 @@ func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
 	return b, srv.URL
 }
 
+func TestLiveTurnContext(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.timers = newTimerManager(b)
+		t.Cleanup(b.timers.close)
+	})
+	const a, other = "echoear-context", "echoear-from"
+	c, sender := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", false)
+	c.hello(t, a, "Cake")
+	sender.hello(t, other, "Mint")
+	toolTest(t, base, "timer", object{"device_id": a, "op": "set", "in_seconds": 60}, false)
+	toolTest(t, base, "scene", object{"device_id": a, "title": "Stars ]", "room": "sky"}, false)
+	ctx := turnContext{at: time.Now()}
+	b.ws.turnScreen(a, &ctx)
+	ctx.timers = b.timers.activeCount(t.Context(), a)
+	if got := turnPrompt(peer{DeviceID: a}, false, "tap", "pick", legacyCat("Cake", "cake"), ctx); ctx.timers != 1 ||
+		!strings.Contains(got, `, screen=scene "Stars ]" rev=`) || !strings.HasSuffix(got, ", room=sky, timers=1]\npick") ||
+		stripEchoEarHeader(got) != "pick" {
+		t.Fatal(got)
+	}
+	toolTest(t, base, "intercom", object{"from_device_id": other, "to_device_id": a, "text": "Hi"}, false)
+	toolTest(t, base, "scene", object{"device_id": a, "preset": "face"}, false)
+	ctx = turnContext{at: time.Now()}
+	b.ws.turnScreen(a, &ctx)
+	if got := turnPrompt(peer{DeviceID: a}, false, "typed", "hi", blankCat(), ctx); !strings.HasSuffix(got, ", screen=face, last_intercom=Mint, setup]\nhi") ||
+		stripEchoEarHeader(got) != "hi" {
+		t.Fatal(got)
+	}
+	ctx = turnContext{at: ctx.at.Add(10*time.Minute + time.Second)}
+	b.ws.turnScreen(a, &ctx)
+	if ctx.lastIntercom != "" {
+		t.Fatal("expired intercom appeared in live context")
+	}
+}
+
 func TestWSHandshakeAndRFC6455(t *testing.T) {
 	b, base := wsHarness(t, nil)
 	for _, c := range []struct {
@@ -594,7 +628,8 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 			case "/api/session/ses-ws/prompt":
 				var prompt struct{ Text string }
 				if err := json.NewDecoder(r.Body).Decode(&prompt); err != nil ||
-					prompt.Text != "[EchoEar: Cake (echoear-a), hardware, voice]\nWhat are stars?" {
+					!strings.HasPrefix(prompt.Text, "[EchoEar: Cake (echoear-a), hardware, voice, time=") ||
+					!strings.Contains(prompt.Text, ", screen=face]") || stripEchoEarHeader(prompt.Text) != "What are stars?" {
 					t.Errorf("unexpected voice prompt: %q (%v)", prompt.Text, err)
 				}
 				close(kick)

@@ -609,10 +609,8 @@ func (m ocMessage) chat(source string) chatEntry {
 	if entry.Text == "" {
 		entry.Text = strings.Join(text, "\n")
 	}
-	if m.Type == "user" && strings.HasPrefix(entry.Text, "[EchoEar: ") {
-		if first, rest, ok := strings.Cut(entry.Text, "\n"); ok && strings.HasSuffix(strings.TrimSuffix(first, "\r"), "]") {
-			entry.Text = rest
-		}
+	if m.Type == "user" {
+		entry.Text = stripEchoEarHeader(entry.Text)
 	}
 	if m.Type == "assistant" {
 		entry.Text = fenced.ReplaceAllString(entry.Text, "")
@@ -719,6 +717,19 @@ type streamedText struct {
 
 func (t *streamedText) addEvent(event ocEvent) []string {
 	d := event.Data
+	switch event.Type {
+	case "session.text.started", "session.text.delta", "session.text.ended":
+	case "message.part.updated":
+		if d.Part.Type != "text" {
+			return nil
+		}
+	case "message.part.delta":
+		if d.Field != "text" {
+			return nil
+		}
+	default:
+		return nil
+	}
 	id := d.AssistantMessageID
 	if id == "" {
 		id = d.MessageID

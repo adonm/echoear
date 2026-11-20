@@ -119,7 +119,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		blank["accent_color"] != "#60A5FA" || blank["voice"] != heartVoice || len(blank["extras"].([]any)) != 0 {
 		t.Fatal("invalid blank starter", blank)
 	}
-	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat()); got != "[EchoEar: New Cat ("+id+"), web, voice, setup]\nHi" {
+	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat(), turnContext{}); got != "[EchoEar: New Cat ("+id+"), web, voice, time=00:00 UTC, screen=face, setup]\nHi" {
 		t.Fatal(got)
 	}
 	dev := testConnectWS(t, base, "unit", false)
@@ -172,7 +172,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		t.Fatal("profile was not saved", profiles)
 	}
 	stored := b.catFor(peer{DeviceID: id})
-	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored); got != "[EchoEar: Cosmo ("+id+"), web, voice, vibe: curious space explorer]\nHi" {
+	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored, turnContext{}); got != "[EchoEar: Cosmo ("+id+"), web, voice, time=00:00 UTC, screen=face, vibe: curious space explorer]\nHi" {
 		t.Fatal(got)
 	}
 	if c := call(false, "reset_blank", object{})["cat"].(object); c["configured"] != false || c["personality"] != "" || len(c["extras"].([]any)) != 0 {

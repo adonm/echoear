@@ -85,7 +85,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 		"Run a read-only screen check. Use Code Mode execute to call tools.echoear.devices({}), tools.echoear.snapshot({device_id: '"+id+
 			"'}), tools.echoear.memory({op: 'list', scope: '"+id+"'}), tools.echoear.asset({op: 'list'}), tools.echoear.timer({op: 'list', device_id: '"+
 			id+"'}), and tools.echoear.cat({op: 'get', device_id: '"+id+"'}). Return all six tool results from execute, then say one short sentence. Do not call any other tool.",
-		legacyCat(character, "cake"))
+		legacyCat(character, "cake"), turnContext{at: time.Now()})
 	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -70,25 +70,27 @@ type wsDevice struct {
 	rssi     int
 	charging bool
 
-	scene       sceneView
-	view        *sceneView
-	viewRev     uint64 // Custom scene revision, excluding transient display changes.
-	pending     *sceneView
-	card        *sceneView
-	drawer      bool
-	rev         uint64
-	pose        catPose
-	drag        string
-	moodAt      time.Time
-	last        time.Time
-	meter       time.Time
-	pet         time.Time
-	asleep      bool
-	customScene bool
-	room        string
-	states      map[string]sceneView
-	cycles      map[string]cyclePosition
-	sceneTimers map[*time.Timer]struct{}
+	scene            sceneView
+	view             *sceneView
+	viewRev          uint64 // Custom scene revision, excluding transient display changes.
+	pending          *sceneView
+	card             *sceneView
+	drawer           bool
+	rev              uint64
+	pose             catPose
+	drag             string
+	moodAt           time.Time
+	last             time.Time
+	meter            time.Time
+	pet              time.Time
+	asleep           bool
+	customScene      bool
+	room             string
+	states           map[string]sceneView
+	cycles           map[string]cyclePosition
+	sceneTimers      map[*time.Timer]struct{}
+	lastIntercomFrom string
+	lastIntercomAt   time.Time
 
 	recAt         time.Time
 	recOpen       bool

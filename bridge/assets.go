@@ -39,6 +39,9 @@ func editableNode(edit nodeEdit) object {
 
 func editableReaction(r tapReaction) object {
 	out := object{}
+	if len(r.notes) != 0 {
+		out["notes"] = r.notes
+	}
 	for k, v := range map[string]string{"chime": r.chime, "speak": r.speak, "state": r.state, "ask": r.ask} {
 		if v != "" {
 			out[k] = v

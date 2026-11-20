@@ -185,6 +185,8 @@ var mcpTools = func() []object {
 	bg := str("Background color as #RRGGBB")
 	say := object{"type": "string", "maxLength": maxText, "description": "Speak plain text on the device without repeating it in the final reply"}
 	chime := object{"type": "string", "enum": []string{"tap", "think", "intercom", "celebrate"}}
+	notes := object{"type": "array", "items": str("PITCH:MS; e.g. C5:150, F#4:200, R:100, 880:200"), "minItems": 1, "maxItems": 32,
+		"description": "16 kHz melody; up to 6000 ms total"}
 	ref := func(name string) object { return object{"$ref": "#/$defs/" + name} }
 	node := object{"id": str("Stable node ID (1–24 letters, numbers, dots, underscores or hyphens)"),
 		"t": object{"type": "string", "enum": []string{"circle", "rect", "line", "tri", "arc", "text", "btn"}}}
@@ -224,7 +226,7 @@ var mcpTools = func() []object {
 		"description": `Partial updates keyed by exact existing node ID. Lines use two coordinate pairs, triangles use three.`},
 		"add": nodes, "del": array(str("Node ID"))}
 	move := schema(object{"target": str("Exact node ID or group name"), "dx": object{"type": "integer"}, "dy": object{"type": "integer"}}, "target", "dx", "dy")
-	reaction := schema(object{"chime": chime, "speak": object{"type": "string", "maxLength": 240, "description": "Speak locally without the AI"},
+	reaction := schema(object{"chime": chime, "notes": notes, "speak": object{"type": "string", "maxLength": 240, "description": "Speak locally without the AI"},
 		"patch": ref("patch"), "state": str("Switch to this named state before applying patch or move"),
 		"move": move, "revert_ms": integer("Undo visual attributes changed by move or patch.set, and any background change", 50, 10000),
 		"after_ms": integer("Delay before then; required with then, at most two chained delays", 50, 10000), "then": ref("reaction"),
@@ -240,17 +242,19 @@ var mcpTools = func() []object {
 	states := object{"type": "object", "description": "Named screens selected by tap.state", "maxProperties": maxSceneStates, "additionalProperties": schema(object{"bg": bg, "title": title, "nodes": nodes}, "nodes")}
 	patchArgs := maps.Clone(patch)
 	patchArgs["expected_rev"] = integer("Expected scene revision", 0, 1<<32-1)
+	chimeArgs := withID(object{"kind": chime, "notes": notes})
+	chimeArgs["anyOf"] = []object{{"required": []string{"kind"}}, {"required": []string{"notes"}}}
 	return []object{
 		tool("devices", "List physical and virtual EchoEars and their connection, mode and cursor.", schema(object{})),
 		tool("snapshot", "Read the device status, 360×360 keyed scene and last 20 events.", withID(object{})),
-		tool("scene", "Draw geometric shapes and ASCII text on a 360×360 screen, or restore the cat face. Use tap and cycle for local reactions; move a node or group and undo with revert_ms. Use say or chime for immediate audio.",
-			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states, "chime": chime, "say": say,
+		tool("scene", "Draw geometric shapes and ASCII text on a 360×360 screen, or restore the cat face. Use tap and cycle for local reactions. Use say, notes or chime for immediate audio.",
+			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states, "chime": chime, "notes": notes, "say": say,
 				"room": str("Join a live multiplayer room by slug"), "asset": str("Load saved visuals by name"), "save_as": str("Save sanitized visuals as this asset name"),
 				"preset": object{"type": "string", "enum": []string{"face"}}}))),
 		tool("patch", "Update visuals or local reactions by node ID; snapshot again if expected_rev conflicts.",
 			withSceneDefs(withID(patchArgs))),
 		tool("speak", "Speak plain text on the device. Do not repeat these words in your final reply.", withID(object{"text": str("Plain words to speak")}, "text")),
-		tool("chime", "Play a short sound on the device.", withID(object{"kind": chime}, "kind")),
+		tool("chime", "Play a preset chime or a melody. If notes are supplied, they replace kind.", chimeArgs),
 		tool("intercom", "Send a spoken message and screen card to an explicit online peer. Use all only if asked.",
 			schema(object{"from_device_id": str("Sender ID"), "to_device_id": str("Recipient ID or all"), "text": str("Message to speak")}, "from_device_id", "to_device_id", "text")),
 		tool("control", "Set a connected device's volume, put it to sleep, or wake it. Supply volume, sleep, or both.",
@@ -547,6 +551,7 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 	switch name {
 	case "scene", "patch":
 		var say, chime string
+		var pcm []byte
 		if name == "scene" {
 			if _, present := args["asset"]; present {
 				if args["preset"] != nil {
@@ -569,8 +574,17 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 					return nil, problem(400, "Unknown chime kind")
 				}
 			}
+			if raw, ok := args["notes"]; ok {
+				if say != "" {
+					return nil, fieldError("notes", "use notes or say, not both")
+				}
+				_, pcm, err = parseMelody(raw, "notes")
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
-		result, err := b.ws.mcpScene(ctx, id, name, args, chime)
+		result, err := b.ws.mcpScene(ctx, id, name, args, chime, pcm)
 		if err == nil && name == "scene" {
 			title := shortText(args["title"], 48, false)
 			text := "Showed a scene"
@@ -602,7 +616,14 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 	case "speak":
 		return b.mcpSpeak(ctx, who, str(args["text"]))
 	case "chime":
-		return b.mcpChime(ctx, who, str(args["kind"]))
+		var pcm []byte
+		if raw, ok := args["notes"]; ok {
+			_, pcm, err = parseMelody(raw, "notes")
+			if err != nil {
+				return nil, err
+			}
+		}
+		return b.mcpChime(ctx, who, str(args["kind"]), pcm)
 	case "control":
 		return b.ws.mcpControl(id, args)
 	}
@@ -647,18 +668,22 @@ func (e *sceneConflict) Error() string {
 }
 
 func listNodes(v any) ([]object, error) {
+	return listNodesAt(v, "nodes")
+}
+
+func listNodesAt(v any, path string) ([]object, error) {
 	if v == nil {
 		return nil, nil
 	}
 	raw, ok := v.([]any)
 	if !ok {
-		return nil, problem(400, "Expected an array of nodes")
+		return nil, fieldError(path, "expected an array of nodes")
 	}
 	nodes := make([]object, 0, min(len(raw), maxNodes))
-	for _, v := range raw[:min(len(raw), maxNodes)] {
+	for i, v := range raw[:min(len(raw), maxNodes)] {
 		value, ok := v.(object)
 		if !ok {
-			return nil, problem(400, "Expected a node object")
+			return nil, fieldError(fmt.Sprintf("%s[%d]", path, i), "expected a node object")
 		}
 		nodes = append(nodes, value)
 	}
@@ -667,16 +692,20 @@ func listNodes(v any) ([]object, error) {
 
 // Keep only scalar protocol fields; sceneDiff compares the values directly.
 func visualNode(raw object, partial bool) (object, error) {
+	return visualNodeAt(raw, partial, "node")
+}
+
+func visualNodeAt(raw object, partial bool, path string) (object, error) {
 	n := object{}
 	if id := str(raw["id"]); !partial {
 		if !validSceneID(id) || id == exitNode || id == "echoear-title" {
-			return nil, problem(400, "Invalid or reserved node ID")
+			return nil, fieldError(path+".id", "use an unreserved node ID (1–24 letters, numbers, dots, underscores or hyphens)")
 		}
 		n["id"] = id
 	}
 	if t, exists := raw["t"]; !partial || exists {
 		if _, ok := shapeFields[str(t)]; !ok {
-			return nil, problem(400, "Unknown node type")
+			return nil, fieldError(path+".t", "use circle, rect, line, tri, arc, text or btn")
 		}
 		n["t"] = t
 	}
@@ -701,7 +730,7 @@ func visualNode(raw object, partial bool) (object, error) {
 			num, ok = coordinate(value, float64(limit))
 		}
 		if !ok {
-			return nil, problem(400, "Invalid numeric node field "+key)
+			return nil, fieldError(path+"."+key, "expected a number")
 		}
 		if key == "fs" {
 			num = max(1, num)
@@ -712,7 +741,7 @@ func visualNode(raw object, partial bool) (object, error) {
 		if value, exists := raw[key]; exists {
 			tint := color(value)
 			if tint == "" {
-				return nil, problem(400, "Invalid node color")
+				return nil, fieldError(path+"."+key, "expected #RRGGBB")
 			}
 			n[key] = tint
 		}
@@ -731,7 +760,7 @@ func visualNode(raw object, partial bool) (object, error) {
 	return n, nil
 }
 
-func (h *wsHub) mcpScene(ctx context.Context, id, method string, args object, chime string) (object, error) {
+func (h *wsHub) mcpScene(ctx context.Context, id, method string, args object, chime string, pcm []byte) (object, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.devices[strings.ToLower(id)]
@@ -746,7 +775,9 @@ func (h *wsHub) mcpScene(ctx context.Context, id, method string, args object, ch
 		return nil, &sceneConflict{current}
 	}
 	status := func() object {
-		if chime != "" {
+		if len(pcm) != 0 {
+			h.playPCM(d, pcm)
+		} else if chime != "" {
 			h.chime(d, chime)
 		}
 		_, rev := d.sceneState()
@@ -769,6 +800,12 @@ func (h *wsHub) mcpScene(ctx context.Context, id, method string, args object, ch
 	if method == "patch" {
 		patch, err := parseScenePatch(args, d.states, 0)
 		if err != nil {
+			return nil, err
+		}
+		view, _ := d.sceneState()
+		targets := newSceneTargets(view, d.states)
+		targets.collectPatch(patch)
+		if err := targets.checkPatch(patch); err != nil {
 			return nil, err
 		}
 		if err := h.patchScene(d, patch, nil, now); err != nil {
@@ -820,9 +857,14 @@ func (b *bridge) speakMCP(ctx context.Context, who peer, clean string) (object, 
 	h.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, ttsWait)
 	defer cancel()
-	pcm, err := b.worker.synthesize(ctx, b.voiceFor(who), clean)
-	if err != nil {
-		return nil, problem(502, "TTS synthesis failed")
+	voice := b.voiceFor(who)
+	pcm := b.clips.peek(voice, clean)
+	if pcm == nil {
+		var err error
+		pcm, err = b.worker.synthesize(ctx, voice, clean)
+		if err != nil {
+			return nil, problem(502, "TTS synthesis failed")
+		}
 	}
 	h.mu.Lock()
 	d := h.devices[key]
@@ -834,11 +876,8 @@ func (b *bridge) speakMCP(ctx context.Context, who peer, clean string) (object, 
 		if d.busy {
 			d.agentSpoke = true
 		}
-		stream := newAudioStream()
-		stream.append(pcm)
-		stream.finish(nil)
 		h.wake(d, time.Now())
-		h.play(d, d.client.ctx, stream)
+		h.playPCM(d, pcm)
 		h.mu.Unlock()
 	} else {
 		h.mu.Unlock()
@@ -864,18 +903,25 @@ func (h *wsHub) chime(d *wsDevice, kind string) {
 	h.push(d, object{"op": "chime", "kind": kind}, false)
 }
 
-func (b *bridge) mcpChime(ctx context.Context, who peer, kind string) (object, error) {
-	if !validChime(kind) {
-		return nil, problem(400, "Unknown chime kind")
+func (b *bridge) mcpChime(ctx context.Context, who peer, kind string, pcm []byte) (object, error) {
+	if len(pcm) == 0 && !validChime(kind) {
+		return nil, fieldError("kind", "use tap, think, intercom or celebrate, or supply notes")
 	}
 	h := b.ws
 	h.mu.Lock()
 	if d := h.devices[strings.ToLower(who.DeviceID)]; d != nil && h.active(d) {
-		h.chime(d, kind)
+		if len(pcm) > 0 {
+			h.playPCM(d, pcm)
+		} else {
+			h.chime(d, kind)
+		}
 		h.mu.Unlock()
 	} else {
 		h.mu.Unlock()
-		if who.Port == 0 || !b.postPeer(ctx, who, "/speak", pcmType, chimePCM(kind)) {
+		if len(pcm) == 0 {
+			pcm = chimePCM(kind)
+		}
+		if who.Port == 0 || !b.postPeer(ctx, who, "/speak", pcmType, pcm) {
 			return nil, problem(502, "Device chime delivery failed")
 		}
 	}

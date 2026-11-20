@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,14 +141,18 @@ func TestLocalPatchRejectsMissingTargets(t *testing.T) {
 	c.hello(t, id, "Cake")
 	set := object{"missing": object{"y": 120}}
 	scene := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
-		localButton("bounce", object{"tap": object{"patch": object{"set": set}}}),
+		localButton("bounce", object{}),
 	}}, false)
 	c.until(t, hasWS("scene", `"id":"bounce"`))
-	if result := toolTest(t, base, "patch", object{"device_id": id, "set": set}, true); result["error"] != "Unknown node ID in set: missing" {
+	if result := toolTest(t, base, "patch", object{"device_id": id, "set": set}, true); result["error"] != `set.missing: node "missing" not found in scene` {
 		t.Fatal(result)
 	}
-	c.json(t, object{"ev": "tap", "id": "bounce", "x": 180, "y": 120})
-	c.until(t, hasWS("error", `"error":"Unknown node ID in set: missing"`))
+	result := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
+		localButton("new", object{"tap": object{"patch": object{"set": set}}}),
+	}}, true)
+	if result["error"] != `nodes[0].tap.patch.set.missing: node "missing" not found in scene` {
+		t.Fatal(result)
+	}
 	after := toolTest(t, base, "snapshot", object{"device_id": id}, false)["scene"].(object)
 	if after["rev"] != scene["rev"] {
 		t.Fatalf("rejected patch advanced revision: %v", after)
@@ -345,5 +350,30 @@ func TestLocalSceneValidation(t *testing.T) {
 		{"tap": object{"patch": object{"expected_rev": 10}}},
 	} {
 		toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{localButton("bad", reaction)}}, true)
+	}
+}
+
+func TestSceneValidationPaths(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-paths"
+	c := testConnectWS(t, base, "unit", false)
+	c.hello(t, id, "Cake")
+	for _, tc := range []struct {
+		node object
+		want string
+	}{
+		{object{"tap": object{"set": object{}}}, `nodes[0].tap.set: wrap inside tap.patch`},
+		{object{"tap": object{"add": []object{}}}, `nodes[0].tap.add: wrap inside tap.patch`},
+		{object{"tap": object{"c": "#FFFFFF"}}, `nodes[0].tap.c: visual updates go inside tap.patch.set["<node_id>"]`},
+		{object{"cycle": []object{{}}}, `nodes[0].cycle: expected an array of 2-8 reaction objects`},
+		{object{"cycle": make([]object, 9)}, `nodes[0].cycle: expected an array of 2-8 reaction objects`},
+		{object{"cycle": []any{object{}, "tap"}}, `nodes[0].cycle: expected an array of 2-8 reaction objects`},
+		{object{"tap": object{"patch": object{"del": []string{"absent"}}}}, `nodes[0].tap.patch.del[0]: node "absent" not found in scene`},
+		{object{"tap": object{"move": object{"target": "absent", "dx": 1, "dy": 1}}}, `nodes[0].tap.move.target: node or group "absent" not found in scene`},
+	} {
+		got := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{localButton("bad", tc.node)}}, true)
+		if !strings.HasPrefix(str(got["error"]), tc.want) {
+			t.Errorf("got %v; want %q", got, tc.want)
+		}
 	}
 }

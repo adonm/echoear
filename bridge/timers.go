@@ -88,6 +88,12 @@ func (m *timerManager) list(ctx context.Context, id string) ([]savedTimer, error
 	return out, nil
 }
 
+func (m *timerManager) activeCount(ctx context.Context, id string) int {
+	var count int
+	_ = m.b.db.QueryRowContext(ctx, "SELECT count(*) FROM timers WHERE device_id=?", id).Scan(&count)
+	return count
+}
+
 func (m *timerManager) restore(now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -362,7 +368,7 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		defer cancel()
 		_, _ = b.generateReply(ctx, ctx, who, "Timer fired: "+message, turnOptions{source: "timer"})
 	} else if who.Port != 0 && !t.WakeAgent {
-		_, _ = b.mcpChime(ctx, who, t.Chime)
+		_, _ = b.mcpChime(ctx, who, t.Chime, nil)
 		if t.Say != "" {
 			_, _ = b.speakMCP(ctx, who, t.Say)
 		}

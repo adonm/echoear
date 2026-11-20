@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -17,7 +18,10 @@ const (
 )
 
 type tapReaction struct {
+	path                     string
 	chime, speak, state, ask string
+	notes                    []string
+	pcm                      []byte
 	exit                     bool
 	broadcast                bool
 	store                    *memoryWrite
@@ -40,26 +44,44 @@ type nodeEdit struct {
 }
 
 type scenePatch struct {
-	bg  string
-	set map[string]nodeEdit
-	add []nodeEdit
-	del map[string]bool
+	path    string
+	bg      string
+	set     map[string]nodeEdit
+	add     []nodeEdit
+	del     map[string]bool
+	delPath map[string]string
 }
 
 func validSceneID(id string) bool { return len(id) <= 24 && deviceIDRE.MatchString(id) }
 
-func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDepth int) (tapReaction, error) {
-	var r tapReaction
-	for key, value := range raw {
+func fieldError(path, format string, args ...any) error {
+	return problem(400, path+": "+fmt.Sprintf(format, args...))
+}
+
+func fieldPath(base, key string) string {
+	if base == "" {
+		return key
+	}
+	return base + "." + key
+}
+
+func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDepth int, path string) (tapReaction, error) {
+	r := tapReaction{path: path}
+	for _, key := range slices.Sorted(maps.Keys(raw)) {
+		value, field := raw[key], path+"."+key
 		switch key {
+		case "set", "add", "del":
+			return r, fieldError(field, `wrap inside tap.patch (example: tap: {patch: {set: {"id": {"c": "#34D399"}}}})`)
+		case "c", "x", "y", "s", "vis":
+			return r, fieldError(field, `visual updates go inside tap.patch.set["<node_id>"], not directly on tap`)
 		case "chime", "speak", "state", "ask":
 			if _, ok := value.(string); !ok {
-				return r, problem(400, "Expected a string for tap."+key)
+				return r, fieldError(field, "expected a string")
 			}
 		case "exit", "broadcast":
 			flag, ok := value.(bool)
 			if !ok {
-				return r, problem(400, "Expected a boolean for tap."+key)
+				return r, fieldError(field, "expected a boolean")
 			}
 			if key == "exit" {
 				r.exit = flag
@@ -69,63 +91,75 @@ func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDep
 		case "store":
 			fields, ok := value.(object)
 			if !ok || len(fields) != 3 {
-				return r, problem(400, "Expected tap.store with scope, key and value")
+				return r, fieldError(field, "expected scope, key and value")
 			}
 			write, err := parseMemoryWrite(fields)
 			if err != nil {
-				return r, err
+				return r, fieldError(field, "%s", err)
 			}
 			r.store = &write
 		case "patch":
 			p, ok := value.(object)
 			if !ok || patchDepth >= maxPatchDepth {
-				return r, problem(400, "Invalid or too deeply nested tap.patch")
+				return r, fieldError(field, "expected a patch object with at most %d nested patches", maxPatchDepth)
 			}
 			for field := range p {
 				switch field {
 				case "bg", "set", "add", "del":
 				default:
-					return r, problem(400, "Unknown tap.patch field "+field)
+					return r, fieldError(path+".patch."+field, "use bg, set, add or del")
 				}
 			}
 			var err error
-			r.patch, err = parseScenePatch(p, states, patchDepth+1)
+			r.patch, err = parseScenePatchAt(p, states, patchDepth+1, field, field+".add")
 			if err != nil {
 				return r, err
 			}
 		case "move":
 			move, ok := value.(object)
 			if !ok || len(move) != 3 {
-				return r, problem(400, "Expected tap.move with target, dx and dy")
+				return r, fieldError(field, "expected target, dx and dy")
 			}
 			target := str(move["target"])
 			dx, xOK := moveDelta(move["dx"])
 			dy, yOK := moveDelta(move["dy"])
-			if strings.TrimSpace(target) == "" || !xOK || !yOK {
-				return r, problem(400, "Expected tap.move with a target and integer dx and dy")
+			if strings.TrimSpace(target) == "" {
+				return r, fieldError(field+".target", "use a node ID or group name")
+			}
+			if !xOK {
+				return r, fieldError(field+".dx", "expected an integer")
+			}
+			if !yOK {
+				return r, fieldError(field+".dy", "expected an integer")
 			}
 			r.move = &nodeMove{target, dx, dy}
+		case "notes":
+			var err error
+			r.notes, r.pcm, err = parseMelody(value, field)
+			if err != nil {
+				return r, err
+			}
 		case "after_ms", "then", "revert_ms":
 		default:
-			return r, problem(400, "Unknown tap field "+key)
+			return r, fieldError(field, "unknown reaction field")
 		}
 	}
 	r.speak, r.ask = shortText(raw["speak"], 240, true), shortText(raw["ask"], 240, true)
 	if _, ok := raw["chime"]; ok {
 		r.chime = str(raw["chime"])
 		if !validChime(r.chime) {
-			return r, problem(400, "Unknown tap chime kind")
+			return r, fieldError(path+".chime", "use tap, think, intercom or celebrate")
 		}
 	}
 	if _, ok := raw["state"]; ok {
 		r.state = str(raw["state"])
 		if _, found := states[r.state]; !found {
-			return r, problem(400, "Unknown scene state "+r.state)
+			return r, fieldError(path+".state", "unknown scene state %q", r.state)
 		}
 	}
 	revert, err := mcpUint(raw, "revert_ms")
 	if err != nil || revert != nil && (*revert < 50 || *revert > 10000) {
-		return r, problem(400, "Invalid tap.revert_ms (50–10000 ms)")
+		return r, fieldError(path+".revert_ms", "expected 50–10000 ms")
 	}
 	if revert != nil {
 		r.revert = time.Duration(*revert) * time.Millisecond
@@ -133,14 +167,14 @@ func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDep
 	ms, err := mcpUint(raw, "after_ms")
 	then, delayed := raw["then"]
 	if err != nil || (ms != nil) != delayed {
-		return r, problem(400, "Use tap.after_ms and tap.then together")
+		return r, fieldError(path+".after_ms", "use an integer and supply then together")
 	}
 	if ms != nil {
 		next, ok := then.(object)
 		if !ok || *ms < 50 || *ms > 10000 || delayDepth >= maxDelayDepth {
-			return r, problem(400, "Invalid or too deeply nested tap delay (50–10000 ms)")
+			return r, fieldError(path+".then", "use a reaction object with after_ms 50–10000; at most two nested delays")
 		}
-		reaction, err := parseReaction(next, states, patchDepth, delayDepth+1)
+		reaction, err := parseReaction(next, states, patchDepth, delayDepth+1, path+".then")
 		if err != nil {
 			return r, err
 		}
@@ -160,8 +194,8 @@ func moveDelta(value any) (int, bool) {
 	return 0, false
 }
 
-func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth int) (nodeEdit, error) {
-	visual, err := visualNode(raw, partial)
+func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth int, path string) (nodeEdit, error) {
+	visual, err := visualNodeAt(raw, partial, path)
 	edit := nodeEdit{visual: visual}
 	if err != nil {
 		return edit, err
@@ -169,7 +203,7 @@ func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth 
 	if value, found := raw["group"]; found {
 		group, ok := value.(string)
 		if !ok && value != nil {
-			return edit, problem(400, "Expected a group name or null")
+			return edit, fieldError(path+".group", "expected a group name or null")
 		}
 		edit.group = &group
 	}
@@ -185,13 +219,13 @@ func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth 
 		case "on", "action", "ask":
 			s, ok := value.(string)
 			if !ok || key == "on" && s != "" && s != "tap" || key == "action" && s != "" && s != "exit" {
-				return edit, problem(400, "Invalid node "+key)
+				return edit, fieldError(path+"."+key, "invalid node control")
 			}
 			value = shortText(s, 120, true)
 		case "tap":
 			switch v := value.(type) {
 			case object:
-				r, err := parseReaction(v, states, depth, 0)
+				r, err := parseReaction(v, states, depth, 0, path+".tap")
 				if err != nil {
 					return edit, err
 				}
@@ -200,23 +234,23 @@ func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth 
 				value = shortText(v, 120, true) // Legacy spoken feedback.
 			case nil: // Clear the declaration on a keyed patch.
 			default:
-				return edit, problem(400, "Expected a tap reaction object")
+				return edit, fieldError(path+".tap", "expected a reaction object")
 			}
 		case "cycle":
-			if value == nil {
+			if value == nil && partial {
 				break
 			}
 			items, ok := value.([]any)
 			if !ok || len(items) < 2 || len(items) > 8 {
-				return edit, problem(400, "Expected 2–8 reactions for cycle")
+				return edit, fieldError(path+".cycle", "expected an array of 2-8 reaction objects")
 			}
 			cycle := make(reactionCycle, 0, len(items))
-			for _, item := range items {
+			for i, item := range items {
 				raw, ok := item.(object)
 				if !ok {
-					return edit, problem(400, "Expected a cycle reaction object")
+					return edit, fieldError(path+".cycle", "expected an array of 2-8 reaction objects")
 				}
-				reaction, err := parseReaction(raw, states, depth, 0)
+				reaction, err := parseReaction(raw, states, depth, 0, fmt.Sprintf("%s.cycle[%d]", path, i))
 				if err != nil {
 					return edit, err
 				}
@@ -230,40 +264,45 @@ func parseNodeEdit(raw object, states map[string]sceneView, partial bool, depth 
 }
 
 func parseScenePatch(raw object, states map[string]sceneView, depth int) (*scenePatch, error) {
-	p := &scenePatch{}
+	return parseScenePatchAt(raw, states, depth, "", "add")
+}
+
+func parseScenePatchAt(raw object, states map[string]sceneView, depth int, path, addPath string) (*scenePatch, error) {
+	p := &scenePatch{path: path}
 	if c, ok := raw["bg"]; ok {
 		p.bg = color(c)
 		if p.bg == "" {
-			return nil, problem(400, "Invalid scene background")
+			return nil, fieldError(fieldPath(path, "bg"), "expected #RRGGBB")
 		}
 	}
 	if raw["set"] != nil {
 		set, ok := raw["set"].(object)
 		if !ok {
-			return nil, problem(400, "Expected set keyed by node ID")
+			return nil, fieldError(fieldPath(path, "set"), "expected an object keyed by node ID")
 		}
 		p.set = make(map[string]nodeEdit, len(set))
 		for id, raw := range set {
+			field := fieldPath(path, "set."+id)
 			fields, ok := raw.(object)
 			if !validSceneID(id) || !ok {
-				return nil, problem(400, "Expected set keyed by valid node IDs")
+				return nil, fieldError(field, "use a valid node ID and an object of changes")
 			}
 			if _, hasID := fields["id"]; hasID {
-				return nil, problem(400, "Do not change node ID in set")
+				return nil, fieldError(field+".id", "do not change the node ID in set")
 			}
-			edit, err := parseNodeEdit(fields, states, true, depth)
+			edit, err := parseNodeEdit(fields, states, true, depth, field)
 			if err != nil {
 				return nil, err
 			}
 			p.set[id] = edit
 		}
 	}
-	add, err := listNodes(raw["add"])
+	add, err := listNodesAt(raw["add"], addPath)
 	if err != nil {
 		return nil, err
 	}
-	for _, node := range add {
-		edit, err := parseNodeEdit(node, states, false, depth)
+	for i, node := range add {
+		edit, err := parseNodeEdit(node, states, false, depth, fmt.Sprintf("%s[%d]", addPath, i))
 		if err != nil {
 			return nil, err
 		}
@@ -272,15 +311,18 @@ func parseScenePatch(raw object, states map[string]sceneView, depth int) (*scene
 	if raw["del"] != nil {
 		del, ok := raw["del"].([]any)
 		if !ok {
-			return nil, problem(400, "Expected del array of node IDs")
+			return nil, fieldError(fieldPath(path, "del"), "expected an array of node IDs")
 		}
 		p.del = make(map[string]bool, len(del))
-		for _, v := range del {
+		p.delPath = make(map[string]string, len(del))
+		for i, v := range del {
 			id := str(v)
+			field := fmt.Sprintf("%s[%d]", fieldPath(path, "del"), i)
 			if !validSceneID(id) {
-				return nil, problem(400, "Invalid node ID in del")
+				return nil, fieldError(field, "expected a valid node ID")
 			}
 			p.del[id] = true
+			p.delPath[id] = field
 		}
 	}
 	return p, nil
@@ -303,34 +345,168 @@ func parseScene(raw object) (sceneView, map[string]sceneView, error) {
 		if !ok || screen["nodes"] == nil {
 			return sceneView{}, nil, problem(400, "Expected a state with nodes")
 		}
-		view, err := parseScreen(screen, states)
+		view, err := parseScreen(screen, states, "states."+name)
 		if err != nil {
 			return sceneView{}, nil, err
 		}
 		states[name] = view
 	}
-	view, err := parseScreen(raw, states)
-	return view, states, err
+	view, err := parseScreen(raw, states, "")
+	if err != nil {
+		return view, nil, err
+	}
+	targets := newSceneTargets(view, states)
+	if err = targets.checkView(view); err != nil {
+		return view, nil, err
+	}
+	for _, name := range slices.Sorted(maps.Keys(states)) {
+		if err = targets.checkView(states[name]); err != nil {
+			return view, nil, err
+		}
+	}
+	return view, states, nil
 }
 
-func parseScreen(raw object, states map[string]sceneView) (sceneView, error) {
+func parseScreen(raw object, states map[string]sceneView, path string) (sceneView, error) {
 	view := sceneView{bg: "#0B1020"}
 	if title := shortText(raw["title"], 48, false); title != "" {
+		view.title = title
 		view.nodes = append(view.nodes, label("echoear-title", 180, 38, 2, title, "#FFF1C8"))
 	}
 	args := object{"add": raw["nodes"]}
 	if bg, ok := raw["bg"]; ok {
 		args["bg"] = bg
 	}
-	patch, err := parseScenePatch(args, states, 0)
+	patch, err := parseScenePatchAt(args, states, 0, path, fieldPath(path, "nodes"))
 	if err != nil {
 		return sceneView{}, err
 	}
 	return patch.apply(view)
 }
 
+type sceneTargets struct {
+	ids, groups map[string]bool
+}
+
+func newSceneTargets(view sceneView, states map[string]sceneView) sceneTargets {
+	t := sceneTargets{map[string]bool{}, map[string]bool{}}
+	t.addView(view)
+	for _, state := range states {
+		t.addView(state)
+	}
+	return t
+}
+
+func (t sceneTargets) addView(view sceneView) {
+	for _, n := range view.nodes {
+		t.ids[str(n["id"])] = true
+	}
+	for _, g := range view.groups {
+		t.groups[g] = true
+	}
+	for _, c := range view.controls {
+		t.collectControls(c)
+	}
+}
+
+func (t sceneTargets) collectControls(c object) {
+	if r, ok := c["tap"].(*tapReaction); ok {
+		t.collectReaction(r)
+	}
+	if cycle, ok := c["cycle"].(*reactionCycle); ok {
+		for i := range *cycle {
+			t.collectReaction(&(*cycle)[i])
+		}
+	}
+}
+
+func (t sceneTargets) collectReaction(r *tapReaction) {
+	for ; r != nil; r = r.then {
+		if r.patch != nil {
+			t.collectPatch(r.patch)
+		}
+	}
+}
+
+func (t sceneTargets) collectPatch(p *scenePatch) {
+	for _, e := range p.add {
+		t.ids[str(e.visual["id"])] = true
+		if e.group != nil && *e.group != "" {
+			t.groups[*e.group] = true
+		}
+		t.collectControls(e.controls)
+	}
+	for _, e := range p.set {
+		if e.group != nil && *e.group != "" {
+			t.groups[*e.group] = true
+		}
+		t.collectControls(e.controls)
+	}
+}
+
+func (t sceneTargets) checkView(view sceneView) error {
+	for _, n := range view.nodes {
+		if err := t.checkControls(view.controls[str(n["id"])]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t sceneTargets) checkControls(c object) error {
+	if r, ok := c["tap"].(*tapReaction); ok {
+		if err := t.checkReaction(r); err != nil {
+			return err
+		}
+	}
+	if cycle, ok := c["cycle"].(*reactionCycle); ok {
+		for i := range *cycle {
+			if err := t.checkReaction(&(*cycle)[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t sceneTargets) checkReaction(r *tapReaction) error {
+	for ; r != nil; r = r.then {
+		if r.move != nil && !t.ids[r.move.target] && !t.groups[r.move.target] {
+			return fieldError(r.path+".move.target", "node or group %q not found in scene", r.move.target)
+		}
+		if r.patch != nil {
+			if err := t.checkPatch(r.patch); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t sceneTargets) checkPatch(p *scenePatch) error {
+	for _, id := range slices.Sorted(maps.Keys(p.set)) {
+		if !t.ids[id] {
+			return fieldError(fieldPath(p.path, "set."+id), "node %q not found in scene", id)
+		}
+		if err := t.checkControls(p.set[id].controls); err != nil {
+			return err
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(p.del)) {
+		if !t.ids[id] {
+			return fieldError(p.delPath[id], "node %q not found in scene", id)
+		}
+	}
+	for _, e := range p.add {
+		if err := t.checkControls(e.controls); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (p *scenePatch) apply(old sceneView) (sceneView, error) {
-	next := sceneView{bg: old.bg, nodes: make([]object, 0, min(maxNodes, len(old.nodes)+len(p.add)+1)),
+	next := sceneView{bg: old.bg, title: old.title, nodes: make([]object, 0, min(maxNodes, len(old.nodes)+len(p.add)+1)),
 		actions: make(map[string]sceneAction), controls: make(map[string]object), feedback: old.feedback}
 	if p.bg != "" {
 		next.bg = p.bg
@@ -394,7 +570,7 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 	}
 	for id := range p.set {
 		if !seen[id] {
-			return sceneView{}, problem(400, "Unknown node ID in set: "+id)
+			return sceneView{}, fieldError(fieldPath(p.path, "set."+id), "node %q not found in scene", id)
 		}
 	}
 	for _, edit := range p.add {
@@ -696,6 +872,9 @@ func (h *wsHub) react(d *wsDevice, r tapReaction, waiting bool, now time.Time) b
 func (h *wsHub) applyReaction(d *wsDevice, r tapReaction, waiting bool, now time.Time) bool {
 	if r.chime != "" {
 		h.chime(d, r.chime)
+	}
+	if len(r.pcm) != 0 {
+		h.playPCM(d, r.pcm)
 	}
 	if r.state != "" {
 		if view, ok := d.states[r.state]; ok {

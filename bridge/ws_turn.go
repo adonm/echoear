@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -280,6 +281,20 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 	h.finishTurn(d, id, view)
 }
 
+func (h *wsHub) turnScreen(id string, live *turnContext) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
+		live.room = d.room
+		if d.scene.title != "" || d.customScene && !d.asleep {
+			live.screen = fmt.Sprintf("scene %q rev=%d", d.scene.title, d.rev)
+		}
+		if age := live.at.Sub(d.lastIntercomAt); age >= 0 && age <= 10*time.Minute {
+			live.lastIntercom = d.lastIntercomFrom
+		}
+	}
+}
+
 func (h *wsHub) sendIntercom(ctx context.Context, d *wsDevice, id uint64, others []peer, target, text string, pcm []byte) {
 	recipients := targets(others, target)
 	res := h.b.deliver(ctx, d.who, recipients, text, pcm)
@@ -486,6 +501,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 			}
 		}
 		now := time.Now()
+		d.lastIntercomFrom, d.lastIntercomAt = sender.Character, now
 		h.wake(d, now)
 		h.render(d, now, false)
 		h.push(d, object{"op": "chime", "kind": "intercom"}, false)

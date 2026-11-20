@@ -12,6 +12,14 @@ import (
 
 const localChatLimit = 200
 
+func stripEchoEarHeader(text string) string {
+	first, rest, ok := strings.Cut(text, "\n")
+	if ok && strings.HasPrefix(first, "[EchoEar: ") && strings.HasSuffix(strings.TrimSuffix(first, "\r"), "]") {
+		return rest
+	}
+	return text
+}
+
 type chatEntry struct {
 	ID          string    `json:"id"`
 	Role        string    `json:"role"`

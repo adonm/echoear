@@ -14,6 +14,7 @@ type sceneAction struct{ kind, value string }
 
 type sceneView struct {
 	bg       string
+	title    string
 	nodes    []object
 	actions  map[string]sceneAction
 	feedback map[string]string
@@ -254,7 +255,7 @@ func catScene(cat catState, pose catPose) sceneView {
 }
 
 func drawerScene(cat catState, voice string, peers []peer) sceneView {
-	s := sceneView{bg: "#251C3B", nodes: []object{
+	s := sceneView{bg: "#251C3B", title: "Text", nodes: []object{
 		label("drawer-title", 180, 57, 2, "Text", "#FFFAEE"),
 		comicButton("cat", 135, 86, 90, 36, "Cat", cat.FaceBG),
 		comicButton("voice", 90, 300, 180, 36, "Voice: "+voiceNames[voice], cat.AccentColor),
@@ -275,7 +276,7 @@ func screenScene(screen object, accent string) sceneView {
 	if bg == "" {
 		bg = "#0B1020"
 	}
-	s := sceneView{bg: bg, nodes: make([]object, 0, 29),
+	s := sceneView{bg: bg, title: str(screen["title"]), nodes: make([]object, 0, 29),
 		actions: map[string]sceneAction{"cat": {"cat", ""}}, feedback: make(map[string]string)}
 	if title := str(screen["title"]); title != "" {
 		s.nodes = append(s.nodes, label("title", 180, 37, 2, title, "#FFF1C8"))
@@ -353,7 +354,7 @@ func intercomScene(sender peer, text string, cat catState) sceneView {
 	if text == "" {
 		text = "Voice message"
 	}
-	s := sceneView{bg: "#251C3B", nodes: []object{
+	s := sceneView{bg: "#251C3B", title: "From " + sender.Character, nodes: []object{
 		bordered(box("card", 42, 84, 276, 204, 29, "#FFFAEE"), 4),
 		circ("badge", 180, 83, 17, cat.AccentColor),
 		label("from", 180, 120, 2, truncate("From "+sender.Character+"!", 25), catInk),
@@ -368,6 +369,7 @@ func intercomScene(sender peer, text string, cat catState) sceneView {
 
 func noticeScene(title, message string) sceneView {
 	s := intercomScene(peer{}, message, blankCat())
+	s.title = title
 	s.nodes[2]["s"] = title
 	s.nodes = slices.Delete(s.nodes, len(s.nodes)-2, len(s.nodes)-1)
 	delete(s.actions, "reply")
