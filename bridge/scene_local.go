@@ -314,6 +314,11 @@ func (p *scenePatch) apply(old sceneView) (sceneView, error) {
 			return sceneView{}, err
 		}
 	}
+	for id := range p.set {
+		if !seen[id] {
+			return sceneView{}, problem(400, "Unknown node ID in set: "+id)
+		}
+	}
 	for _, edit := range p.add {
 		n := maps.Clone(edit.visual)
 		if err := appendNode(n, nodeTapAction(n, edit.controls), edit.controls); err != nil {
@@ -386,7 +391,7 @@ func (h *wsHub) showCustomScene(d *wsDevice, view sceneView, now time.Time, full
 	h.render(d, now, full)
 	if d.rev == before {
 		d.rev++
-		h.push(d, object{"op": "patch", "rev": d.rev}, true)
+		h.push(d, object{"op": "patch", "rev": d.rev, "set": object{}, "add": []object{}, "del": []string{}}, true)
 	}
 }
 
@@ -445,7 +450,9 @@ func (h *wsHub) react(d *wsDevice, r tapReaction, waiting bool, now time.Time) b
 		}
 	}
 	if r.patch != nil {
-		_ = h.patchScene(d, r.patch, now)
+		if err := h.patchScene(d, r.patch, now); err != nil {
+			h.push(d, object{"op": "error", "status": 400, "error": err.Error()}, true)
+		}
 	}
 	if r.exit {
 		h.leaveScene(d, waiting, now)

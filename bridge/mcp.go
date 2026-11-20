@@ -195,10 +195,11 @@ var mcpTools = func() []object {
 		node[key] = object{"type": "boolean"}
 	}
 	node["sw"], node["fs"] = integer("Stroke width", 0, 180), integer("Font scale", 1, 3)
-	node["s"], node["on"] = str("Display text"), object{"type": "string", "enum": []string{"tap", ""}}
+	node["s"], node["on"] = str("Plain ASCII display text (no emoji)"), object{"type": "string", "enum": []string{"tap", ""}}
 	node["action"] = object{"type": "string", "enum": []string{"exit", ""}, "description": "Optional tap-back to the face"}
 	node["ask"] = str("Legacy fallback prompt if no waiter; prefer tap.ask")
-	node["tap"] = object{"description": "Local reaction; auto-enables taps. Null removes it.", "anyOf": []object{ref("reaction"), str("Legacy spoken feedback"), {"type": "null"}}}
+	node["tap"] = object{"description": `Local reaction; auto-enables taps. For example: {"patch":{"set":{"fish":{"y":120}}},"after_ms":400,"then":{"patch":{"set":{"fish":{"y":210}}}}}. Null removes it.`,
+		"anyOf": []object{ref("reaction"), str("Legacy spoken feedback"), {"type": "null"}}}
 	node["cycle"] = object{"description": "Rotate through 2–8 local reactions; null removes it.", "anyOf": []object{
 		{"type": "array", "items": ref("reaction"), "minItems": 2, "maxItems": 8}, {"type": "null"},
 	}}
@@ -206,10 +207,12 @@ var mcpTools = func() []object {
 	delete(fields, "id")
 	nodes := array(ref("node"))
 	nodes["maxItems"] = maxNodes
-	patch := object{"bg": bg, "set": object{"type": "object", "additionalProperties": schema(fields)}, "add": nodes, "del": array(str("Node ID"))}
+	patch := object{"bg": bg, "set": object{"type": "object", "additionalProperties": schema(fields),
+		"description": `Partial updates keyed by exact existing node ID, e.g. {"fish":{"y":120}}. For lines use x1/y1/x2/y2.`},
+		"add": nodes, "del": array(str("Node ID"))}
 	reaction := schema(object{"chime": chime, "speak": object{"type": "string", "maxLength": 240, "description": "Speak locally without the AI"},
 		"patch": ref("patch"), "state": str("Switch to this named state before applying patch"),
-		"after_ms": integer("Delay before then; at most two chained delays", 50, 10000), "then": ref("reaction"),
+		"after_ms": integer("Delay before then; required with then, at most two chained delays", 50, 10000), "then": ref("reaction"),
 		"ask": object{"type": "string", "maxLength": 240, "description": "Start a new AI turn only when needed"}, "exit": object{"type": "boolean"}})
 	reaction["dependentRequired"] = object{"after_ms": []string{"then"}, "then": []string{"after_ms"}}
 	withSceneDefs := func(in object) object {
@@ -217,13 +220,13 @@ var mcpTools = func() []object {
 		return in
 	}
 	title := str("Optional short title shown at the top")
-	states := object{"type": "object", "maxProperties": maxSceneStates, "additionalProperties": schema(object{"bg": bg, "title": title, "nodes": nodes}, "nodes")}
+	states := object{"type": "object", "description": "Named screens selected by tap.state", "maxProperties": maxSceneStates, "additionalProperties": schema(object{"bg": bg, "title": title, "nodes": nodes}, "nodes")}
 	patchArgs := maps.Clone(patch)
 	patchArgs["expected_rev"] = integer("Expected scene revision", 0, 1<<32-1)
 	return []object{
 		tool("devices", "List physical and virtual EchoEars and their connection, mode and cursor.", schema(object{})),
 		tool("snapshot", "Read the device status, 360×360 keyed scene and last 20 events.", withID(object{})),
-		tool("scene", "Draw a 360×360 screen or restore the cat face. Use tap, cycle and states for local interaction without waiting.",
+		tool("scene", "Draw with geometric shapes and plain ASCII text (the hardware font cannot display emoji) on a 360×360 screen, or restore the cat face. Use tap, cycle and states for local interaction without waiting. For motion, use tap.patch.set keyed by existing node IDs, then after_ms and then.patch to reset.",
 			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states,
 				"preset": object{"type": "string", "enum": []string{"face"}}}))),
 		tool("patch", "Update visuals or local reactions by node ID; snapshot again if expected_rev conflicts.",

@@ -27,8 +27,9 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
    Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup builds
    the Go bridge, installs Hex's `parakeet_unified_en` and FP32 `kokoro-v1.0.onnx`,
     links the [EchoEar agent](agents/echoear.md), registers its local MCP server,
-    and starts both services. Set `ECHOEAR_OPENCODE_MODEL` in `bridge.env` to
-    change models.
+    and starts both services. The default model is
+    `opencode/gemini-4-hydrogen#low`; set `ECHOEAR_OPENCODE_MODEL` in
+    `bridge.env` to override it.
 
 2. Create the private firmware config once:
 

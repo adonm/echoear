@@ -22,6 +22,8 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+const defaultOpenCodeModel = "opencode/gemini-4-hydrogen#low"
+
 var modelRE = regexp.MustCompile(`^([^/]+)/([^#]+)(?:#(.+))?$`)
 var tokenRE = regexp.MustCompile(`^[!-~]+$`)
 
@@ -43,7 +45,7 @@ func run() error {
 	if !tokenRE.MatchString(token) {
 		return errors.New("set ECHOEAR_BRIDGE_TOKEN to a nonempty ASCII token without whitespace")
 	}
-	settings, err := openCodeSettings(env("ECHOEAR_OPENCODE_AGENT", "echoear"), env("ECHOEAR_OPENCODE_MODEL", "opencode/gemini-4-neon#high"))
+	settings, err := openCodeSettings(env("ECHOEAR_OPENCODE_AGENT", "echoear"), env("ECHOEAR_OPENCODE_MODEL", defaultOpenCodeModel))
 	if err != nil {
 		return err
 	}

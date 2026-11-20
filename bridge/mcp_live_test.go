@@ -66,7 +66,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	}
 	model := config["ECHOEAR_OPENCODE_MODEL"]
 	if model == "" {
-		model = "opencode/gemini-4-neon#high"
+		model = defaultOpenCodeModel
 	}
 	settings, err := openCodeSettings("echoear", model)
 	if err != nil {

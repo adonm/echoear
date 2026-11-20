@@ -279,7 +279,7 @@ func TestLive(t *testing.T) {
 		conf["ECHOEAR_OPENCODE_AGENT"] = "echoear"
 	}
 	if conf["ECHOEAR_OPENCODE_MODEL"] == "" {
-		conf["ECHOEAR_OPENCODE_MODEL"] = "opencode/gemini-4-neon#high"
+		conf["ECHOEAR_OPENCODE_MODEL"] = defaultOpenCodeModel
 	}
 	settings, err := openCodeSettings(conf["ECHOEAR_OPENCODE_AGENT"], conf["ECHOEAR_OPENCODE_MODEL"])
 	if err != nil {
