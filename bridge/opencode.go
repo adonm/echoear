@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
+	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -224,8 +226,30 @@ type openCode struct {
 }
 
 func newOpenCode(ctx context.Context, u upstream, path, project string, settings ocSettings) *openCode {
+	sessions := loadStore(path, func(_ string, sid string) bool { return sessionIDRE.MatchString(sid) })
+	var unified map[string]string
+	for key, sid := range sessions.data {
+		id, old := strings.CutPrefix(key, "scope-")
+		if !old || !virtualID.MatchString(id) {
+			continue
+		}
+		if unified == nil {
+			unified = maps.Clone(sessions.data)
+		}
+		// Keep the LAN session if both exist; otherwise keep the tunnel's conversation.
+		if unified[id] == "" {
+			unified[id] = sid
+		}
+		delete(unified, key)
+	}
+	if unified != nil {
+		if err := writeMap(path, unified); err != nil {
+			log.Print("EchoEar could not migrate virtual cat session aliases")
+		}
+		sessions.data = unified
+	}
 	o := &openCode{upstream: u, project: project, settings: settings,
-		store: loadStore(path, func(_ string, sid string) bool { return sessionIDRE.MatchString(sid) }),
+		store: sessions,
 		feed:  eventFeed{ready: make(chan struct{}), bySession: make(map[string]map[chan ocEvent]struct{})}}
 	for i := range o.turns {
 		o.turns[i] = make(chan struct{}, 1)
@@ -292,12 +316,6 @@ func (o *openCode) ensureSession(ctx context.Context, device string) (string, er
 		ocSettings
 	}
 	settings := o.settings
-	if strings.HasPrefix(device, "scope-virt-") {
-		// Public chat must not grant a general HTTP or Code Mode client.
-		settings.Permissions = append(slices.Clone(settings.Permissions),
-			ocPermission{"execute", "*", "deny"}, ocPermission{"webfetch", "*", "deny"},
-			ocPermission{"echoear_*", "*", "deny"})
-	}
 	if sid != "" {
 		path := "/api/session/" + sid
 		current, err := ocData[session](ctx, o.upstream, http.MethodGet, path, nil)

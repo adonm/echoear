@@ -97,24 +97,14 @@ func (b *bridge) messages(ctx context.Context, id string) (any, error) {
 	}
 	entries := []chatEntry{}
 	if b.oc != nil {
-		keys := []string{id}
-		if virtualID.MatchString(id) {
-			keys = append(keys, scopedSession(id))
+		sid, err := b.oc.get(id)
+		if err != nil {
+			return nil, err
 		}
-		for _, key := range keys {
-			sid, err := b.oc.get(key)
-			if err != nil {
-				return nil, err
-			}
-			if sid == "" {
-				continue
-			}
+		if sid != "" {
 			messages, err := b.oc.GetSessionMessages(ctx, sid)
 			var status *upstreamStatus
-			if errors.As(err, &status) && status.code == 404 {
-				continue
-			}
-			if err != nil {
+			if err != nil && !(errors.As(err, &status) && status.code == 404) {
 				return nil, err
 			}
 			for i := range messages {
@@ -134,8 +124,6 @@ func (b *bridge) messages(ctx context.Context, id string) (any, error) {
 	return object{"device_id": id, "messages": entries[max(0, len(entries)-chatLimit):]}, nil
 }
 
-func scopedSession(id string) string { return "scope-" + id }
-
 func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 	obj, err := jsonBody(r)
 	if err != nil {
@@ -154,10 +142,6 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		return nil, problem(503, "Chat unavailable")
 	}
 	if path == "/api/reset" {
-		key := id
-		if scope != "" {
-			key = scopedSession(id)
-		}
 		if b.ws != nil {
 			b.ws.mu.Lock()
 			if d := b.ws.devices[strings.ToLower(id)]; d != nil {
@@ -167,7 +151,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 			}
 			b.ws.mu.Unlock()
 		}
-		return object{"ok": true}, b.oc.reset(ctx, key)
+		return object{"ok": true}, b.oc.reset(ctx, id)
 	}
 	text := strings.TrimSpace(str(obj["text"]))
 	if text == "" || len(text) > 4096 {
@@ -183,7 +167,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		if d != nil && b.ws.active(d) {
 			if !b.ws.emit(sender.DeviceID, "speech", object{"text": text, "source": "text"}) {
 				b.ws.startTurn(d, time.Now(), false, func(ctx context.Context, turn uint64) {
-					b.ws.runTurn(ctx, d, turn, text, nil, scope != "" || d.client.scope != nil)
+					b.ws.runTurn(ctx, d, turn, text, nil)
 				})
 			}
 			b.ws.mu.Unlock()
@@ -191,7 +175,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		}
 		b.ws.mu.Unlock()
 	}
-	out, err := b.turnFor(ctx, sender, text, nil, "", scope != "")
+	out, err := b.turn(ctx, sender, text, nil, "")
 	if err != nil {
 		return nil, err
 	}

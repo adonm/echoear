@@ -449,6 +449,37 @@ func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	to.json(t, object{"ev": "rec_end", "cancelled": true})
 }
 
+func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "phone-a123"
+	phone := testConnectWS(t, base, "unit", true)
+	phone.hello(t, id, "Plum")
+	stream := newAudioStream()
+	stream.append(bytes.Repeat([]byte{12, 0}, sampleRate))
+	stream.finish(nil)
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	b.ws.play(d, d.client.ctx, stream)
+	b.ws.mu.Unlock()
+	phone.until(t, hasWS("mode", `"mode":"speaking"`))
+	frame := phone.until(t, hasWS("tts", `"state":"end"`))
+	audio, err := testObject(t, frame.data)["audio"].(json.Number).Int64()
+	if err != nil || audio < 1 {
+		t.Fatal("missing playback ID", err)
+	}
+	phone.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio + 1})
+	phone.json(t, object{"ev": "status", "volume": 42})
+	phone.until(t, hasWS("volume", `"level":42`))
+	b.ws.mu.Lock()
+	awaiting := d.awaitAck
+	b.ws.mu.Unlock()
+	if !awaiting {
+		t.Fatal("a stale acknowledgment changed the current playback mode")
+	}
+	phone.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
+	phone.until(t, hasWS("mode", `"mode":"idle"`))
+}
+
 func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 	release := make(chan struct{})
 	closeRelease := syncOnceClose(release)

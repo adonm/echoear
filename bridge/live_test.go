@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const liveVoicePrompt = "What is a right triangle? Please explain in four complete sentences and draw a simple diagram with a button I can tap to learn more."
+const liveVoicePrompt = "What is a right triangle? Please explain in four complete sentences."
 
 type liveClient struct {
 	client      *http.Client
@@ -370,10 +370,10 @@ func TestLive(t *testing.T) {
 		start := time.Now()
 		got := liveJSON[voiceAnswer](t, c, "/api/voice", nil, recording, pcmType, map[string]string{"X-Device-Id": device})
 		jsonMS := time.Since(start).Milliseconds()
-		if !strings.Contains(strings.ToLower(got.Transcript), "right triangle") || got.Screen == nil ||
+		if !strings.Contains(strings.ToLower(got.Transcript), "right triangle") ||
 			got.AudioURL == nil || got.SampleRate != sampleRate || got.TTSFirstMS != got.TTSMS {
-			t.Fatalf("voice response did not contain transcript, screen and audio (speech=%t screen=%t audio=%t)",
-				strings.Contains(strings.ToLower(got.Transcript), "right triangle"), got.Screen != nil, got.AudioURL != nil)
+			t.Fatalf("voice response did not contain transcript and audio (speech=%t audio=%t)",
+				strings.Contains(strings.ToLower(got.Transcript), "right triangle"), got.AudioURL != nil)
 		}
 		pcm, audio := c.read(t, *got.AudioURL, nil, "", nil, 200)
 		total := time.Since(start).Milliseconds()
@@ -481,7 +481,7 @@ func TestLive(t *testing.T) {
 		assertLiveActor(t, oc, ai.SessionID, settings)
 		prompt, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+ai.SessionID+"/message?order=desc&limit=1&type=user", nil)
 		if err != nil || len(prompt) != 1 || !strings.HasPrefix(prompt[0].Text,
-			"[EchoEar: you are Cake (device_id="+sender+"); other EchoEars: MockPeer ("+target+"); screen transport=legacy HTTP]") {
+			"[EchoEar: you are Cake (device_id="+sender+"); other EchoEars: MockPeer ("+target+")]\n") {
 			t.Fatal("OpenCode peer prompt context lost")
 		}
 		reg := liveJSON[struct {

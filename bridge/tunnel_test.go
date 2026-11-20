@@ -99,28 +99,40 @@ func TestVirtualClientsPersistenceAndDeviceMerge(t *testing.T) {
 
 func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	r := &mockTunnel{}
+	settings, err := openCodeSettings("echoear", "unit/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var creates atomic.Int32
+	prompts := make(chan string, 3)
 	oc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/session":
+			creates.Add(1)
 			var input ocSettings
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || !slices.Equal(input.Permissions, settings.Permissions) {
+				t.Error("virtual cat did not get standard tool permissions")
+			}
+			_, _ = io.WriteString(w, `{"data":{"id":"ses_shared"}}`)
+		case "/api/session/ses_shared":
+			_ = json.NewEncoder(w).Encode(object{"data": struct {
+				ID string `json:"id"`
+				ocSettings
+			}{"ses_shared", settings}})
+		case "/api/session/ses_shared/prompt":
+			var input struct{ Text string }
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 				t.Error(err)
 			}
-			for _, action := range []string{"execute", "webfetch", "echoear_*"} {
-				if !slices.Contains(input.Permissions, ocPermission{action, "*", "deny"}) {
-					t.Errorf("public session did not explicitly deny %s", action)
-				}
-			}
-			_, _ = io.WriteString(w, `{"data":{"id":"ses_public"}}`)
-		case "/api/session/ses_public/prompt":
-			var input struct{ Text string }
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || !strings.Contains(input.Text, "public chat (spoken prose only); other EchoEars: none") {
-				t.Error("public prompt left its scope")
+			select {
+			case prompts <- input.Text:
+			default:
+				t.Error("unexpected OpenCode turn")
 			}
 			_, _ = io.WriteString(w, `{"data":{"id":"msg-user"}}`)
-		case "/api/experimental/session/ses_public/wait":
+		case "/api/experimental/session/ses_shared/wait":
 			w.WriteHeader(204)
-		case "/api/session/ses_public/message":
+		case "/api/session/ses_shared/message":
 			_, _ = io.WriteString(w, `{"data":[{"id":"msg-answer","type":"assistant","finish":"stop","content":[{"type":"text","text":"Hello!"}]},{"id":"msg-user","type":"user"}]}`)
 		default:
 			http.NotFound(w, r)
@@ -130,12 +142,12 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.virtual = loadVirtual(filepath.Join(dir, "virtual_clients.json"))
 		b.tunnels = newTunnelManager(b, filepath.Join(dir, "tunnels.json"), "mock-opentunnel", r)
+		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
+		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"transcript":"Voice to Cake."}`)
+		})
 		path := filepath.Join(dir, "service.json")
 		if err := writeMap(path, object{"url": oc.URL, "password": "unit"}); err != nil {
-			t.Fatal(err)
-		}
-		settings, err := openCodeSettings("echoear", "unit/test")
-		if err != nil {
 			t.Fatal(err)
 		}
 		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}},
@@ -200,11 +212,35 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": "echoear-private", "text": "Question?"}, 403)
 	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": id, "text": ""}, 400)
 	chat := testObject(t, testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": id, "text": "Question?"}, 200))
-	if chat["reply"] != "Hello!" || chat["device_id"] != id || chat["audio_url"] != nil {
-		t.Fatal("public chat did not return a scoped reply")
+	if chat["reply"] != "Hello!" || chat["device_id"] != id || chat["session_id"] != "ses_shared" || chat["audio_url"] != nil {
+		t.Fatal("tunneled chat did not return a scoped reply")
+	}
+	header := "[EchoEar: you are Plum (device_id=" + id + "); other EchoEars: Cake (echoear-private)]\n"
+	assertPrompt := func(text string) {
+		t.Helper()
+		select {
+		case got := <-prompts:
+			if got != header+text {
+				t.Fatal("virtual cat prompt did not contain the clean peer header")
+			}
+		default:
+			t.Fatal("did not receive an OpenCode prompt")
+		}
+	}
+	assertPrompt("Question?")
+	lan := testObject(t, testRequest(t, "POST", base+"/api/chat", "unit", object{"device_id": id, "text": "Another question?"}, 200))
+	assertPrompt("Another question?")
+	if lan["session_id"] != chat["session_id"] || creates.Load() != 1 {
+		t.Fatal("LAN and tunnel did not reuse one OpenCode session")
+	}
+	history := "/api/devices/" + id + "/messages"
+	tunneled := testRequest(t, "GET", scoped+history, token, nil, 200)
+	if !bytes.Contains(tunneled, []byte("Hello!")) || !bytes.Equal(tunneled, testRequest(t, "GET", base+history, "unit", nil, 200)) {
+		t.Fatal("LAN and tunnel histories differ")
 	}
 	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": "echoear-private"}, 403)
-	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": id}, 200)
+	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": id, "text": "Tell Cake Hi from HTTP."}, 200)
+	physical.until(t, hasWS("patch", "Hi from HTTP."))
 	_, rejected := dialTestWS(t, scoped, "unit", false, nil)
 	if rejected.StatusCode != 401 {
 		t.Fatal(rejected.StatusCode)
@@ -223,15 +259,43 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	conn.until(t, hasWS("error", `"status":403`))
 	conn.hello(t, id, "Ignored")
 	peers := conn.until(t, hasWS("peers", id))
-	if bytes.Contains(peers.data, []byte("echoear-private")) {
-		t.Fatal("public WebSocket leaked private peer")
+	if !bytes.Contains(peers.data, []byte(`"character":"Cake","device_id":"echoear-private","online":true`)) ||
+		bytes.Contains(peers.data, []byte(`"ip"`)) {
+		t.Fatal("scoped WebSocket did not expose the minimal online peer list")
 	}
 	conn.json(t, object{"ev": "watch", "device_id": "echoear-private"})
 	conn.until(t, hasWS("error", `"status":403`))
 	conn.json(t, object{"ev": "watch", "device_id": id})
 	conn.until(t, hasWS("scene", ""))
+	conn.json(t, object{"ev": "text", "text": "WebSocket question?"})
+	conn.until(t, chatFrame("Hello!"))
+	assertPrompt("WebSocket question?")
+	conn.until(t, hasWS("mode", `"mode":"idle"`))
+	conn.json(t, object{"ev": "text", "text": "Tell Cake Hi from text."})
+	physical.until(t, hasWS("patch", "Hi from text."))
+	conn.until(t, hasWS("mode", `"mode":"idle"`))
+	conn.json(t, object{"ev": "intercom", "target": "echoear-private", "text": "Hi from WS intercom."})
+	physical.until(t, hasWS("patch", "Hi from WS intercom."))
+	conn.until(t, hasWS("mode", `"mode":"idle"`))
+	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
+	conn.until(t, hasWS("scene", `"cat-ring"`))
+	conn.json(t, object{"ev": "tap", "id": "text", "x": 130, "y": 300})
+	conn.until(t, func(f wsFrame) bool { return hasWS("scene", "Msg Cake")(f) || hasWS("patch", "Msg Cake")(f) })
+	conn.json(t, object{"ev": "tap", "id": "msg-0", "x": 180, "y": 150})
+	conn.until(t, hasWS("rec", `"target":"echoear-private"`))
 	conn.json(t, object{"ev": "rec_start", "target": "echoear-private"})
-	conn.until(t, hasWS("error", `"status":403`))
+	pcm := bytes.Repeat([]byte{12, 0}, 120)
+	conn.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm...)))
+	conn.json(t, object{"ev": "rec_end", "target": "echoear-private"})
+	got := physical.until(t, func(f wsFrame) bool { return f.op == wsBinary })
+	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], pcm) {
+		t.Fatal("tunneled drawer did not deliver recorded PCM")
+	}
+	physical.until(t, hasWS("patch", "Voice to Cake."))
+	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": id}, 200)
+	if bytes.Contains(testRequest(t, "GET", base+history, "unit", nil, 200), []byte("Hello!")) {
+		t.Fatal("tunnel reset did not reset the shared conversation")
+	}
 	restored.shutdown()
 	conn.until(t, func(f wsFrame) bool { return f.op == wsClose })
 	testRequest(t, "DELETE", base+"/api/virtual-clients/"+id, "unit", nil, 204)
@@ -244,6 +308,31 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 		!slices.Equal(r.calls[1], []string{"route", "add", "127.0.0.1:" + port, "--profile", before.Profile}) ||
 		!slices.Equal(r.calls[2], []string{"route", "remove", "scoped", "--profile", before.Profile}) {
 		t.Fatal("unexpected OpenTunnel CLI calls")
+	}
+}
+
+func TestVirtualCatSessionAliasMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	initial := map[string]string{
+		"scope-virt-12345678": "ses_tunnel",
+		"scope-virt-abcdef12": "ses_old",
+		"virt-abcdef12":       "ses_lan",
+		"echoear-physical":    "ses_cake",
+	}
+	if err := writeMap(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	o := newOpenCode(ctx, upstream{}, path, "", ocSettings{})
+	for id, want := range map[string]string{"virt-12345678": "ses_tunnel", "virt-abcdef12": "ses_lan", "echoear-physical": "ses_cake"} {
+		got, err := o.get(id)
+		if err != nil || got != want {
+			t.Fatalf("%s did not keep its existing session", id)
+		}
+	}
+	if got := loadStore(path, func(_, _ string) bool { return true }); len(got.data) != 3 {
+		t.Fatal("legacy aliases were not removed from the session map")
 	}
 }
 

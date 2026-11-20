@@ -89,9 +89,10 @@ outside the bridge service's `PATH` and `~/.local/bin`, set
 `ECHOEAR_OPENTUNNEL_BIN` to its path in `bridge.env`. Restart the bridge
 with `systemctl --user restart echoear-bridge.service` so it finds the CLI.
 In the dashboard, select a Virtual Cat, choose **Create Tunnel** to start
-its route, then **Copy Share Link**. The HTTPS link has a per-client token; the
-tunnel serves that client's chat, mic, and screen, not the LAN dashboard or
-admin routes. Treat the link as a password and use **Close Tunnel** to revoke it.
+its route, then **Copy Share Link**. The HTTPS link opens the same cat and
+conversation as the LAN dashboard, with mic, screen, and intercom to online
+EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
+other cats' chats. Treat the link as a password and use **Close Tunnel** to revoke it.
 
 ## OpenCode MCP
 

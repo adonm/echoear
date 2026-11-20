@@ -33,6 +33,7 @@ type wsEvent struct {
 	Target    string `json:"target"`
 	Text      string `json:"text"`
 	State     string `json:"state"`
+	Audio     uint64 `json:"audio"`
 	Cancelled bool   `json:"cancelled"`
 	wsStatus
 }
@@ -341,6 +342,18 @@ func (h *wsHub) peerFrame() wsFrame {
 	return textFrame(object{"op": "peers", "devices": p})
 }
 
+func (h *wsHub) scopedPeerFrame() wsFrame {
+	list, _ := h.combinedPeers("")
+	devices := make([]object, 0, len(list))
+	now := time.Now().Unix()
+	for _, p := range list {
+		if now-p.LastSeen <= 180 {
+			devices = append(devices, object{"device_id": p.DeviceID, "character": p.Character, "online": true})
+		}
+	}
+	return textFrame(object{"op": "peers", "devices": devices})
+}
+
 func (h *wsHub) broadcastPeers() {
 	if len(h.clients) == 0 {
 		h.peers = ""
@@ -349,9 +362,17 @@ func (h *wsHub) broadcastPeers() {
 	f := h.peerFrame()
 	if string(f.data) != h.peers {
 		h.peers = string(f.data)
+		var scoped wsFrame
 		for c := range h.clients {
-			if c.role == "web" && c.scope == nil {
+			switch {
+			case c.role != "web":
+			case c.scope == nil:
 				c.enqueue(f)
+			default:
+				if scoped.data == nil {
+					scoped = h.scopedPeerFrame()
+				}
+				c.enqueue(scoped)
 			}
 		}
 		for _, d := range h.devices {
@@ -414,10 +435,12 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	h.push(d, object{"op": "power", "brightness": 85}, true)
 	previous := h.peers
 	h.broadcastPeers()
-	if c.scope != nil {
-		c.enqueue(textFrame(object{"op": "peers", "devices": []object{{"device_id": d.key, "character": character, "kind": "virtual", "theme": v.Theme, "online": true, "ws": true, "ws_connected": true}}}))
-	} else if c.role == "web" && previous == h.peers {
-		c.enqueue(h.peerFrame())
+	if c.role == "web" && previous == h.peers {
+		if c.scope != nil {
+			c.enqueue(h.scopedPeerFrame())
+		} else {
+			c.enqueue(h.peerFrame())
+		}
 	}
 	if h.b.worker != nil {
 		go func() {
@@ -458,18 +481,19 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	case d.asleep:
 		mood = "sleepy"
 	}
-	if mood != d.pose.mood {
+	changed := mood != d.pose.mood
+	if changed {
 		d.moodAt = now
+	}
+	if changed && d.virtual() {
+		h.push(d, object{"op": "mode", "mode": mood}, false)
 	}
 	pose := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 	pose.blink = pose.blink || now.Before(d.pet)
 	var view sceneView
 	switch {
 	case d.drawer && mood == "idle":
-		var peers []peer
-		if d.client.scope == nil {
-			peers, _ = h.combinedPeers(d.who.DeviceID)
-		}
+		peers, _ := h.combinedPeers(d.who.DeviceID)
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
 		view = drawerScene(d.who.Character, peers)
 	case d.view != nil && (d.customScene || mood != "sleepy" && mood != "listening"):
@@ -630,10 +654,6 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 	case "rec_start":
 		if target, ok := recordTarget(ev.Target); ok && !d.recOpen {
-			if c.scope != nil && target != "" {
-				c.enqueue(textFrame(object{"op": "error", "status": 403, "error": "Intercom is unavailable in public chat"}))
-				return
-			}
 			if target == "" {
 				target = d.recTarget
 			}
@@ -650,10 +670,26 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 				return
 			}
 			h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
-				h.runTurn(ctx, d, id, text, nil, d.client.scope != nil)
+				h.runTurn(ctx, d, id, text, nil)
+			})
+		}
+	case "intercom":
+		target, ok := recordTarget(ev.Target)
+		text := strings.TrimSpace(ev.Text)
+		if ok && target != "" && text != "" && len(text) <= 4096 {
+			h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
+				others, err := h.peerSnapshot(d.who.DeviceID)
+				if err != nil || ctx.Err() != nil {
+					h.turnError(d, id, "Could not find nearby cats.")
+					return
+				}
+				h.sendIntercom(ctx, d, id, others, target, text, nil)
 			})
 		}
 	case "tts_ack":
+		if ev.Audio != 0 && ev.Audio != d.audio {
+			return
+		}
 		if ev.State == "interrupted" && (d.ttsStarted || d.awaitAck) {
 			h.stopPlayback(d, false)
 			h.playbackDone(d, now)
@@ -715,9 +751,6 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 	case "new":
 		h.startTurn(d, now, false, func(ctx context.Context, id uint64) { h.resetTurn(ctx, d, id) })
 	case "listen", "reply", "reply_to":
-		if d.client.scope != nil && a.value != "" {
-			return
-		}
 		if !d.recAt.IsZero() {
 			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
 		} else {
@@ -734,7 +767,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 			hint = "Asking…"
 		}
 		d.view = d.scene.hint(hint)
-		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, a.value, nil, d.client.scope != nil) })
+		h.startTurn(d, now, true, func(ctx context.Context, id uint64) { h.runTurn(ctx, d, id, a.value, nil) })
 	case "event":
 		h.push(d, object{"op": "chime", "kind": "tap"}, false)
 	}

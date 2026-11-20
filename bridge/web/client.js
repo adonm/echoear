@@ -93,7 +93,6 @@ async function authorize(token) {
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
     $("sidebar-toggle").hidden = !!scope;
-    $("target").hidden = $("target-label").hidden = !!scope;
     $("credentials").close();
     $("token").value = "";
     renderSidebar();
@@ -188,8 +187,15 @@ function renderDevices() {
     for (const stale of rows.values()) stale.remove();
     if (!list.length) nav.append(node("p", "small", virtual ? "No saved Virtual Cats." : "No EchoEars found."));
   }
+  renderTargets(app.devices);
+  $("join").textContent = view?.quick ? "Switch to mirror" : "Join as Phone Cat";
+  $("join").setAttribute("aria-pressed", String(!!view?.quick));
+  renderTunnel();
+}
+
+function renderTargets(devices) {
   const target = $("target");
-  const choices = app.devices.filter(d => d.online && d.device_id !== view?.id);
+  const choices = devices.filter(d => d.online && d.device_id !== view?.id);
   const values = choices.map(d => `${d.device_id}:${d.character}`).join("\n");
   if (target.dataset.choices !== values) {
     const prior = target.value;
@@ -197,9 +203,6 @@ function renderDevices() {
     target.value = choices.some(d => d.device_id === prior) ? prior : "";
     target.dataset.choices = values;
   }
-  $("join").textContent = view?.quick ? "Switch to mirror" : "Join as Phone Cat";
-  $("join").setAttribute("aria-pressed", String(!!view?.quick));
-  renderTunnel();
 }
 
 const preferredCat = devices => devices.find(d => d.kind !== "virtual" && isLive(d))
@@ -422,7 +425,7 @@ function renderCurrent() {
   $("workspace").dataset.theme = themeOf(d);
   say("chat-name", d?.character || "Choose a cat");
   $("chat-mode").hidden = !d;
-  say("chat-mode", !d ? "" : view.virtual ? active ? (mode || view.activity || "Live") : "Connecting" :
+  say("chat-mode", !d ? "" : view.virtual ? active ? (modeLabel[view.mode] || "Idle") : "Connecting" :
     isLive(d) ? mode || "Live WS" : d.online ? "HTTP" : "Offline");
   $("screen-controls").hidden = !ready;
   $("phone-controls").hidden = !view?.virtual;
@@ -444,7 +447,7 @@ function disconnect() {
   ws = null;
   old?.close();
   endMic(true, false);
-  stopSound(false);
+  stopSound();
   clearScene();
   watched = null;
 }
@@ -453,7 +456,7 @@ function connect(attempt = 0) {
   if (!app || !view?.id) return;
   disconnect();
   const cat = view;
-  cat.activity = "";
+  cat.mode = "";
   say("link-state", "Connecting…");
   updateStatus(cat.virtual ? `Joining as ${cat.device.character}…` : `Connecting to ${cat.device.character}…`);
   renderCurrent();
@@ -499,12 +502,7 @@ function syncWatch(live) {
   }
 }
 
-function activity(value) {
-  if (view.virtual) {
-    view.activity = value;
-    renderCurrent();
-  }
-}
+const modeLabel = {idle:"Idle", thinking:"Thinking", listening:"Listening", speaking:"Speaking", sleepy:"Sleepy"};
 
 function command(msg) {
   if (msg.type === "chat") {
@@ -517,7 +515,9 @@ function command(msg) {
   }
   switch (msg.op) {
     case "peers": {
-      if (!app.scope) {
+      if (app.scope) {
+        renderTargets(msg.devices);
+      } else {
         const peer = msg.devices.find(d => d.device_id === view.id);
         if (!view.virtual) {
           say("link-state", "LAN dashboard");
@@ -561,16 +561,18 @@ function command(msg) {
       break;
     case "power":
       screen.dataset.dim = String(msg.brightness < 20);
-      activity(msg.brightness < 20 ? "Sleepy" : "Live");
+      break;
+    case "mode":
+      if (view.virtual) {
+        view.mode = msg.mode;
+        renderCurrent();
+      }
       break;
     case "volume":
       setVolume(msg.level);
       break;
     case "chime":
-      if (view.virtual) {
-        if (msg.kind === "think") activity("Thinking");
-        chime(msg.kind);
-      }
+      if (view.virtual) chime(msg.kind);
       break;
     case "rec":
       if (view.virtual) {
@@ -580,8 +582,8 @@ function command(msg) {
       break;
     case "tts":
       if (view.virtual) {
-        if (msg.state === "start") { ttsEnded = false; activity("Speaking"); }
-        if (msg.state === "end") { ttsEnded = true; ackIfDone(); }
+        if (msg.state === "start") endedAudio = null;
+        if (msg.state === "end") { endedAudio = msg.audio ?? 0; ackIfDone(); }
       }
       break;
     case "error":
@@ -816,7 +818,7 @@ $("volume").onchange = e => {
   send({ev:"head",action:level < old ? "vol_down" : "vol_up",volume:level});
 };
 
-let audio, gain, playAt = 0, volume = 80, ttsEnded = false, muted = false;
+let audio, gain, playAt = 0, volume = 80, endedAudio = null, muted = false;
 const speaking = new Set();
 function speakerUI() {
   say("sound", audio?.state !== "running" ? "Enable speaker" : muted ? "Unmute speaker" : "Mute speaker");
@@ -826,6 +828,17 @@ function setVolume(n) {
   $("volume").value = n;
   $("volume-value").value = n + "%";
   if (gain) gain.gain.value = muted ? 0 : n / 100;
+  syncSpeaker();
+}
+function canPlay() {
+  return audio?.state === "running" && !muted && volume > 0;
+}
+function syncSpeaker() {
+  speakerUI();
+  if (!canPlay()) {
+    clearPCM();
+    ackIfDone();
+  }
 }
 async function audioReady() {
   try {
@@ -834,6 +847,7 @@ async function audioReady() {
       gain = audio.createGain();
       gain.gain.value = muted ? 0 : volume / 100;
       gain.connect(audio.destination);
+      audio.onstatechange = syncSpeaker;
     }
     if (audio.state !== "running") await audio.resume();
     speakerUI();
@@ -846,14 +860,13 @@ $("sound").onclick = async () => {
   if (audio?.state === "running") {
     muted = !muted;
     setVolume(volume);
-    speakerUI();
   } else if (!await audioReady()) {
     say("chat-note", "The browser couldn’t enable audio.");
   }
 };
 function playPCM(raw) {
   if (!(raw instanceof ArrayBuffer) || raw.byteLength < 3 || raw.byteLength % 2 !== 1 || new Uint8Array(raw)[0] !== 2) return;
-  if (audio?.state !== "running") { speakerUI(); return; }
+  if (!canPlay() || mic) return;
   const wire = new DataView(raw,1), count = wire.byteLength / 2;
   const buffer = audio.createBuffer(1,count,16000), samples = buffer.getChannelData(0);
   for (let i = 0; i < count; i++) samples[i] = wire.getInt16(i*2,true)/32768;
@@ -871,15 +884,12 @@ function playPCM(raw) {
   };
 }
 function ackIfDone() {
-  if (ttsEnded && speaking.size === 0) {
-    ttsEnded = false;
-    send({ev:"tts_ack", state:"done"});
-    activity("Live");
+  if (endedAudio !== null && speaking.size === 0) {
+    send({ev:"tts_ack", state:"done", audio:endedAudio});
+    endedAudio = null;
   }
 }
-function stopSound(ack) {
-  const had = speaking.size > 0;
-  ttsEnded = false;
+function clearPCM() {
   for (const source of speaking) {
     source.onended = null;
     source.stop();
@@ -887,11 +897,14 @@ function stopSound(ack) {
   }
   speaking.clear();
   playAt = 0;
-  if (ack && had) send({ev:"tts_ack",state:"interrupted"});
+}
+function stopSound() {
+  endedAudio = null;
+  clearPCM();
 }
 function chime(kind) {
-  if (kind === "cancel") stopSound(false);
-  if (audio?.state !== "running") return;
+  if (kind === "cancel") stopSound();
+  if (!canPlay()) return;
   const tones = {tap:[540],think:[440],intercom:[660,880],cancel:[280]}[kind] || [];
   for (const [i, hz] of tones.entries()) {
     const at = audio.currentTime+.025+i*.10, osc = audio.createOscillator(), env = audio.createGain();
@@ -919,7 +932,8 @@ async function startMic(target) {
     send({ev:"rec_end",cancelled:true,target});
     return;
   }
-  stopSound(true);
+  clearPCM();
+  ackIfDone();
   const rec = {target,stream:null,node:null,source:null,stopping:false};
   mic = rec;
   recordUI(true);
@@ -945,7 +959,6 @@ async function startMic(target) {
     };
     send({ev:"rec_start",target});
     rec.source.connect(rec.node).connect(audio.destination);
-    activity("Listening");
     say("chat-note", target ? "Recording intercom…" : "Listening…");
   } catch {
     if (mic === rec) {
@@ -970,7 +983,6 @@ function endMic(cancelled, tell = true, flushed = false) {
   if (tell) {
     cancelled ||= !rec.node;
     send({ev:"rec_end",cancelled,target:rec.target});
-    activity(cancelled ? "Live" : "Thinking");
     say("chat-note", cancelled ? "Recording cancelled." : "Message sent to the bridge.");
   }
 }

@@ -84,7 +84,9 @@ func TestLiveWebSocket(t *testing.T) {
 	from.json(t, object{"ev": "rec_end", "cancelled": false})
 	phone.until(t, hasWS("chime", `"kind":"intercom"`))
 	phone.until(t, hasWS("tts", `"state":"start"`))
+	phone.until(t, hasWS("mode", `"mode":"speaking"`))
 	var spoken []byte
+	var audio any
 	var elapsed time.Duration
 	for range 128 {
 		f := phone.read(t)
@@ -95,13 +97,18 @@ func TestLiveWebSocket(t *testing.T) {
 			spoken = append(spoken, f.data[1:]...)
 			elapsed = time.Since(start)
 		} else if hasWS("tts", `"state":"end"`)(f) {
+			audio = testObject(t, f.data)["audio"]
 			break
 		}
 	}
 	if !bytes.HasSuffix(spoken, pcm) {
 		t.Fatal("live intercom changed capture PCM")
 	}
-	phone.json(t, object{"ev": "tts_ack", "state": "done"})
+	if audio == nil {
+		t.Fatal("missing live playback ID")
+	}
+	phone.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
+	phone.until(t, hasWS("mode", `"mode":"idle"`))
 	t.Logf("live raw intercom rec_end to PCM: %.2f ms; HTML/SVG and exact scene/patch mirror verified",
 		float64(elapsed)/float64(time.Millisecond))
 	for _, s := range []*testWS{from, phone, viewer} {

@@ -59,12 +59,6 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 	pcm, target := d.mic, d.recTarget
 	if requested, ok := recordTarget(ev.Target); ok && requested != "" {
-		if d.client.scope != nil {
-			h.push(d, object{"op": "error", "status": 403, "error": "Intercom is unavailable in public chat"}, false)
-			h.clearRecording(d)
-			h.render(d, now, false)
-			return
-		}
 		target = requested
 	}
 	h.clearRecording(d)
@@ -154,11 +148,7 @@ func (h *wsHub) turnError(d *wsDevice, id uint64, message string) {
 
 func (h *wsHub) resetTurn(ctx context.Context, d *wsDevice, id uint64) {
 	if h.b.oc != nil {
-		key := d.who.DeviceID
-		if d.client.scope != nil {
-			key = scopedSession(key)
-		}
-		if err := h.b.oc.reset(ctx, key); err != nil {
+		if err := h.b.oc.reset(ctx, d.who.DeviceID); err != nil {
 			h.turnError(d, id, "Could not start a new chat.")
 			return
 		}
@@ -214,15 +204,11 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		return
 	}
 	h.b.deviceEvent(d.who.DeviceID, "speech", object{"text": text, "source": "voice"})
-	h.runTurn(ctx, d, id, text, pcm, d.client.scope != nil)
+	h.runTurn(ctx, d, id, text, pcm)
 }
 
-func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string, pcm []byte, scoped bool) {
-	var others []peer
-	var err error
-	if !scoped {
-		others, err = h.peerSnapshot(d.who.DeviceID)
-	}
+func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string, pcm []byte) {
+	others, err := h.peerSnapshot(d.who.DeviceID)
 	if err != nil || ctx.Err() != nil {
 		h.turnError(d, id, "Could not find nearby cats.")
 		return
@@ -231,18 +217,16 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string
 	if pcm != nil {
 		source = "voice"
 	}
-	if direct := directMessage(others, text); !scoped && direct != nil {
+	if direct := directMessage(others, text); direct != nil {
 		h.b.chat(d.who.DeviceID, newChat("user", "You", text, source), true)
-		recipients := targets(others, direct.target)
-		res := h.b.deliver(ctx, d.who, recipients, direct.text, pcm)
-		h.confirm(ctx, d, id, direct.target, recipients, len(res.sent) != 0, len(res.failed) != 0)
+		h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
 		return
 	}
 	if h.b.oc == nil {
 		h.turnError(d, id, "Chat is not ready yet.")
 		return
 	}
-	gen, err := h.b.generateReply(ctx, ctx, d.who, others, text, turnOptions{source: source, scoped: scoped,
+	gen, err := h.b.generateReply(ctx, ctx, d.who, others, text, turnOptions{source: source,
 		publish: func(stream *AudioStream) { h.publish(d, id, ctx, stream) },
 		agentSpoke: func() bool {
 			h.mu.Lock()
@@ -253,7 +237,7 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string
 		h.turnError(d, id, "Could not finish that turn.")
 		return
 	}
-	if !scoped && gen.message != nil && ctx.Err() == nil {
+	if gen.message != nil && ctx.Err() == nil {
 		h.b.deliver(ctx, d.who, targets(others, gen.message.target), gen.message.text, nil)
 	}
 	var view *sceneView
@@ -265,6 +249,12 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text string
 		view = &v
 	}
 	h.finishTurn(d, id, view)
+}
+
+func (h *wsHub) sendIntercom(ctx context.Context, d *wsDevice, id uint64, others []peer, target, text string, pcm []byte) {
+	recipients := targets(others, target)
+	res := h.b.deliver(ctx, d.who, recipients, text, pcm)
+	h.confirm(ctx, d, id, target, recipients, len(res.sent) != 0, len(res.failed) != 0)
 }
 
 func (h *wsHub) confirm(ctx context.Context, d *wsDevice, id uint64, target string, recipients []peer, sent, partial bool) {
@@ -350,7 +340,7 @@ func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) {
 			if !d.ttsStarted {
 				d.ttsStarted = true
 				d.audioUntil = now
-				h.push(d, object{"op": "tts", "state": "start"}, false)
+				h.push(d, object{"op": "tts", "state": "start", "audio": id}, false)
 				h.render(d, now, false)
 			}
 			if d.audioUntil.Before(now) {
@@ -375,7 +365,7 @@ func (h *wsHub) play(d *wsDevice, ctx context.Context, stream *AudioStream) {
 			h.stopPlayback(d, failed)
 			h.playbackDone(d, now)
 		} else {
-			h.push(d, object{"op": "tts", "state": "end"}, false)
+			h.push(d, object{"op": "tts", "state": "end", "audio": id}, false)
 			d.ttsStarted, d.awaitAck = false, true
 		}
 		if !d.busy && d.cancel != nil {
@@ -390,14 +380,14 @@ func (h *wsHub) stopPlayback(d *wsDevice, notify bool) {
 		d.stopAudio()
 		d.stopAudio = nil
 	}
-	d.audio++
 	if d.ttsStarted {
-		h.push(d, object{"op": "tts", "state": "end"}, false)
+		h.push(d, object{"op": "tts", "state": "end", "audio": d.audio}, false)
 	}
 	if notify && (d.ttsStarted || d.awaitAck) {
 		h.push(d, object{"op": "chime", "kind": "cancel"}, false)
 	}
 	d.ttsStarted, d.awaitAck = false, false
+	d.audio++
 }
 
 func (h *wsHub) playbackDone(d *wsDevice, now time.Time) {

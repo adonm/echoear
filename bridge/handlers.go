@@ -411,27 +411,19 @@ func (b *bridge) relay(ctx context.Context, sender peer, others []peer, target, 
 }
 
 func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte, kind string) (answer, error) {
-	return b.turnFor(ctx, sender, text, body, kind, false)
-}
-
-func (b *bridge) turnFor(ctx context.Context, sender peer, text string, body []byte, kind string, scoped bool) (answer, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return answer{}, problem(400, "Expected nonempty text")
 	}
-	var others []peer
-	var err error
-	if !scoped {
-		others, err = b.peerSnapshot(sender.DeviceID)
-		if err != nil {
-			return answer{}, err
-		}
+	others, err := b.peerSnapshot(sender.DeviceID)
+	if err != nil {
+		return answer{}, err
 	}
 	source := "text"
 	if body != nil {
 		source = "voice"
 	}
-	if direct := directMessage(others, text); !scoped && direct != nil {
+	if direct := directMessage(others, text); direct != nil {
 		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
 		pcm := body
 		if kind == wavType {
@@ -442,7 +434,7 @@ func (b *bridge) turnFor(ctx context.Context, sender peer, text string, body []b
 		}
 		return b.relay(ctx, sender, others, direct.target, direct.text, pcm)
 	}
-	options := turnOptions{source: source, scoped: scoped, legacyScreen: !scoped && !virtualID.MatchString(sender.DeviceID)}
+	options := turnOptions{source: source}
 	if b.ws != nil {
 		key := strings.ToLower(sender.DeviceID)
 		spoke := new(atomic.Bool)
@@ -467,7 +459,7 @@ func (b *bridge) turnFor(ctx context.Context, sender peer, text string, body []b
 	if gen.reply != "" {
 		b.attachAudio(ctx, &out, gen.audio, gen.ttsStart)
 	}
-	if !scoped && gen.message != nil {
+	if gen.message != nil {
 		d := b.deliver(ctx, sender, targets(others, gen.message.target), gen.message.text, nil)
 		out.SentTo, out.DeliveredTo, out.FailedTo, out.Error = &d.sent, &d.delivered, &d.failed, d.err
 	}
@@ -485,12 +477,10 @@ type generatedReply struct {
 }
 
 type turnOptions struct {
-	source       string
-	scoped       bool
-	legacyScreen bool
-	publish      func(*AudioStream)
-	agentSpoke   func() bool
-	begin        func() func()
+	source     string
+	publish    func(*AudioStream)
+	agentSpoke func() bool
+	begin      func() func()
 }
 
 // HTTP verifies the final text before publishing an audio URL. A WebSocket can
@@ -526,15 +516,8 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, othe
 		eager.send(s)
 	}
 	start := time.Now()
-	key := sender.DeviceID
 	prompt := turnPrompt(sender, others, text)
-	if options.scoped {
-		key = scopedSession(key)
-		prompt = strings.Replace(prompt, "; other EchoEars:", "; public chat (spoken prose only); other EchoEars:", 1)
-	} else if options.legacyScreen {
-		prompt = strings.Replace(prompt, "]\n", "; screen transport=legacy HTTP]\n", 1)
-	}
-	raw, sid, err := b.oc.ask(ctx, key, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
+	raw, sid, err := b.oc.ask(ctx, sender.DeviceID, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
 		if entry.Role == "assistant" {
 			entry.Sender = sender.Character
 		}
