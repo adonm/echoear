@@ -2,13 +2,14 @@
 
 #include "audio.h"
 #include "bsp/esp_vocat.h"
-#include "conversation.h"
+#include "display.h"
 #include "driver/touch_sens.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "ui.h"
+#include "media.h"
+#include "ws_client.h"
 
 enum { PADS = 2, SAMPLE_MS = 20, CALIBRATION_SAMPLES = 12, GESTURE_MS = 450 };
 static const char *TAG = "head_touch";
@@ -36,8 +37,8 @@ static void step_volume(int direction)
         }
     }
     if (audio_set_volume(target) == ESP_OK) {
-        ui_show_volume(target);
-        conversation_chime();
+        display_wake();
+        ws_client_head(direction > 0 ? WS_HEAD_VOL_UP : WS_HEAD_VOL_DOWN, target);
     }
 }
 
@@ -48,7 +49,6 @@ static void scan(touch_channel_handle_t pads[PADS], uint32_t baseline[PADS])
     int first = -1;
     int64_t start = 0;
     bool handled = false;
-    bool woke = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(SAMPLE_MS));
         int64_t now = esp_timer_get_time() / 1000;
@@ -78,7 +78,7 @@ static void scan(touch_channel_handle_t pads[PADS], uint32_t baseline[PADS])
             if (first < 0) {
                 first = i;
                 start = now;
-                woke = ui_wake();
+                display_wake();
             } else if (first != i && now - start <= GESTURE_MS) {
                 step_volume(i > first ? 1 : -1);
                 handled = true;
@@ -87,8 +87,9 @@ static void scan(touch_channel_handle_t pads[PADS], uint32_t baseline[PADS])
         if (first >= 0 && !handled && now - start >= GESTURE_MS) {
             if (pressed[first]) {
                 step_volume(first == 1 ? 1 : -1);
-            } else if (!woke) {
-                ui_pet();
+            } else {
+                media_interrupt();
+                ws_client_head(WS_HEAD_PET, audio_get_volume());
             }
             handled = true;
         }

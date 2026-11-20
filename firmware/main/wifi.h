@@ -11,8 +11,8 @@ typedef void (*wifi_state_cb_t)(bool connected, const char *ip);
 
 extern char device_id[13];
 extern char device_mac[18];
-extern uint8_t device_mac_bytes[6];
 
 esp_err_t wifi_init_identity(void);
+const char *wifi_character(void);
 esp_err_t wifi_start(wifi_state_cb_t on_state);
 void wifi_get_ip(char ip[WIFI_IP_LEN]);

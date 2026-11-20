@@ -107,7 +107,7 @@ esp_err_t audio_init(void)
     int16_t probe[FRAMES * CHANNELS];
     ESP_GOTO_ON_ERROR(esp_codec_dev_read(mic, probe, sizeof(probe)), fail, TAG, "Read initial I2S frames");
 
-    recording = heap_caps_malloc(MAX_FRAMES * sizeof(*recording), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    recording = heap_caps_malloc(AUDIO_RECORD_CHUNK_SAMPLES * sizeof(*recording), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_GOTO_ON_FALSE(recording, ESP_ERR_NO_MEM, fail, TAG, "Allocate recording in PSRAM");
     return ESP_OK;
 
@@ -160,15 +160,16 @@ void audio_tone(audio_tone_t tone)
     }
 }
 
-esp_err_t audio_record(bool (*stop_requested)(void), const int16_t **pcm, size_t *bytes)
+esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t sink, void *ctx)
 {
+    _Static_assert(AUDIO_RECORD_CHUNK_SAMPLES % FRAMES == 0, "Chunk must contain whole VAD frames");
     int16_t stereo[FRAMES * CHANNELS];
     // Drop the already-buffered RX frames, including any containing the start tone.
     for (int i = 0; i < DMA_TAIL / FRAMES; ++i) {
         ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, stereo, sizeof(stereo)), TAG, "Drain mic DMA");
     }
 
-    size_t samples = 0;
+    size_t samples = 0, pending = 0;
     vad_t vad = { 0 };
     while (samples < MAX_FRAMES && !stop_requested()) {
         ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, stereo, sizeof(stereo)), TAG, "Read mic");
@@ -176,20 +177,25 @@ esp_err_t audio_record(bool (*stop_requested)(void), const int16_t **pcm, size_t
         uint64_t sum = 0;
         for (size_t i = 0; i < FRAMES; ++i) {
             int32_t mono = stereo[CHANNELS * i];
-            recording[samples++] = mono;
+            recording[pending++] = mono;
             sum += mono * mono;
         }
         vad_result_t result = vad_update(&vad, sum / FRAMES);
         if (result == VAD_NO_SPEECH && !stop_requested()) {
             return ESP_ERR_NOT_FOUND;
         }
+        samples += FRAMES;
+        if (pending == AUDIO_RECORD_CHUNK_SAMPLES) {
+            esp_err_t err = sink(recording, pending, ctx);
+            if (err != ESP_OK) return err;
+            pending = 0;
+        }
         if (result != VAD_CONTINUE) {
             break;
         }
     }
-    *pcm = recording;
-    *bytes = samples * sizeof(*recording);
-    return ESP_OK;
+    if (!samples) return ESP_ERR_NOT_FOUND;
+    return pending ? sink(recording, pending, ctx) : ESP_OK;
 }
 
 void audio_stream_begin(void)

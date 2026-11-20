@@ -3,8 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "bridge_client.h"
-#include "cat_face.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
@@ -24,7 +22,13 @@ static bool mdns_started;
 
 char device_id[13];
 char device_mac[18];
-uint8_t device_mac_bytes[6];
+static uint8_t device_mac_bytes[6];
+
+const char *wifi_character(void)
+{
+    static const char *const names[] = { "Mint", "Plum", "Sunny", "Cake" };
+    return names[(device_mac_bytes[4] ^ device_mac_bytes[5]) % 4];
+}
 
 esp_err_t wifi_init_identity(void)
 {
@@ -63,9 +67,9 @@ static void connect(void *arg)
 static esp_err_t start_mdns(void)
 {
     char instance[40];
-    snprintf(instance, sizeof(instance), "%s (%s)", cat_face_name(), device_id);
+    snprintf(instance, sizeof(instance), "%s (%s)", wifi_character(), device_id);
     mdns_txt_item_t txt[] = {
-        { "character", cat_face_name() },
+        { "character", wifi_character() },
         { "firmware", esp_app_get_description()->version },
         { "mac", device_mac },
     };
@@ -91,7 +95,6 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Disconnected (reason=%u); reconnecting", event->reason);
         state_cb(false, NULL);
-        bridge_client_network_changed(false);
         schedule_retry();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = data;
@@ -106,7 +109,6 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             }
         }
         state_cb(true, ip);
-        bridge_client_network_changed(true);
         if (!mdns_started) {
             esp_err_t err = start_mdns();
             mdns_started = err == ESP_OK;

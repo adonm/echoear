@@ -4,7 +4,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "ui.h"
 
 enum { GAUGE_ADDRESS = 0x55, VOLTAGE = 0x08, AVERAGE_CURRENT = 0x14, RELATIVE_SOC = 0x2c };
 static const char *TAG = "power";
@@ -57,7 +56,6 @@ static void power_task(void *arg)
             ESP_LOGW(TAG, "BQ27220 unavailable");
         }
         warned = next.pct < 0;
-        ui_set_battery(next.pct, next.charging);
         vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }

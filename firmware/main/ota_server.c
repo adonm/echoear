@@ -4,9 +4,8 @@
 #include <stdlib.h>
 
 #include "audio.h"
-#include "bridge_client.h"
-#include "cat_face.h"
-#include "conversation.h"
+#include "cJSON.h"
+#include "display.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -18,13 +17,14 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "media.h"
 #include "power.h"
 #include "sdkconfig.h"
-#include "ui.h"
 #include "wifi.h"
+#include "ws_client.h"
 
 static const char *TAG = "ota";
-enum { DISPLAY_MAX = 8192, SPEAK_MAX = 1536 * 1024 };
+enum { SPEAK_MAX = 1536 * 1024 };
 
 static esp_err_t text_response(httpd_req_t *request, const char *status, const char *message)
 {
@@ -103,21 +103,16 @@ static esp_err_t status_get(httpd_req_t *request)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    bridge_peer_t peer = bridge_client_get_peer();
-    char peer_json[BRIDGE_TARGET_CAP + 2] = "null";
-    if (peer.character[0]) {
-        snprintf(peer_json, sizeof(peer_json), "\"%s\"", peer.character);
-    }
     char json[448];
     snprintf(json, sizeof(json),
              "{\"device\":\"%s\",\"character\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
              "\"free_heap\":%zu,\"free_psram\":%zu,\"firmware\":\"%s\",\"running_partition\":\"%s\","
-             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"peer\":%s}",
-             device_id, cat_face_name(), device_mac, ip, rssi,
+             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s}",
+             device_id, wifi_character(), device_mac, ip, rssi,
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label,
              audio_get_volume(), pct, mv, battery.charging ? "true" : "false",
-             ui_is_sleeping() ? "true" : "false", peer_json);
+             display_is_sleeping() ? "true" : "false", ws_client_connected() ? "true" : "false");
     return json_response(request, json);
 }
 
@@ -135,37 +130,6 @@ static esp_err_t reboot_post(httpd_req_t *request)
     return respond_and_reboot(request, "Rebooting\n");
 }
 
-static esp_err_t display_post(httpd_req_t *request)
-{
-    ui_wake();
-    size_t bytes = body_length(request, DISPLAY_MAX);
-    if (!bytes) {
-        return ESP_OK;
-    }
-    char *body = malloc(bytes + 1);
-    if (!body) {
-        return text_response(request, "503 Service Unavailable", "Could not allocate request buffer\n");
-    }
-    esp_err_t err = read_req_body(request, body, bytes, &bytes);
-    if (err != ESP_OK) {
-        free(body);
-        return err;
-    }
-    body[bytes] = '\0';
-    cJSON *screen = cJSON_ParseWithLengthOpts(body, bytes + 1, NULL, true);
-    free(body);
-    err = ui_show_screen(screen);
-    cJSON_Delete(screen);
-    return err == ESP_OK ? text_response(request, "200 OK", "Screen shown\n")
-           : text_response(request, "400 Bad Request", "Expected a screen object with up to 24 shapes\n");
-}
-
-static esp_err_t display_clear_post(httpd_req_t *request)
-{
-    ui_hide_screen();
-    return text_response(request, "200 OK", "Screen cleared\n");
-}
-
 static esp_err_t speak_post(httpd_req_t *request)
 {
     size_t bytes = request->content_len;
@@ -175,7 +139,7 @@ static esp_err_t speak_post(httpd_req_t *request)
     if (!body_length(request, SPEAK_MAX)) {
         return ESP_OK;
     }
-    ui_wake();
+    display_wake();
     uint8_t *pcm = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!pcm) {
         return text_response(request, "503 Service Unavailable", "Could not allocate speech buffer\n");
@@ -186,7 +150,7 @@ static esp_err_t speak_post(httpd_req_t *request)
         return err;
     }
     size_t samples = bytes / sizeof(int16_t);
-    err = conversation_submit_speech((int16_t *)pcm, samples);
+    err = media_submit_speech((int16_t *)pcm, samples);
     if (err != ESP_OK) {
         free(pcm);
         return err == ESP_ERR_NOT_SUPPORTED
@@ -222,8 +186,8 @@ static esp_err_t volume_post(httpd_req_t *request)
     if (audio_set_volume(value) != ESP_OK) {
         return text_response(request, "503 Service Unavailable", "Could not save volume\n");
     }
-    ui_show_volume(value);
-    conversation_chime();
+    display_wake();
+    media_chime(AUDIO_HAPPY_TONE);
     char reply[32];
     snprintf(reply, sizeof(reply), "{\"ok\":true,\"volume\":%d}", value);
     return json_response(request, reply);
@@ -314,7 +278,6 @@ esp_err_t ota_server_start(void)
 {
     static const post_route_t posts[] = {
         { "/ota", ota_pull_post }, { "/ota/upload", ota_upload_post }, { "/reboot", reboot_post },
-        { "/display", display_post }, { "/display/clear", display_clear_post },
         { "/speak", speak_post }, { "/volume", volume_post },
     };
     const httpd_uri_t status = { .uri = "/status", .method = HTTP_GET, .handler = status_get };
