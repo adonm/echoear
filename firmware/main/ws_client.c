@@ -31,10 +31,12 @@ enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000 }
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
-typedef enum { INPUT_TAP, INPUT_HEAD, REJECT_TTS, REJECT_RECORD } input_kind_t;
+typedef enum { INPUT_TAP, INPUT_HEAD, TTS_ACK, REJECT_RECORD } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
+    uint32_t audio_id;
+    bool aborted;
     int x, y;
     char target[MEDIA_TARGET_CAP];
 } input_t;
@@ -102,10 +104,15 @@ static bool send_json(uint32_t session, cJSON *json)
     return sent;
 }
 
+static void enqueue_session(input_t input)
+{
+    if (input.session && inputs && xQueueSend(inputs, &input, 0) == pdPASS) xTaskNotifyGive(service);
+}
+
 static void enqueue(input_t input)
 {
     input.session = ws_client_session();
-    if (input.session && inputs && xQueueSend(inputs, &input, 0) == pdPASS) xTaskNotifyGive(service);
+    enqueue_session(input);
 }
 
 void ws_client_tap(int x, int y)
@@ -148,19 +155,21 @@ void ws_client_rec_end(uint32_t session, const char *target, bool cancelled)
     }
 }
 
-void ws_client_tts_ack(uint32_t session, bool interrupted)
+void ws_client_tts_ack(uint32_t session, uint32_t audio_id, bool aborted)
 {
-    const char *text = interrupted ? "{\"ev\":\"tts_ack\",\"state\":\"interrupted\"}"
-                                   : "{\"ev\":\"tts_ack\",\"state\":\"done\"}";
-    send_ready(session, text, strlen(text), false);
+    // Media can enqueue from the receive callback or while holding its lock.
+    enqueue_session((input_t){ .kind = TTS_ACK, .session = session, .audio_id = audio_id, .aborted = aborted });
 }
 
 static void send_input(const input_t *input)
 {
     uint32_t session = input->session;
     if (session != atomic_load(&ready_session)) return;
-    if (input->kind == REJECT_TTS) {
-        ws_client_tts_ack(session, true);
+    if (input->kind == TTS_ACK) {
+        char text[96];
+        int len = snprintf(text, sizeof(text), "{\"ev\":\"tts_ack\",\"state\":\"%s\",\"aborted\":%s,\"audio\":%" PRIu32 "}",
+                           input->aborted ? "interrupted" : "done", input->aborted ? "true" : "false", input->audio_id);
+        if (len > 0 && (size_t)len < sizeof(text)) send_ready(session, text, len, false);
         return;
     }
     if (input->kind == REJECT_RECORD) {
@@ -251,10 +260,17 @@ static void dispatch(const cJSON *msg)
     } else if (!strcmp(op, "tts")) {
         const char *state = field(msg, "state");
         if (!strcmp(state, "start")) {
-            tts_accepted = media_tts_start();
-            if (!tts_accepted) enqueue((input_t){ .kind = REJECT_TTS });
+            const cJSON *audio = cJSON_GetObjectItemCaseSensitive(msg, "audio");
+            if (!cJSON_IsNumber(audio) || !(audio->valuedouble >= 0 && audio->valuedouble <= UINT32_MAX)) return;
+            uint32_t audio_id = (uint32_t)audio->valuedouble;
+            if (audio_id != audio->valuedouble) return;
+            tts_accepted = media_tts_start(audio_id);
+            if (!tts_accepted) ws_client_tts_ack(ws_client_session(), audio_id, true);
         } else if (!strcmp(state, "end")) {
             if (tts_accepted) media_tts_end();
+            tts_accepted = false;
+        } else if (!strcmp(state, "abort")) {
+            media_interrupt();
             tts_accepted = false;
         }
     } else if (!strcmp(op, "chime")) {
@@ -369,6 +385,8 @@ static void drop_link(void)
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
+    (void)arg;
+    (void)base;
     if (id == WEBSOCKET_EVENT_CONNECTED) {
         if (!atomic_load(&wifi_online)) return;
         rx = (fragment_t){ 0 };
@@ -395,6 +413,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static void service_task(void *arg)
 {
+    (void)arg;
     bool running = false;
     int64_t after_status = 0;
     for (;;) {

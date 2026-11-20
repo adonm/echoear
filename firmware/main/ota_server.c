@@ -2,7 +2,6 @@
 
 #include <inttypes.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "audio.h"
@@ -11,7 +10,6 @@
 #include "display.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
-#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
@@ -27,7 +25,6 @@
 #include "ws_client.h"
 
 static const char *TAG = "ota";
-enum { SPEAK_MAX = 1536 * 1024 };
 
 static esp_err_t text_response(httpd_req_t *request, const char *status, const char *message)
 {
@@ -136,38 +133,6 @@ static esp_err_t respond_and_reboot(httpd_req_t *request, const char *message)
 static esp_err_t reboot_post(httpd_req_t *request)
 {
     return respond_and_reboot(request, "Rebooting\n");
-}
-
-static esp_err_t speak_post(httpd_req_t *request)
-{
-    size_t bytes = request->content_len;
-    if (!bytes || bytes % sizeof(int16_t)) {
-        return text_response(request, "400 Bad Request", "Expected 16-bit mono PCM\n");
-    }
-    if (!body_length(request, SPEAK_MAX)) {
-        return ESP_OK;
-    }
-    display_wake();
-    uint8_t *pcm = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!pcm) {
-        return text_response(request, "503 Service Unavailable", "Could not allocate speech buffer\n");
-    }
-    esp_err_t err = read_req_body(request, (char *)pcm, bytes, &bytes);
-    if (err != ESP_OK) {
-        free(pcm);
-        return err;
-    }
-    size_t samples = bytes / sizeof(int16_t);
-    err = media_submit_speech((int16_t *)pcm, samples);
-    if (err != ESP_OK) {
-        free(pcm);
-        return err == ESP_ERR_NOT_SUPPORTED
-               ? text_response(request, "503 Service Unavailable", "Speaker unavailable\n")
-               : text_response(request, "409 Conflict", "EchoEar is busy\n");
-    }
-    char json[48];
-    snprintf(json, sizeof(json), "{\"ok\":true,\"samples\":%zu}", samples);
-    return json_response(request, json);
 }
 
 static esp_err_t volume_post(httpd_req_t *request)
@@ -311,7 +276,7 @@ esp_err_t ota_server_start(void)
 {
     static const post_route_t posts[] = {
         { "/ota", ota_pull_post }, { "/ota/upload", ota_upload_post }, { "/reboot", reboot_post },
-        { "/speak", speak_post }, { "/volume", volume_post },
+        { "/volume", volume_post },
     };
     const httpd_uri_t status = { .uri = "/status", .method = HTTP_GET, .handler = status_get };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

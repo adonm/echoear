@@ -2,7 +2,6 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "display.h"
@@ -16,41 +15,56 @@
 #include "ws_client.h"
 
 enum { TTS_BYTES = 1024 * 1024, TTS_BLOCK = 1280 };
-typedef enum { RECORD, STREAM, SPEAK, CHIME } job_kind_t;
+typedef enum { RECORD, STREAM, CHIME } job_kind_t;
 typedef struct {
     job_kind_t kind;
     uint32_t session;
     char target[MEDIA_TARGET_CAP];
-    int16_t *pcm;
-    size_t samples;
     audio_tone_t tone;
 } job_t;
 
 static const char *TAG = "media";
 static QueueHandle_t jobs;
 static SemaphoreHandle_t lock;
+static TaskHandle_t media_task;
 static StreamBufferHandle_t tts;
 static StaticStreamBuffer_t tts_control;
-static bool http_speech;
-static atomic_bool recording, stream_open, stream_ended, speech_busy, stop_recording, cancel_recording, interrupted;
+// A queued STREAM job is a wakeup for the latest generation, not a second buffer owner.
+static struct {
+    uint32_t serial, session, audio_id;
+    bool open, ended, queued;
+} stream;
+static atomic_bool recording, stop_recording, cancel_recording;
 
 static bool submit(const job_t *job)
 {
+    // Leave room for a replacement stream even if chimes are queued.
+    if (job->kind != STREAM && uxQueueSpacesAvailable(jobs) <= 1) return false;
     return xQueueSend(jobs, job, 0) == pdPASS;
+}
+
+static void interrupt_locked(void)
+{
+    if (stream.open) {
+        audio_stop_playback();
+        stream.open = false;
+        xTaskNotifyGive(media_task);
+        ws_client_tts_ack(stream.session, stream.audio_id, true);
+    }
 }
 
 void media_interrupt(void)
 {
-    if (atomic_load(&speech_busy)) {
-        atomic_store(&interrupted, true);
-        audio_stop_playback();
-    }
+    if (!lock) return;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    interrupt_locked();
+    xSemaphoreGive(lock);
 }
 
 void media_link_lost(void)
 {
     atomic_store(&cancel_recording, true);
-    if (atomic_load(&stream_open)) media_interrupt();
+    media_interrupt();
 }
 
 bool media_record_start(const char *target)
@@ -59,12 +73,12 @@ bool media_record_start(const char *target)
     job_t job = { .kind = RECORD, .session = ws_client_session() };
     snprintf(job.target, sizeof(job.target), "%s", target);
     xSemaphoreTake(lock, portMAX_DELAY);
-    bool accepted = !recording && !http_speech && submit(&job);
+    bool accepted = !recording && submit(&job);
     if (accepted) {
         recording = true;
         atomic_store(&cancel_recording, false);
         atomic_store(&stop_recording, false);
-        media_interrupt();
+        interrupt_locked();
     }
     xSemaphoreGive(lock);
     return accepted;
@@ -80,23 +94,19 @@ bool media_is_recording(void)
     return atomic_load(&recording);
 }
 
-static void prepare_playback(void)
-{
-    atomic_store(&interrupted, false);
-    atomic_store(&speech_busy, true);
-}
-
-bool media_tts_start(void)
+bool media_tts_start(uint32_t audio_id)
 {
     if (!jobs) return false;
-    job_t job = { .kind = STREAM, .session = ws_client_session() };
     xSemaphoreTake(lock, portMAX_DELAY);
-    bool accepted = !recording && !http_speech && !atomic_load(&stream_open) &&
-                    xStreamBufferReset(tts) == pdPASS && submit(&job);
+    uint32_t session = ws_client_session();
+    bool accepted = session && !recording && !stream.open && xStreamBufferReset(tts) == pdPASS &&
+                    (stream.queued || submit(&(job_t){ .kind = STREAM }));
     if (accepted) {
-        prepare_playback();
-        atomic_store(&stream_ended, false);
-        atomic_store(&stream_open, true);
+        ++stream.serial;
+        stream.session = session;
+        stream.audio_id = audio_id;
+        stream.open = stream.queued = true;
+        stream.ended = false;
     }
     xSemaphoreGive(lock);
     return accepted;
@@ -104,7 +114,12 @@ bool media_tts_start(void)
 
 void media_tts_end(void)
 {
-    atomic_store(&stream_ended, true);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (stream.open) {
+        stream.ended = true;
+        xTaskNotifyGive(media_task);
+    }
+    xSemaphoreGive(lock);
 }
 
 bool media_tts_pcm(const void *data, size_t bytes)
@@ -113,7 +128,10 @@ bool media_tts_pcm(const void *data, size_t bytes)
     const TickType_t timeout = pdMS_TO_TICKS(15000), slice = pdMS_TO_TICKS(100);
     const uint8_t *pcm = data;
     while (bytes) {
-        if (!atomic_load(&stream_open) || atomic_load(&stream_ended) || atomic_load(&interrupted)) return false;
+        xSemaphoreTake(lock, portMAX_DELAY);
+        bool accepting = stream.open && !stream.ended;
+        xSemaphoreGive(lock);
+        if (!accepting) return false;
         TickType_t elapsed = xTaskGetTickCount() - start;
         if (elapsed >= timeout) {
             ESP_LOGW(TAG, "Speaker stream buffer overrun");
@@ -121,7 +139,9 @@ bool media_tts_pcm(const void *data, size_t bytes)
             return false;
         }
         TickType_t remaining = timeout - elapsed;
+        // Only the WS receive task sends PCM or starts a stream, so reset can't race this send.
         size_t sent = xStreamBufferSend(tts, pcm, bytes, remaining < slice ? remaining : slice);
+        if (sent) xTaskNotifyGive(media_task);
         pcm += sent;
         bytes -= sent;
     }
@@ -133,27 +153,13 @@ void media_chime(audio_tone_t tone)
     if (!jobs) return;
     xSemaphoreTake(lock, portMAX_DELAY);
     if (!recording) {
-        if (atomic_load(&speech_busy) && tone == AUDIO_HAPPY_TONE) {
+        if (stream.open && tone == AUDIO_HAPPY_TONE) {
             audio_request_chime();
         } else {
             submit(&(job_t){ .kind = CHIME, .tone = tone });
         }
     }
     xSemaphoreGive(lock);
-}
-
-esp_err_t media_submit_speech(int16_t *pcm, size_t samples)
-{
-    if (!jobs) return ESP_ERR_NOT_SUPPORTED;
-    xSemaphoreTake(lock, portMAX_DELAY);
-    bool accepted = !recording && !atomic_load(&speech_busy) &&
-                    submit(&(job_t){ .kind = SPEAK, .pcm = pcm, .samples = samples });
-    if (accepted) {
-        http_speech = true;
-        prepare_playback();
-    }
-    xSemaphoreGive(lock);
-    return accepted ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 static bool stop_capture(void)
@@ -182,43 +188,52 @@ static void record(job_t *job)
     if (started) ws_client_rec_end(job->session, job->target, cancelled);
 }
 
-static void play(job_t *job)
+static bool owns_stream(uint32_t serial)
 {
+    return stream.open && stream.serial == serial;
+}
+
+static void play(void)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    stream.queued = false;
+    bool open = stream.open;
+    uint32_t serial = stream.serial;
+    if (open) audio_stream_begin();
+    xSemaphoreGive(lock);
+    if (!open) return;
+
     display_wake();
-    audio_stream_begin();
-    if (atomic_load(&interrupted)) audio_stop_playback();
+    int16_t chunk[TTS_BLOCK / sizeof(int16_t)];
     esp_err_t err = ESP_OK;
-    if (job->kind == STREAM) {
-        int16_t chunk[TTS_BLOCK / sizeof(int16_t)];
-        while (!atomic_load(&interrupted) && err == ESP_OK) {
-            size_t bytes = xStreamBufferReceive(tts, chunk, sizeof(chunk), pdMS_TO_TICKS(30));
-            if (bytes % sizeof(*chunk)) {
-                err = ESP_ERR_INVALID_SIZE;
-            } else if (bytes) {
-                err = audio_stream_write(chunk, bytes / sizeof(*chunk));
-            } else if (atomic_load(&stream_ended) && !xStreamBufferBytesAvailable(tts)) {
-                break;
-            }
+    while (err == ESP_OK) {
+        xSemaphoreTake(lock, portMAX_DELAY);
+        bool owns = owns_stream(serial);
+        // Keep receive/reset serialized; waits and codec I/O must not hold this lock.
+        size_t bytes = owns ? xStreamBufferReceive(tts, chunk, sizeof(chunk), 0) : 0;
+        bool done = !owns || (stream.ended && !bytes);
+        xSemaphoreGive(lock);
+        if (done) break;
+        if (bytes % sizeof(*chunk)) {
+            err = ESP_ERR_INVALID_SIZE;
+        } else if (bytes) {
+            err = audio_stream_write(chunk, bytes / sizeof(*chunk));
+        } else {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
-    } else {
-        err = audio_stream_write(job->pcm, job->samples);
-        free(job->pcm);
     }
     esp_err_t end = audio_stream_end();
     xSemaphoreTake(lock, portMAX_DELAY);
-    bool aborted = atomic_load(&interrupted) || err != ESP_OK || end != ESP_OK;
-    atomic_store(&speech_busy, false);
-    if (job->kind == STREAM) {
-        atomic_store(&stream_open, false);
-    } else {
-        http_speech = false;
+    if (owns_stream(serial)) {
+        stream.open = false;
+        ws_client_tts_ack(stream.session, stream.audio_id, err != ESP_OK || end != ESP_OK);
     }
     xSemaphoreGive(lock);
-    if (job->kind == STREAM) ws_client_tts_ack(job->session, aborted);
 }
 
 static void worker(void *arg)
 {
+    (void)arg;
     for (;;) {
         job_t job;
         xQueueReceive(jobs, &job, portMAX_DELAY);
@@ -230,7 +245,7 @@ static void worker(void *arg)
         } else if (job.kind == CHIME) {
             audio_tone(job.tone);
         } else {
-            play(&job);
+            play();
         }
     }
 }
@@ -243,6 +258,6 @@ esp_err_t media_init(bool audio_ready)
     tts = xStreamBufferCreateStatic(TTS_BYTES + 1, sizeof(int16_t), storage, &tts_control);
     lock = xSemaphoreCreateMutex();
     jobs = xQueueCreate(6, sizeof(job_t));
-    return tts && lock && jobs && xTaskCreate(worker, "media", 7168, NULL, 5, NULL) == pdPASS
+    return tts && lock && jobs && xTaskCreate(worker, "media", 7168, NULL, 5, &media_task) == pdPASS
            ? ESP_OK : ESP_ERR_NO_MEM;
 }

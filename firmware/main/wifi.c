@@ -23,20 +23,19 @@ static bool mdns_started;
 
 char device_id[13];
 char device_mac[18];
-static uint8_t device_mac_bytes[6];
 
 const char *wifi_character(void)
 {
 #ifdef ECHOEAR_BOX3
-    return "New Cat";
+    return "BOX-3";
 #else
-    static const char *const names[] = { "Mint", "Plum", "Sunny", "Cake" };
-    return names[(device_mac_bytes[4] ^ device_mac_bytes[5]) % 4];
+    return "EchoEar";
 #endif
 }
 
 esp_err_t wifi_init_identity(void)
 {
+    uint8_t device_mac_bytes[6];
     ESP_RETURN_ON_ERROR(esp_read_mac(device_mac_bytes, ESP_MAC_WIFI_STA), TAG, "Read STA MAC");
     snprintf(device_id, sizeof(device_id), BOARD_ID_PREFIX "%02x%02x", device_mac_bytes[4], device_mac_bytes[5]);
     snprintf(device_mac, sizeof(device_mac), MACSTR, MAC2STR(device_mac_bytes));
