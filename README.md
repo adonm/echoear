@@ -67,7 +67,7 @@ face offline. `esp_websocket_client` carries binary audio over Wi-Fi.
   detection stops recording at silence; tap or pet again to stop early or interrupt speech.
 - Slide across the head pads to change volume, or hold a pad for one step.
   The display dims after 120 seconds idle unless a diagram is open; tap or pet to wake.
-- **Text** opens the peer drawer; **New** resets the conversation. **Cat** closes a diagram.
+- **Text** opens the peer drawer, where **New** resets the conversation. **Cat** closes a diagram.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or **Text → Msg \<Peer\>** to record directly to that cat.
@@ -108,6 +108,9 @@ reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
 Code Mode exposes `tools.echoear.devices`, `snapshot`, `scene`, `patch`,
 `speak`, `chime`, `intercom`, and `wait_event` under `tools.echoear`.
+Scenes and patches support declarative `tap` and `cycle` reactions, named `states`,
+and delayed `after_ms`/`then` feedback. The bridge runs these locally without
+holding an OpenCode turn open; only an explicit `ask` starts a new turn.
 
 ## API
 
