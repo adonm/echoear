@@ -257,12 +257,20 @@ func (o *openCode) save(device, sid string) error {
 }
 
 func (o *openCode) lock(ctx context.Context, device string) (func(), error) {
+	return o.lockGate(ctx, o.turnGate(device))
+}
+
+func (o *openCode) turnGate(device string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(device))
+	return int(h.Sum32() % uint32(len(o.turns)))
+}
+
+func (o *openCode) lockGate(ctx context.Context, index int) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, o.unavailable(err)
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(device))
-	gate := o.turns[h.Sum32()%uint32(len(o.turns))]
+	gate := o.turns[index]
 	select {
 	case gate <- struct{}{}:
 		return func() { <-gate }, nil
@@ -288,6 +296,9 @@ func (o *openCode) interrupt(ctx context.Context, sid string) error {
 func (o *openCode) requestInterrupt(device string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.resets[device] != nil {
+		return false // The mapping change already owns the interrupt for the old session.
+	}
 	return o.markInterrupted(device)
 }
 
@@ -339,40 +350,61 @@ func (o *openCode) reset(ctx context.Context, device string) error {
 	return o.prepareReset(device)(ctx)
 }
 
-// Mark the reset before the UI launches its goroutine so a following tap or
-// message cannot start a turn between the reset request and its execution.
 func (o *openCode) prepareReset(device string) func(context.Context) error {
-	o.mu.Lock()
-	reset := o.resets[device]
-	if reset == nil {
-		reset = &ocReset{done: make(chan struct{})}
-		o.resets[device] = reset
-	}
-	reset.count++
-	o.markInterrupted(device)
-	o.mu.Unlock()
+	run := o.prepareMappingChange(device)
 	return func(ctx context.Context) error {
+		return run(ctx, func() error { return o.save(device, "") })
+	}
+}
+
+// Block new prompts and interrupt the old mappings before changing them.
+func (o *openCode) prepareMappingChange(devices ...string) func(context.Context, func() error) error {
+	gates := make([]int, 0, len(devices))
+	o.mu.Lock()
+	for _, device := range devices {
+		reset := o.resets[device]
+		if reset == nil {
+			reset = &ocReset{done: make(chan struct{})}
+			o.resets[device] = reset
+		}
+		reset.count++
+		o.markInterrupted(device)
+		gates = append(gates, o.turnGate(device))
+	}
+	o.mu.Unlock()
+	slices.Sort(gates)
+	gates = slices.Compact(gates) // Two devices may hash to the same gate.
+	return func(ctx context.Context, apply func() error) error {
 		defer func() {
 			o.mu.Lock()
 			defer o.mu.Unlock()
-			reset.count--
-			if reset.count == 0 {
-				delete(o.resets, device)
-				close(reset.done)
+			for _, device := range devices {
+				reset := o.resets[device]
+				reset.count--
+				if reset.count == 0 {
+					delete(o.resets, device)
+					close(reset.done)
+				}
 			}
 		}()
 		if o.cancelSceneUI != nil {
-			o.cancelSceneUI(device)
+			for _, device := range devices {
+				o.cancelSceneUI(device)
+			}
 		}
-		unlock, err := o.lock(ctx, device)
-		if err != nil {
-			return err
+		for _, gate := range gates {
+			unlock, err := o.lockGate(ctx, gate)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 		}
-		defer unlock()
-		if err := o.flushInterrupt(ctx, device); err != nil {
-			return err
+		for _, device := range devices {
+			if err := o.flushInterrupt(ctx, device); err != nil {
+				return err
+			}
 		}
-		return o.save(device, "")
+		return apply()
 	}
 }
 
@@ -386,6 +418,13 @@ func ocData[T any](ctx context.Context, api upstream, method, path string, in an
 		return zero, api.invalid()
 	}
 	return *envelope.Data, nil
+}
+
+func echoEarTitle(device, character string) string {
+	if character = strings.TrimSpace(character); character != "" && character != device {
+		return "EchoEar: " + character + " (" + device + ")"
+	}
+	return "EchoEar: " + device
 }
 
 func (o *openCode) ensureSession(ctx context.Context, device, character string) (string, error) {
@@ -428,15 +467,11 @@ func (o *openCode) ensureSession(ctx context.Context, device, character string) 
 			return "", err
 		}
 	}
-	title := "EchoEar: " + device
-	if character = strings.TrimSpace(character); character != "" && character != device {
-		title = "EchoEar: " + character + " (" + device + ")"
-	}
 	in := struct {
 		Title    string `json:"title"`
 		Location object `json:"location"`
 		ocSettings
-	}{title, object{"directory": o.project}, settings}
+	}{echoEarTitle(device, character), object{"directory": o.project}, settings}
 	created, err := ocData[session](ctx, o.upstream, http.MethodPost, "/api/session", in)
 	if err != nil {
 		return "", err
@@ -867,13 +902,17 @@ func (o *openCode) lockPrompt(ctx context.Context, device string) (context.Conte
 }
 
 func (o *openCode) ask(ctx context.Context, who peer, prompt string, onSentence func(string), source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
-	device := who.DeviceID
+	return o.askPrepared(ctx, who.DeviceID, func() (string, string) { return who.Character, prompt }, onSentence, source, begin, onChat)
+}
+
+func (o *openCode) askPrepared(ctx context.Context, device string, prepare func() (string, string), onSentence func(string), source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
 	ctx, unlock, err := o.lockPrompt(ctx, device)
 	if err != nil {
 		return "", "", err
 	}
 	defer unlock()
-	sid, err = o.ensureSession(ctx, device, who.Character)
+	character, prompt := prepare()
+	sid, err = o.ensureSession(ctx, device, character)
 	if err != nil {
 		return "", "", err
 	}

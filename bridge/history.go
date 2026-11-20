@@ -175,17 +175,16 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		return nil, problem(503, "Chat unavailable")
 	}
 	if path == "/api/reset" {
-		if b.ws != nil {
-			b.ws.mu.Lock()
-			if d := b.ws.devices[strings.ToLower(id)]; d != nil {
-				b.ws.cancelLocalTurn(d)
-				b.ws.stopPlayback(d, true)
-				b.ws.clearView(d)
-				b.ws.render(d, time.Now(), false)
-			}
-			b.ws.mu.Unlock()
+		who, err := b.lookupDevice(id)
+		var status *apiError
+		if errors.As(err, &status) && status.status == 404 && !virtualID.MatchString(strings.ToLower(id)) {
+			// Legacy HTTP-only sessions can exist without a registered device.
+			return object{"ok": true}, b.oc.reset(ctx, id)
 		}
-		return object{"ok": true}, b.oc.reset(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return object{"ok": true}, b.startNewCatSession(ctx, who)
 	}
 	text := strings.TrimSpace(str(obj["text"]))
 	if text == "" || len(text) > 4096 {
@@ -218,4 +217,31 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		result["audio_url"] = out.AudioURL
 	}
 	return result, nil
+}
+
+func (b *bridge) startNewCatSession(ctx context.Context, who peer) error {
+	run := b.oc.prepareMappingChange(who.DeviceID)
+	if b.ws != nil {
+		b.ws.stopCatTurns(who.DeviceID)
+	}
+	return run(ctx, func() error {
+		if b.ws != nil {
+			b.ws.mu.Lock()
+			defer b.ws.mu.Unlock()
+		}
+		cat, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), "reset_blank", nil)
+		if err != nil {
+			return err
+		}
+		if err := b.oc.save(who.DeviceID, ""); err != nil {
+			return err
+		}
+		if b.ws != nil {
+			if d := b.ws.devices[strings.ToLower(who.DeviceID)]; d != nil {
+				b.ws.stopCatTurn(d)
+			}
+			b.ws.catChanged(who.DeviceID, cat, profilesChanged)
+		}
+		return nil
+	})
 }

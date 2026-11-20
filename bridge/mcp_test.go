@@ -127,7 +127,7 @@ func TestMCPProtocolAndScene(t *testing.T) {
 			t.Fatal(tool)
 		}
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "memory", "asset", "timer", "wait_event"}) {
+	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "cat", "memory", "asset", "timer", "wait_event"}) {
 		t.Fatal(names)
 	}
 	list := toolTest(t, base, "devices", object{}, false)

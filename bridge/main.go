@@ -68,8 +68,9 @@ func run() error {
 	if err := os.Chmod(local, 0o700); err != nil {
 		return err
 	}
+	fallbackVoice := env("ECHOEAR_TTS_VOICE", heartVoice)
 	db, err := openBridgeDB(context.Background(), env("ECHOEAR_DB_PATH", filepath.Join(local, "echoear.db")), local,
-		os.Getenv("ECHOEAR_TURSO_URL"), os.Getenv("ECHOEAR_TURSO_AUTH_TOKEN"))
+		os.Getenv("ECHOEAR_TURSO_URL"), os.Getenv("ECHOEAR_TURSO_AUTH_TOKEN"), fallbackVoice)
 	if err != nil {
 		return err
 	}
@@ -106,7 +107,7 @@ func run() error {
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
 		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
-		voices:  deviceVoiceStore(db, env("ECHOEAR_TTS_VOICE", heartVoice)),
+		voices:  deviceVoiceStore(db, fallbackVoice),
 		virtual: virtualStore(db), history: &chatHistory{db},
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
 	b.ws = newWSHub(b)

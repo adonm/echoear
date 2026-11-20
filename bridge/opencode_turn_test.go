@@ -37,7 +37,7 @@ func expectValue[T comparable](t *testing.T, result <-chan T, want T) {
 }
 
 func TestOpenCodeCancelAndReset(t *testing.T) {
-	for _, action := range []string{"cancel", "reset", "drawer", "disconnect"} {
+	for _, action := range []string{"cancel", "reset", "disconnect"} {
 		t.Run(action, func(t *testing.T) {
 			const id, sid = "echoear-session-test", "ses-test"
 			interrupts := make(chan string, 4)
@@ -61,18 +61,10 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 			})
 			c := testConnectWS(t, base, "unit", false)
 			c.hello(t, id, "Cake")
-			if action == "drawer" {
-				c.json(t, object{"ev": "tap", "id": "text", "x": 180, "y": 300})
-				c.until(t, func(f wsFrame) bool {
-					return hasWS("patch", `"drawer-title"`)(f) || hasWS("scene", `"drawer-title"`)(f)
-				})
-			}
 			waitResult := make(chan bool, 1)
 			go func() {
 				out, err := b.ws.waitEvent(t.Context(), id, nil, time.Minute)
-				event, _ := out["event"].(deviceEvent)
-				waitResult <- action == "disconnect" && err != nil || err == nil && out["cancelled"] == true && out["event"] == nil ||
-					action == "drawer" && err == nil && event.Data["id"] == "new"
+				waitResult <- action == "disconnect" && err != nil || err == nil && out["cancelled"] == true && out["event"] == nil
 			}()
 			eventually(t, func() bool {
 				b.ws.mu.Lock()
@@ -87,8 +79,6 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 				b.ws.mu.Unlock()
 			case "reset":
 				go func() { reset <- b.oc.reset(t.Context(), id) }()
-			case "drawer":
-				c.json(t, object{"ev": "tap", "id": "new", "x": 230, "y": 104})
 			case "disconnect":
 				c.conn.Close()
 			}
@@ -101,7 +91,7 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 			if action == "reset" {
 				expectValue[error](t, reset, nil)
 			}
-			if action == "reset" || action == "drawer" {
+			if action == "reset" {
 				eventually(t, func() bool { saved, _ := b.oc.get(id); return saved == "" })
 			}
 		})

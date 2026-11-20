@@ -201,13 +201,16 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	testRequest(t, "GET", scoped+"/app/client.js", "", nil, 200)
 	testRequest(t, "GET", scoped+"/api/scope", "unit", nil, 401)
 	scope := testObject(t, testRequest(t, "GET", scoped+"/api/scope?token="+token, "", nil, 200))
-	if scope["scoped"] != true || scope["device_id"] != id || scope["character"] != "Plum" || scope["theme"] != "plum" {
+	if scope["scoped"] != true || scope["device_id"] != id || scope["character"] != "Plum" || scope["theme"] != "plum" ||
+		scope["cat"].(object)["face_bg"] != "#D8C7FF" {
 		t.Fatal(scope)
 	}
-	for _, path := range []string{"/api/devices", "/api/tunnels", "/api/virtual-clients", "/api/tunnel/status", "/ota/version.json", "/mcp", "/health", "/api/audio/abcd"} {
+	for _, path := range []string{"/api/devices", "/api/tunnels", "/api/virtual-clients", "/api/tunnel/status", "/ota/version.json", "/mcp", "/health", "/api/audio/abcd", "/api/cats"} {
 		testRequest(t, "GET", scoped+path, token, nil, 404)
 	}
 	testRequest(t, "POST", scoped+"/mcp", token, object{}, 404)
+	testRequest(t, "POST", scoped+"/api/devices/"+id+"/cat", token, object{"name": "No"}, 404)
+	testRequest(t, "DELETE", scoped+"/api/cats/plum", token, nil, 404)
 	testRequest(t, "GET", scoped+"/api/devices/"+id+"/messages", token, nil, 200)
 	testRequest(t, "GET", scoped+"/api/devices/echoear-private/messages", token, nil, 403)
 	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": "echoear-private", "text": "Question?"}, 403)
@@ -239,7 +242,9 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	if !bytes.Contains(tunneled, []byte("Hello!")) || !bytes.Equal(tunneled, testRequest(t, "GET", base+history, "unit", nil, 200)) {
 		t.Fatal("LAN and tunnel histories differ")
 	}
-	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": "echoear-private"}, 403)
+	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": "echoear-private"}, 404)
+	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": id}, 404)
+	testRequest(t, "POST", scoped+"/api/cats/reassign", token, object{"from_device_id": id, "to_device_id": "echoear-private"}, 404)
 	testRequest(t, "POST", scoped+"/api/chat", token, object{"device_id": id, "text": "Tell Cake Hi from HTTP."}, 200)
 	physical.until(t, hasWS("patch", "Hi from HTTP."))
 	_, rejected := dialTestWS(t, scoped, "unit", false, nil)
@@ -293,9 +298,22 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 		t.Fatal("tunneled drawer did not deliver recorded PCM")
 	}
 	physical.until(t, hasWS("patch", "Voice to Cake."))
-	testRequest(t, "POST", scoped+"/api/reset", token, object{"device_id": id}, 200)
+	conn.until(t, hasWS("mode", `"mode":"idle"`))
+	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
+	conn.until(t, hasWS("scene", `"cat-ring"`))
+	conn.json(t, object{"ev": "reset", "device_id": id})
+	conn.json(t, object{"ev": "tap", "id": "new", "x": 230, "y": 104})
+	conn.json(t, object{"ev": "watch", "device_id": id})
+	conn.until(t, hasWS("scene", `"bg":"#D8C7FF"`))
+	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
+	conn.until(t, hasWS("scene", `"bg":"#F3F4F6"`))
+	conn.until(t, hasWS("cat", `"configured":false`))
+	scope = testObject(t, testRequest(t, "GET", scoped+"/api/scope", token, nil, 200))
+	if scope["character"] != "New Cat" || scope["cat"].(object)["configured"] != false {
+		t.Fatal("scope retained the old cat after reset", scope)
+	}
 	if bytes.Contains(testRequest(t, "GET", base+history, "unit", nil, 200), []byte("Hello!")) {
-		t.Fatal("tunnel reset did not reset the shared conversation")
+		t.Fatal("LAN reset did not reset the shared conversation")
 	}
 	restored.shutdown()
 	conn.until(t, func(f wsFrame) bool { return f.op == wsClose })

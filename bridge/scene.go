@@ -5,27 +5,10 @@ import (
 	"math"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 )
 
 const catInk = "#1A1926"
-
-type palette struct{ face, mark, accent string }
-
-var catPalettes = map[string]palette{
-	"cake":  {"#FFF3D1", "#F59E0B", "#FACC15"},
-	"mint":  {"#7BE3C6", "#228E81", "#FFD166"},
-	"plum":  {"#D8C7FF", "#9F7AEA", "#DCB5FF"},
-	"sunny": {"#FCD34D", "#EA580C", "#FFBB6E"},
-}
-
-func catPalette(character string) palette {
-	if p, ok := catPalettes[strings.ToLower(character)]; ok {
-		return p
-	}
-	return catPalettes["cake"]
-}
 
 type sceneAction struct{ kind, value string }
 
@@ -180,11 +163,10 @@ type catPose struct {
 	meter   bool
 }
 
-func catScene(character string, pose catPose) sceneView {
-	p := catPalette(character)
+func catScene(cat catState, pose catPose) sceneView {
 	listening, thinking := pose.mood == "listening", pose.mood == "thinking"
 	speaking, sleeping := pose.mood == "speaking", pose.mood == "sleepy"
-	s := sceneView{bg: p.face, nodes: make([]object, 0, 40), actions: map[string]sceneAction{
+	s := sceneView{bg: cat.FaceBG, nodes: make([]object, 0, 40+len(cat.Extras)), actions: map[string]sceneAction{
 		"text": {"drawer", ""}, "cat-ring": {"listen", ""}, "volume-track": {"volume", ""},
 	}}
 	add := func(ns ...object) { s.nodes = append(s.nodes, ns...) }
@@ -200,17 +182,15 @@ func catScene(character string, pose catPose) sceneView {
 	ring := circ("cat-ring", 180, 180, 172, ringColor)
 	ring["fill"], ring["sw"], ring["on"] = false, ringWidth, "tap"
 	add(ring)
-	switch strings.ToLower(character) {
-	case "mint":
-		add(box("stripe-mid", 156, 72, 48, 12, 6, p.mark))
-	case "plum":
-		add(circ("stripe-mid", 180, 79, 18, p.mark), circ("stripe-cut", 191, 71, 16, p.face))
-	case "sunny":
-		add(circ("stripe-mid", 180, 78, 16, p.mark))
-	default:
-		add(box("stripe-left", 147, 66, 14, 24, 7, p.mark), box("stripe-mid", 173, 61, 14, 33, 7, p.mark),
-			box("stripe-right", 199, 66, 14, 24, 7, p.mark))
+	if cat.Configured {
+		add(box("stripe-left", 147, 66, 14, 24, 7, cat.MarkColor), box("stripe-mid", 173, 61, 14, 33, 7, cat.MarkColor),
+			box("stripe-right", 199, 66, 14, 24, 7, cat.MarkColor))
+	} else {
+		for i := range 3 {
+			add(circ("starter-mark-"+strconv.Itoa(i), 167+i*13, 79, 3, cat.MarkColor))
+		}
 	}
+	add(cat.Extras...)
 	for i, x := range []int{112, 248} {
 		tag := []string{"-l", "-r"}[i]
 		shut := pose.blink && !thinking || thinking && i == 1
@@ -258,22 +238,30 @@ func catScene(character string, pose catPose) sceneView {
 		visible(label("battery-charge", 246, 49, 1, "+", catInk), hasBattery && pose.charge))
 	meter := bordered(box("volume-track", 114, 246, 132, 33, 16, "#FFFAEE"), 2)
 	meter["on"] = "drag"
-	add(visible(meter, pose.meter), visible(box("volume-fill", 123, 255, max(1, pose.volume*114/100), 15, 7, p.accent), pose.meter),
+	add(visible(meter, pose.meter), visible(box("volume-fill", 123, 255, max(1, pose.volume*114/100), 15, 7, cat.AccentColor), pose.meter),
 		visible(label("volume-label", 180, 263, 1, strconv.Itoa(pose.volume)+"%", catInk), pose.meter))
+	if !cat.Configured && pose.mood == "idle" && !pose.meter {
+		add(label("starter-badge", 180, 263, 1, "Say hi to design me!", "#475569"))
+	}
 	add(visible(comicButton("text", 137, 284, 86, 36, "Text", "#FFFAEE"), !sleeping))
+	// Keep the firmware's node budget without dropping any visible decorations or pose nodes.
+	for i := len(s.nodes) - 1; len(s.nodes) > maxNodes && i >= 0; i-- {
+		if s.nodes[i]["vis"] == false {
+			s.nodes = slices.Delete(s.nodes, i, i+1)
+		}
+	}
 	return s
 }
 
-func drawerScene(character, voice string, peers []peer) sceneView {
-	p := catPalette(character)
+func drawerScene(cat catState, voice string, peers []peer) sceneView {
 	s := sceneView{bg: "#251C3B", nodes: []object{
 		label("drawer-title", 180, 57, 2, "Text", "#FFFAEE"),
-		comicButton("cat", 84, 86, 91, 36, "Cat", p.face), comicButton("new", 185, 86, 91, 36, "New", p.accent),
-		comicButton("voice", 90, 300, 180, 36, "Voice: "+voiceNames[voice], p.accent),
-	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "new": {"new", ""}, "voice": {"voice", ""}}}
+		comicButton("cat", 135, 86, 90, 36, "Cat", cat.FaceBG),
+		comicButton("voice", 90, 300, 180, 36, "Voice: "+voiceNames[voice], cat.AccentColor),
+	}, actions: map[string]sceneAction{"cat": {"cat", ""}, "voice": {"voice", ""}}}
 	for i, who := range peers[:min(4, len(peers))] {
 		id := "msg-" + strconv.Itoa(i)
-		s.nodes = append(s.nodes, comicButton(id, 70, 133+i*41, 220, 35, "Msg "+truncate(who.Character, 22), p.face))
+		s.nodes = append(s.nodes, comicButton(id, 70, 133+i*41, 220, 35, "Msg "+truncate(who.Character, 22), cat.FaceBG))
 		s.actions[id] = sceneAction{"reply", who.DeviceID}
 	}
 	if len(peers) == 0 {
@@ -361,26 +349,25 @@ func contrastText(tint string) string {
 	return catInk
 }
 
-func intercomScene(sender peer, text string) sceneView {
-	p := catPalette(sender.Character)
+func intercomScene(sender peer, text string, cat catState) sceneView {
 	if text == "" {
 		text = "Voice message"
 	}
 	s := sceneView{bg: "#251C3B", nodes: []object{
 		bordered(box("card", 42, 84, 276, 204, 29, "#FFFAEE"), 4),
-		circ("badge", 180, 83, 17, p.accent),
+		circ("badge", 180, 83, 17, cat.AccentColor),
 		label("from", 180, 120, 2, truncate("From "+sender.Character+"!", 25), catInk),
 	}, actions: map[string]sceneAction{"reply": {"reply", sender.DeviceID}, "cat": {"cat", ""}}}
 	for i, line := range cardLines(text) {
 		s.nodes = append(s.nodes, label("message-"+strconv.Itoa(i), 180, 155+i*23, 1, line, catInk))
 	}
-	s.nodes = append(s.nodes, comicButton("reply", 83, 226, 194, 38, "Reply to "+truncate(sender.Character, 18), p.accent),
-		comicButton("cat", 139, 300, 82, 32, "Cat", p.face))
+	s.nodes = append(s.nodes, comicButton("reply", 83, 226, 194, 38, "Reply to "+truncate(sender.Character, 18), cat.AccentColor),
+		comicButton("cat", 139, 300, 82, 32, "Cat", cat.FaceBG))
 	return s
 }
 
 func noticeScene(title, message string) sceneView {
-	s := intercomScene(peer{Character: "Cake"}, message)
+	s := intercomScene(peer{}, message, blankCat())
 	s.nodes[2]["s"] = title
 	s.nodes = slices.Delete(s.nodes, len(s.nodes)-2, len(s.nodes)-1)
 	delete(s.actions, "reply")

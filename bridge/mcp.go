@@ -209,6 +209,13 @@ var mcpTools = func() []object {
 	node["cycle"] = object{"description": "Rotate through 2–8 local reactions; null removes it.", "anyOf": []object{
 		{"type": "array", "items": ref("reaction"), "minItems": 2, "maxItems": 8}, {"type": "null"},
 	}}
+	extra := maps.Clone(node)
+	for _, key := range strings.Fields("id vis group on action ask tap cycle tc") {
+		delete(extra, key)
+	}
+	extra["t"] = object{"enum": []string{"rect", "circle", "line", "arc", "tri", "text"}}
+	extras := array(schema(extra, "t", "c"))
+	extras["maxItems"] = maxCatExtras
 	fields := maps.Clone(node)
 	delete(fields, "id")
 	nodes := array(ref("node"))
@@ -248,6 +255,12 @@ var mcpTools = func() []object {
 			schema(object{"from_device_id": str("Sender ID"), "to_device_id": str("Recipient ID or all"), "text": str("Message to speak")}, "from_device_id", "to_device_id", "text")),
 		tool("control", "Set a connected device's volume, put it to sleep, or wake it. Supply volume, sleep, or both.",
 			withID(object{"volume": integer("Speaker volume", 0, 100), "sleep": object{"type": "boolean", "description": "True dims and sleeps; false wakes"}})),
+		tool("cat", "Get or edit a persistent animated cat. Use device_id for get, update, load_saved, reset_blank; use slug for load_saved or delete_saved. List saved cats without a device.",
+			schema(object{"op": object{"enum": []string{"get", "update", "list_saved", "load_saved", "reset_blank", "delete_saved"}},
+				"device_id": str("Exact EchoEar device ID"), "slug": str("Saved cat slug"), "name": object{"type": "string", "maxLength": 40},
+				"face_bg": bg, "mark_color": str("Forehead mark color as #RRGGBB"), "accent_color": str("UI accent as #RRGGBB"),
+				"personality": object{"type": "string", "maxLength": 160}, "voice": str("Kokoro voice ID (e.g. af_heart, bm_fable)"),
+				"extras": extras, "configured": object{"type": "boolean"}, "save_profile": object{"type": "boolean"}}, "op")),
 		tool("memory", "List, get, set or delete persistent JSON for a device, shared, or a game room. Use expected_version to prevent lost updates.",
 			schema(object{"op": object{"enum": []string{"list", "get", "set", "delete"}}, "scope": str("shared, a device ID, or game:<slug>"),
 				"key": str("Memory key"), "value": object{}, "expected_version": integer("Zero requires a new key; otherwise require this version", 0, 1<<53-1)}, "op", "scope")),
@@ -412,7 +425,9 @@ func (h *wsHub) waitEvent(ctx context.Context, id string, after *uint64, timeout
 
 func (b *bridge) lookupDevice(id string) (peer, error) {
 	if v, ok := b.virtualByID(id); ok {
-		return peer{DeviceID: v.ID, Character: v.Character}, nil
+		who := peer{DeviceID: v.ID, Character: v.Character}
+		who.Character = b.catFor(who).Name
+		return who, nil
 	}
 	if virtualID.MatchString(strings.ToLower(id)) {
 		return peer{}, problem(404, "Device not found")
@@ -442,6 +457,7 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 	}
 	if d := h.devices[key]; d != nil && h.active(d) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
+		entry["character"], entry["cat"] = d.cat.Name, d.cat.catLook
 		_, rev := d.sceneState()
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, rev, d.firmware
 		entry["room"] = d.room
@@ -451,7 +467,7 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 	}
 }
 
-var mcpDeviceFields = []string{"device_id", "character", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "scene_rev", "event_cursor", "theme", "room"}
+var mcpDeviceFields = []string{"device_id", "character", "cat", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "scene_rev", "event_cursor", "theme", "room"}
 
 func mcpDevice(entry object) object {
 	out := make(object, len(mcpDeviceFields))
@@ -476,6 +492,8 @@ func mcpUint(args object, key string) (*uint64, error) {
 
 func (b *bridge) callMCP(ctx context.Context, name string, args object) (object, error) {
 	switch name {
+	case "cat":
+		return b.catTool(ctx, args)
 	case "memory":
 		return b.memory(ctx, args, false)
 	case "asset":

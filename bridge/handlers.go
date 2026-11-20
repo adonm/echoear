@@ -22,24 +22,25 @@ import (
 )
 
 type bridge struct {
-	db       *bridgeDB
-	root     context.Context
-	token    string
-	peers    peers
-	hex      hexClient
-	oc       *openCode
-	worker   *synthWorker
-	voices   deviceVoices
-	clips    speechClips
-	audio    audioCache
-	chime    []byte
-	peerHTTP *http.Client
-	ota      otaFile
-	ws       *wsHub
-	virtual  *store[virtualClient]
-	tunnels  *tunnelManager
-	history  *chatHistory
-	timers   *timerManager
+	db        *bridgeDB
+	root      context.Context
+	token     string
+	peers     peers
+	hex       hexClient
+	oc        *openCode
+	worker    *synthWorker
+	voices    deviceVoices
+	clips     speechClips
+	audio     audioCache
+	chime     []byte
+	peerHTTP  *http.Client
+	ota       otaFile
+	ws        *wsHub
+	virtual   *store[virtualClient]
+	tunnels   *tunnelManager
+	history   *chatHistory
+	timers    *timerManager
+	catTitles sync.Mutex
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
@@ -163,11 +164,20 @@ func deviceID(r *http.Request, obj object, required bool) (string, error) {
 }
 
 func (b *bridge) voiceFor(who peer) string {
+	return b.voices.get(who.DeviceID, b.voiceTheme(who))
+}
+
+func (b *bridge) voiceTheme(who peer) string {
 	theme := deviceTheme(who.Character)
 	if v, ok := b.virtualByID(strings.ToLower(who.DeviceID)); ok {
-		theme = v.Theme
+		return v.Theme
 	}
-	return b.voices.get(who.DeviceID, theme)
+	if b.peers.store != nil {
+		if p, ok, _ := b.peers.get(who.DeviceID); ok {
+			return deviceTheme(p.Character)
+		}
+	}
+	return theme
 }
 
 func voiceDevice(path string) (string, bool) {
@@ -240,7 +250,11 @@ func (b *bridge) identity(r *http.Request, obj object, register bool) (peer, err
 		return peer{}, err
 	}
 	if !register {
-		return b.peers.touch(device, ip, character)
+		who, err := b.peers.touch(device, ip, character)
+		if err == nil {
+			who.Character = b.catFor(who).Name
+		}
+		return who, err
 	}
 	port := int64(80)
 	if v, exists := obj["port"]; exists {
@@ -527,12 +541,12 @@ type turnOptions struct {
 	begin      func() func()
 }
 
-func turnPrompt(sender peer, web bool, source, text string) string {
+func turnPrompt(sender peer, web bool, source, text string, cat catState) string {
 	kind := "hardware"
 	if web || webDeviceID(strings.ToLower(sender.DeviceID)) {
 		kind = "web"
 	}
-	return fmt.Sprintf("[EchoEar: %s (%s), %s, %s]\n%s", sender.Character, sender.DeviceID, kind, source, text)
+	return fmt.Sprintf("[EchoEar: %s (%s), %s, %s%s]\n%s", cat.Name, sender.DeviceID, kind, source, catPromptContext(cat), text)
 }
 
 // HTTP verifies the final text before publishing an audio URL. A WebSocket can
@@ -540,11 +554,10 @@ func turnPrompt(sender peer, web bool, source, text string) string {
 func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text string, options turnOptions) (generatedReply, error) {
 	publish := options.publish
 	agentSpoke := func() bool { return options.agentSpoke != nil && options.agentSpoke() }
-	voice := b.voiceFor(sender)
 	makeSpeech := func() *speechTurn {
 		deadline, _ := ctx.Deadline()
 		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
-		return newSpeechTurn(audioCtx, cancel, b.worker, voice)
+		return newSpeechTurn(audioCtx, cancel, b.worker, b.voiceFor(sender))
 	}
 	var eager *speechTurn
 	publishEager := func() {
@@ -569,10 +582,13 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text
 		eager.send(s)
 	}
 	start := time.Now()
-	prompt := turnPrompt(sender, options.web, options.source, text)
-	raw, sid, err := b.oc.ask(ctx, sender, prompt, onSentence, options.source, options.begin, func(entry chatEntry) {
+	prepare := func() (string, string) {
+		cat := b.catFor(sender)
+		return cat.Name, turnPrompt(sender, options.web, options.source, text, cat)
+	}
+	raw, sid, err := b.oc.askPrepared(ctx, sender.DeviceID, prepare, onSentence, options.source, options.begin, func(entry chatEntry) {
 		if entry.Role == "assistant" {
-			entry.Sender = sender.Character
+			entry.Sender = b.catFor(sender).Name
 		}
 		b.chat(sender.DeviceID, entry, false)
 	})
@@ -661,6 +677,9 @@ func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any
 func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any, error) {
 	ctx := r.Context()
 	switch {
+	case path == "/api/cats" || strings.HasPrefix(path, "/api/cats/") ||
+		strings.HasPrefix(path, "/api/devices/") && strings.HasSuffix(path, "/cat"):
+		return b.catAPI(w, r, path)
 	case path == "/api/memory" || path == "/api/memory/scopes":
 		return b.memoryAPI(w, r, path)
 	case path == "/api/assets" || strings.HasPrefix(path, "/api/assets/"):

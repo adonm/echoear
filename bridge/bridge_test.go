@@ -30,7 +30,7 @@ func TestTurnPromptIdentifiesDeviceAndInput(t *testing.T) {
 		{"phone-1234", "tap", "web", false},
 		{"other-id", "tap", "web", true},
 	} {
-		if got := turnPrompt(peer{DeviceID: tc.id, Character: "Cake"}, tc.web, tc.source, "Hi"); got !=
+		if got := turnPrompt(peer{DeviceID: tc.id}, tc.web, tc.source, "Hi", legacyCat("Cake", "cake")); got !=
 			"[EchoEar: Cake ("+tc.id+"), "+tc.kind+", "+tc.source+"]\nHi" {
 			t.Fatal(got)
 		}

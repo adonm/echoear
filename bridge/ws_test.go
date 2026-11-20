@@ -274,9 +274,9 @@ func TestWSKeyedCatScenes(t *testing.T) {
 		{mood: "sleepy", battery: 15},
 	}
 	for _, char := range []string{"Cake", "Mint", "Plum", "Sunny"} {
-		s := catScene(char, poses[0])
-		if len(s.nodes) > 48 || s.bg != catPalette(char).face || nodeIn(s, "stripe-mid")["c"] != catPalette(char).mark ||
-			(char == "Cake") != (nodeIn(s, "stripe-left") != nil) {
+		cat := legacyCat(char, char)
+		s := catScene(cat, poses[0])
+		if len(s.nodes) > 48 || s.bg != cat.FaceBG || nodeIn(s, "stripe-mid")["c"] != cat.MarkColor {
 			t.Fatalf("wrong character geometry or palette for %s", char)
 		}
 		ids := map[string]bool{}
@@ -291,7 +291,7 @@ func TestWSKeyedCatScenes(t *testing.T) {
 			t.Fatal("identical scene generated a patch")
 		}
 		for i, pose := range poses[1:] {
-			next := catScene(char, pose)
+			next := catScene(cat, pose)
 			diff := sceneDiff(s, next, uint64(i+2))
 			if diff["op"] != "patch" || len(diff["add"].([]object))+len(diff["del"].([]string)) != 0 {
 				t.Fatalf("pose should patch same keys: %v", diff)
@@ -305,11 +305,11 @@ func TestWSKeyedCatScenes(t *testing.T) {
 				}
 			}
 		}
-		blink := sceneDiff(s, catScene(char, poses[1]), 2)["set"].(map[string]object)
+		blink := sceneDiff(s, catScene(cat, poses[1]), 2)["set"].(map[string]object)
 		if len(blink) != 4 || blink["eye-l"]["vis"] != false || blink["lid-r"]["vis"] != true {
 			t.Fatal("blink should just toggle eyes/lids")
 		}
-		listening, thinking, speech, sleep := catScene(char, poses[2]), catScene(char, poses[3]), catScene(char, poses[4]), catScene(char, poses[5])
+		listening, thinking, speech, sleep := catScene(cat, poses[2]), catScene(cat, poses[3]), catScene(cat, poses[4]), catScene(cat, poses[5])
 		if nodeIn(listening, "cat-ring")["c"] != "#FF5964" || nodeIn(listening, "eye-l")["w"] != 40 ||
 			nodeIn(thinking, "lid-r")["vis"] != true || nodeIn(thinking, "dot-2")["y"] != 247 ||
 			nodeIn(speech, "tongue")["vis"] != true || nodeIn(speech, "volume-track")["on"] != "drag" ||
@@ -350,7 +350,7 @@ func TestWSDiagramAndIntercomConversion(t *testing.T) {
 	if n := nodeIn(*hint, "subtitle"); n["s"] != "Orbit!" || n["vis"] != true {
 		t.Fatal("diagram hint is missing")
 	}
-	card := intercomScene(peer{DeviceID: "echoear-33d8", Character: "Cake"}, "Tea is ready.")
+	card := intercomScene(peer{DeviceID: "echoear-33d8", Character: "Cake"}, "Tea is ready.", legacyCat("Cake", "cake"))
 	if _, a := card.action("reply", 180, 240, "tap"); a.value != "echoear-33d8" {
 		t.Fatal("reply routes by character instead of device ID")
 	}
@@ -363,7 +363,7 @@ func TestWSMirrorAndControls(t *testing.T) {
 	if bytes.Contains(first.data, []byte(`"id":"new"`)) {
 		t.Fatal("New is still on the cat face")
 	}
-	face := catScene("Cake", catPose{})
+	face := catScene(legacyCat("Cake", "cake"), catPose{})
 	if text := nodeIn(face, "text"); nodeInt(text, "x")*2+nodeInt(text, "w") != 360 {
 		t.Fatal("Text button is not centered")
 	}
@@ -382,14 +382,15 @@ func TestWSMirrorAndControls(t *testing.T) {
 	}
 	web.json(t, object{"ev": "tap", "x": 180, "y": 300})
 	drawer := func(f wsFrame) bool { return f.op == wsText && bytes.Contains(f.data, []byte(`"drawer-title"`)) }
-	if a, b := dev.until(t, drawer), web.until(t, drawer); !bytes.Equal(a.data, b.data) || !bytes.Contains(a.data, []byte(`"id":"new"`)) {
-		t.Fatal("mirror tap did not open the same drawer with New")
+	if a, b := dev.until(t, drawer), web.until(t, drawer); !bytes.Equal(a.data, b.data) ||
+		bytes.Contains(a.data, []byte(`"id":"new"`)) || !bytes.Contains(a.data, []byte(`"id":"voice"`)) {
+		t.Fatal("drawer did not mirror voice controls without New")
 	}
 	web.json(t, object{"ev": "head", "action": "vol_down", "volume": 62})
 	for _, c := range []*testWS{dev, web} {
 		c.until(t, hasWS("volume", `"level":62`))
 	}
-	web.json(t, object{"ev": "tap", "id": "cat", "x": 130, "y": 102})
+	web.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 102})
 	dev.until(t, hasWS("scene", `"cat-ring"`))
 	web.json(t, object{"ev": "tap", "id": "", "x": 180, "y": 180})
 	dev.until(t, hasWS("rec", `"action":"start"`))

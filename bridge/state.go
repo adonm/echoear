@@ -65,8 +65,7 @@ func (v deviceVoices) get(id, theme string) string {
 	id = strings.ToLower(id)
 	if v.store != nil {
 		var voice string
-		_ = v.db.QueryRow(`SELECT COALESCE((SELECT voice FROM voices WHERE device_id=?),
-			(SELECT voice FROM virtual_clients WHERE id=?),'')`, id, id).Scan(&voice)
+		_ = v.db.QueryRow("SELECT "+catVoiceSQL, id, id).Scan(&voice)
 		if v.allowed(voice) {
 			return voice
 		}

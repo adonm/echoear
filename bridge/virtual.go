@@ -20,7 +20,7 @@ type virtualClient struct {
 }
 
 func validLegacyVirtual(id string, v virtualClient) bool {
-	_, theme := catPalettes[v.Theme]
+	_, theme := legacyCatColors[v.Theme]
 	return id == v.ID && virtualID.MatchString(id) && characterRE.MatchString(v.Character) && theme && !v.CreatedAt.IsZero()
 }
 
@@ -59,20 +59,45 @@ func (b *bridge) virtualAPI(w http.ResponseWriter, r *http.Request, path string)
 		if err != nil {
 			return nil, err
 		}
-		name, theme := strings.TrimSpace(str(obj["character"])), str(obj["theme"])
-		if !characterRE.MatchString(name) {
-			return nil, problem(400, "Invalid character name")
+		name, theme := strings.TrimSpace(str(obj["character"])), strings.TrimSpace(str(obj["theme"]))
+		if value, supplied := obj["character"]; supplied {
+			if _, ok := value.(string); !ok || name != "" && !characterRE.MatchString(name) {
+				return nil, problem(400, "Invalid character name")
+			}
 		}
-		if _, ok := catPalettes[theme]; !ok {
+		if value, supplied := obj["theme"]; supplied {
+			if _, ok := value.(string); !ok {
+				return nil, problem(400, "Invalid theme")
+			}
+		}
+		if _, ok := legacyCatColors[theme]; theme != "" && !ok {
 			return nil, problem(400, "Expected theme cake, mint, plum, or sunny")
 		}
 		voice := str(obj["voice"])
 		if _, supplied := obj["voice"]; supplied && !b.voices.allowed(voice) {
 			return nil, problem(400, "Unsupported voice")
 		}
-		v := virtualClient{ID: "virt-" + randomHex(4), Character: name, Theme: theme, Voice: voice, CreatedAt: time.Now().UTC()}
-		_, err = b.virtual.db.ExecContext(r.Context(), `INSERT INTO virtual_clients (id,character,theme,voice,created_at) VALUES (?,?,?,?,?)`, b.virtual.values(v.ID, v)...)
+		cat := blankCat()
+		if name != "" || theme != "" {
+			if name == "" {
+				name = strings.ToUpper(theme[:1]) + theme[1:]
+			}
+			if theme == "" {
+				theme = deviceTheme(name)
+			}
+			cat = legacyCat(name, theme)
+		}
+		v := virtualClient{ID: "virt-" + randomHex(4), Character: cat.Name, Theme: theme, Voice: voice, CreatedAt: time.Now().UTC()}
+		ctx := r.Context()
+		tx, err := b.db.BeginTx(ctx, nil)
 		if err != nil {
+			return nil, problem(502, "Cannot create virtual client")
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO virtual_clients (id,character,theme,voice,created_at) VALUES (?,?,?,?,?)`, b.virtual.values(v.ID, v)...); err != nil {
+			return nil, problem(502, "Cannot create virtual client")
+		}
+		if err := writeCat(ctx, tx, v.ID, cat); err != nil || tx.Commit() != nil {
 			return nil, problem(502, "Cannot create virtual client")
 		}
 		sendJSON(w, 201, b.publicVirtual(v))
@@ -91,9 +116,19 @@ func (b *bridge) virtualAPI(w http.ResponseWriter, r *http.Request, path string)
 				return nil, err
 			}
 		}
-		err := b.virtual.save(id, virtualClient{}, true)
+		ctx := r.Context()
+		tx, err := b.db.BeginTx(ctx, nil)
 		if err != nil {
-			return nil, err
+			return nil, problem(502, "Cannot delete virtual client")
+		}
+		defer tx.Rollback()
+		for _, query := range []string{"DELETE FROM virtual_clients WHERE id=?", "DELETE FROM cats WHERE device_id=?", "DELETE FROM voices WHERE device_id=?"} {
+			if _, err := tx.ExecContext(ctx, query, id); err != nil {
+				return nil, problem(502, "Cannot delete virtual client")
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, problem(502, "Cannot delete virtual client")
 		}
 		if b.ws != nil {
 			b.ws.disconnectDevice(id)
@@ -112,7 +147,8 @@ func (b *bridge) publicVirtual(v virtualClient) object {
 		connected = d != nil && b.ws.active(d)
 		b.ws.mu.Unlock()
 	}
-	out := object{"id": v.ID, "character": v.Character, "theme": v.Theme, "created_at": v.CreatedAt,
+	cat := b.catFor(peer{DeviceID: v.ID, Character: v.Character})
+	out := object{"id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme, "created_at": v.CreatedAt,
 		"online": connected, "ws_connected": connected, "voice": b.voices.get(v.ID, v.Theme)}
 	if details := b.tunnels.info(v.ID); details != nil {
 		out["tunnel"] = details
@@ -122,7 +158,7 @@ func (b *bridge) publicVirtual(v virtualClient) object {
 
 func deviceTheme(character string) string {
 	theme := strings.ToLower(character)
-	if _, ok := catPalettes[theme]; ok {
+	if _, ok := legacyCatColors[theme]; ok {
 		return theme
 	}
 	return "cake"
@@ -149,14 +185,17 @@ func (b *bridge) deviceList() ([]object, error) {
 	}
 	for _, entry := range list {
 		id := str(entry["device_id"])
-		entry["kind"], entry["theme"] = "physical", deviceTheme(str(entry["character"]))
+		who := peer{DeviceID: id, Character: str(entry["character"])}
+		entry["kind"], entry["theme"] = "physical", b.voiceTheme(who)
 		if phoneID.MatchString(id) || virtualID.MatchString(id) {
 			entry["kind"] = "virtual"
 			delete(entry, "ip")
 		}
 		if v, ok := clients[id]; ok {
-			entry["character"], entry["theme"] = v.Character, v.Theme
+			who.Character, entry["theme"] = v.Character, v.Theme
 		}
+		cat := b.catFor(who)
+		entry["character"], entry["cat"] = cat.Name, cat.catLook
 		entry["voice"] = b.voices.get(id, str(entry["theme"]))
 		if details := b.tunnels.info(id); details != nil {
 			entry["tunnel"] = details

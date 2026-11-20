@@ -22,6 +22,8 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS sessions (device_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS virtual_clients (id TEXT PRIMARY KEY, character TEXT NOT NULL, theme TEXT NOT NULL, voice TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS voices (device_id TEXT PRIMARY KEY, voice TEXT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS cats (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, configured INTEGER NOT NULL DEFAULT 0, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS saved_cats (slug TEXT PRIMARY KEY, name TEXT NOT NULL, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', voice TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS tunnels (device_id TEXT PRIMARY KEY, route_name TEXT NOT NULL, url TEXT NOT NULL, local_port INTEGER NOT NULL, scoped_token TEXT NOT NULL, profile TEXT NOT NULL, created_at TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS chat_events (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, role TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, scene_title TEXT NOT NULL DEFAULT '', tool_summary TEXT NOT NULL DEFAULT '', ts_ms INTEGER NOT NULL)`,
 	`CREATE INDEX IF NOT EXISTS chat_device_ts ON chat_events (device_id, ts_ms)`,
@@ -35,7 +37,7 @@ type bridgeDB struct {
 	cloud *turso.TursoSyncDb
 }
 
-func openBridgeDB(ctx context.Context, path, legacy, remote, token string) (_ *bridgeDB, err error) {
+func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoice string) (_ *bridgeDB, err error) {
 	if path != ":memory:" {
 		path, err = filepath.Abs(path)
 		if err != nil {
@@ -87,6 +89,9 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token string) (_ *b
 	}
 	if err := d.migrate(ctx, legacy); err != nil {
 		return nil, fmt.Errorf("migrate legacy EchoEar state: %w", err)
+	}
+	if err := d.migrateCats(ctx, deviceVoiceStore(d, fallbackVoice)); err != nil {
+		return nil, fmt.Errorf("migrate EchoEar cats: %w", err)
 	}
 	return d, nil
 }

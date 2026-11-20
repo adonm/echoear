@@ -1,0 +1,714 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+)
+
+const maxCatExtras = 16
+
+type catLook struct {
+	Name        string `json:"name"`
+	Configured  bool   `json:"configured"`
+	FaceBG      string `json:"face_bg"`
+	MarkColor   string `json:"mark_color"`
+	AccentColor string `json:"accent_color"`
+	Personality string `json:"personality"`
+}
+
+type catState struct {
+	catLook
+	Voice  string   `json:"voice"`
+	Extras []object `json:"extras"`
+}
+
+type savedCat struct {
+	catState
+	Slug      string `json:"slug"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+func blankCat() catState {
+	return catState{catLook: catLook{Name: "New Cat", FaceBG: "#F3F4F6", MarkColor: "#CBD5E1", AccentColor: "#60A5FA"}, Extras: []object{}}
+}
+
+// Only legacy identities and old API callers use these initial colors. The
+// renderer never derives a cat's appearance from its name or theme.
+var legacyCatColors = map[string][3]string{
+	"cake":  {"#FFF3D1", "#F59E0B", "#FACC15"},
+	"mint":  {"#7BE3C6", "#228E81", "#FFD166"},
+	"plum":  {"#D8C7FF", "#9F7AEA", "#DCB5FF"},
+	"sunny": {"#FCD34D", "#EA580C", "#FFBB6E"},
+}
+
+func legacyCat(name, theme string) catState {
+	c := blankCat()
+	c.Name, c.Configured = name, true
+	p := legacyCatColors[deviceTheme(theme)]
+	c.FaceBG, c.MarkColor, c.AccentColor = p[0], p[1], p[2]
+	return c
+}
+
+var (
+	catSlugRE    = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	catSlugSpace = regexp.MustCompile(`[^a-z0-9]+`)
+)
+
+func catSlug(name string) string {
+	return strings.Trim(catSlugSpace.ReplaceAllString(strings.ToLower(name), "-"), "-")
+}
+
+const activeCatColumns = `name,configured,face_bg,mark_color,accent_color,personality,extras_json,updated_at`
+const savedCatColumns = `slug,name,face_bg,mark_color,accent_color,personality,voice,extras_json,updated_at`
+const catVoiceSQL = `COALESCE((SELECT voice FROM voices WHERE device_id=?),(SELECT voice FROM virtual_clients WHERE id=?),'')`
+
+func readCat(row rowScanner) (catState, error) {
+	c := blankCat()
+	var configured int
+	var raw string
+	err := row.Scan(&c.Name, &configured, &c.FaceBG, &c.MarkColor, &c.AccentColor, &c.Personality, &raw, &c.Voice)
+	c.Configured = configured != 0
+	if err == nil {
+		c.Extras, err = readExtras(raw)
+	}
+	return c, err
+}
+
+func readSavedCat(row rowScanner) (savedCat, error) {
+	p := savedCat{catState: blankCat()}
+	p.Configured = true
+	var raw string
+	err := row.Scan(&p.Slug, &p.Name, &p.FaceBG, &p.MarkColor, &p.AccentColor, &p.Personality, &p.Voice, &raw, &p.UpdatedAt)
+	if err == nil {
+		p.Extras, err = readExtras(raw)
+	}
+	return p, err
+}
+
+func readExtras(raw string) ([]object, error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var extras []any
+	if err := dec.Decode(&extras); err != nil {
+		return nil, err
+	}
+	return sanitizeCatExtras(extras)
+}
+
+func writeCat(ctx context.Context, tx *sql.Tx, id string, c catState) error {
+	raw, err := json.Marshal(c.Extras)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO cats (device_id,`+activeCatColumns+`) VALUES (?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(device_id) DO UPDATE SET name=excluded.name,configured=excluded.configured,face_bg=excluded.face_bg,
+		mark_color=excluded.mark_color,accent_color=excluded.accent_color,personality=excluded.personality,
+		extras_json=excluded.extras_json,updated_at=excluded.updated_at`,
+		id, c.Name, c.Configured, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, string(raw), time.Now().UnixMilli())
+	return err
+}
+
+func saveCatProfile(ctx context.Context, tx *sql.Tx, c catState, replace bool) error {
+	slug := catSlug(c.Name)
+	if slug == "" {
+		return nil
+	}
+	raw, err := json.Marshal(c.Extras)
+	if err != nil {
+		return err
+	}
+	conflict := `ON CONFLICT(slug) DO NOTHING`
+	if replace {
+		conflict = `ON CONFLICT(slug) DO UPDATE SET name=excluded.name,face_bg=excluded.face_bg,mark_color=excluded.mark_color,
+			accent_color=excluded.accent_color,personality=excluded.personality,voice=excluded.voice,
+			extras_json=excluded.extras_json,updated_at=excluded.updated_at`
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO saved_cats (`+savedCatColumns+`) VALUES (?,?,?,?,?,?,?,?,?) `+conflict,
+		slug, c.Name, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, c.Voice, string(raw), time.Now().UnixMilli())
+	return err
+}
+
+func (d *bridgeDB) migrateCats(ctx context.Context, voices deviceVoices) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var migrated string
+	err = tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key='migrated_cats_v1'").Scan(&migrated)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,character,theme,COALESCE(v.voice,prior.voice,'')
+		FROM (SELECT device_id AS id, character, '' AS theme, '' AS voice FROM devices
+		      UNION ALL SELECT id,character,theme,voice FROM virtual_clients) prior
+		LEFT JOIN voices v ON v.device_id=lower(prior.id)
+		WHERE NOT EXISTS (SELECT 1 FROM cats WHERE device_id=lower(prior.id))
+		ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	type seed struct{ id, name, theme, voice string }
+	var seeds []seed
+	for rows.Next() {
+		var s seed
+		if err := rows.Scan(&s.id, &s.name, &s.theme, &s.voice); err != nil {
+			rows.Close()
+			return err
+		}
+		seeds = append(seeds, s)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, s := range seeds {
+		s.id = strings.ToLower(s.id)
+		if s.theme == "" {
+			s.theme = deviceTheme(s.name)
+		}
+		c := legacyCat(s.name, s.theme)
+		if !voices.allowed(s.voice) {
+			s.voice = voices.defaultFor(s.id, s.theme)
+		}
+		c.Voice = s.voice
+		if err := writeCat(ctx, tx, s.id, c); err != nil {
+			return err
+		}
+		if s.id == "virt-8458606f" && s.name == "greg" {
+			// The requested original Sunny profile is Heart; keep any live voice override intact.
+			c.Voice = heartVoice
+		}
+		if err := saveCatProfile(ctx, tx, c, false); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO meta VALUES ('migrated_cats_v1','1')"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type catQuery interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (b *bridge) readActiveCat(ctx context.Context, q catQuery, who peer) (catState, error) {
+	id := strings.ToLower(who.DeviceID)
+	c, err := readCat(q.QueryRowContext(ctx, `SELECT name,configured,face_bg,mark_color,accent_color,personality,extras_json,`+
+		catVoiceSQL+` FROM cats WHERE device_id=?`, id, id, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		c = blankCat()
+		if who.Character != "" && who.Character != c.Name && !strings.EqualFold(who.Character, id) && !webDeviceID(id) {
+			c = legacyCat(who.Character, who.Character)
+		}
+		err = q.QueryRowContext(ctx, "SELECT "+catVoiceSQL, id, id).Scan(&c.Voice)
+	}
+	return c, err
+}
+
+func (b *bridge) catFor(who peer) catState {
+	if b.db != nil {
+		if c, err := b.readActiveCat(context.Background(), b.db, who); err == nil {
+			return c
+		}
+	}
+	return blankCat()
+}
+
+func sanitizeCatExtras(raw any) ([]object, error) {
+	values, ok := raw.([]any)
+	if !ok || len(values) > maxCatExtras {
+		return nil, problem(400, "Expected an array of at most 16 cat extras")
+	}
+	out := make([]object, 0, len(values))
+	for i, v := range values {
+		n, ok := v.(object)
+		kind := str(n["t"])
+		fields, shape := shapeFields[kind]
+		if !ok || !shape || kind == "btn" {
+			return nil, problem(400, "Cat extras must be rect, circle, line, arc, tri, or text")
+		}
+		for _, key := range fields[0] {
+			if n[key] == nil {
+				return nil, problem(400, "Missing cat extra field "+key)
+			}
+		}
+		if n["c"] == nil {
+			return nil, problem(400, "Missing cat extra color")
+		}
+		id := "extra-" + strconv.Itoa(i)
+		raw := object{"id": id, "t": kind}
+		for _, key := range append(append([]string{"c", "bc", "sw", "fill", "fs", "s"}, fields[0]...), fields[1]...) {
+			if val, ok := n[key]; ok {
+				raw[key] = val
+			}
+		}
+		node, err := visualNode(raw, false)
+		if err != nil {
+			return nil, err
+		}
+		if kind == "text" {
+			node["s"] = strings.Map(func(r rune) rune {
+				if r < 32 || r > 126 {
+					return -1
+				}
+				return r
+			}, str(node["s"]))
+		}
+		out = append(out, node)
+	}
+	return out, nil
+}
+
+func updateCat(c catState, args object, voices deviceVoices) (catState, bool, error) {
+	save, err := catBool(args, "save_profile", false)
+	if err != nil {
+		return c, false, err
+	}
+	editLook := false
+	for key, val := range args {
+		switch key {
+		case "name":
+			name := strings.TrimSpace(str(val))
+			if !characterRE.MatchString(name) {
+				return c, false, problem(400, "Invalid cat name (1–40 characters)")
+			}
+			c.Name, editLook = name, true
+		case "face_bg", "mark_color", "accent_color":
+			tint := color(val)
+			if tint == "" {
+				return c, false, problem(400, "Expected #RRGGBB for "+key)
+			}
+			switch key {
+			case "face_bg":
+				c.FaceBG = tint
+			case "mark_color":
+				c.MarkColor = tint
+			case "accent_color":
+				c.AccentColor = tint
+			}
+			editLook = true
+		case "personality":
+			vibe, ok := val.(string)
+			if !ok || runeLen(vibe) > 160 || strings.ContainsAny(vibe, "[]") || strings.ContainsFunc(vibe, func(r rune) bool { return !unicode.IsPrint(r) }) {
+				return c, false, problem(400, "Expected a single-line personality of at most 160 characters, without brackets")
+			}
+			c.Personality = strings.TrimSpace(vibe)
+		case "voice":
+			if !voices.allowed(str(val)) {
+				return c, false, problem(400, "Unsupported voice")
+			}
+			c.Voice = str(val)
+		case "extras":
+			extras, err := sanitizeCatExtras(val)
+			if err != nil {
+				return c, false, err
+			}
+			c.Extras, editLook = extras, true
+		case "configured", "save_profile", "device_id", "op":
+		default:
+			return c, false, problem(400, "Unknown cat field "+key)
+		}
+	}
+	c.Configured, err = catBool(args, "configured", c.Configured || editLook)
+	return c, save, err
+}
+
+func catBool(args object, key string, fallback bool) (bool, error) {
+	if raw, exists := args[key]; exists {
+		v, ok := raw.(bool)
+		if !ok {
+			return false, problem(400, "Expected boolean for "+key)
+		}
+		return v, nil
+	}
+	return fallback, nil
+}
+
+func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args object) (catState, bool, error) {
+	id := strings.ToLower(who.DeviceID)
+	unavailable := problem(502, "Cannot save cat")
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return catState{}, false, unavailable
+	}
+	defer tx.Rollback()
+	if virtualID.MatchString(id) {
+		if err := tx.QueryRowContext(ctx, `SELECT theme FROM virtual_clients WHERE id=?`, id).Scan(&theme); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return catState{}, false, problem(404, "Device not found")
+			}
+			return catState{}, false, unavailable
+		}
+	}
+	current, err := b.readActiveCat(ctx, tx, who)
+	if err != nil {
+		return catState{}, false, unavailable
+	}
+	if !b.voices.allowed(current.Voice) {
+		current.Voice = b.voices.defaultFor(id, theme)
+	}
+	next := current
+	profilesChanged := false
+	archive := func(c catState) error {
+		if strings.HasPrefix(strings.ToLower(c.Name), "live-") || strings.HasPrefix(id, "echoear-live-") || catSlug(c.Name) == "" {
+			return nil
+		}
+		profilesChanged = true
+		return saveCatProfile(ctx, tx, c, true)
+	}
+	switch op {
+	case "get":
+		return current, false, nil
+	case "update":
+		var save bool
+		next, save, err = updateCat(current, args, b.voices)
+		if err != nil {
+			return catState{}, false, err
+		}
+		if save || next.Configured {
+			if err := archive(next); err != nil {
+				return catState{}, false, unavailable
+			}
+		}
+	case "load_saved":
+		slug := str(args["slug"])
+		if !validCatSlug(slug) {
+			return catState{}, false, problem(400, "Invalid cat slug")
+		}
+		p, err := readSavedCat(tx.QueryRowContext(ctx, `SELECT `+savedCatColumns+` FROM saved_cats WHERE slug=?`, slug))
+		if errors.Is(err, sql.ErrNoRows) {
+			return catState{}, false, problem(404, "Saved cat not found")
+		}
+		if err != nil {
+			return catState{}, false, unavailable
+		}
+		if current.Configured && catSlug(current.Name) != slug {
+			if err := archive(current); err != nil {
+				return catState{}, false, unavailable
+			}
+		}
+		next = p.catState
+		if !b.voices.allowed(next.Voice) {
+			next.Voice = current.Voice
+		}
+	case "reset_blank":
+		if current.Configured {
+			if err := archive(current); err != nil {
+				return catState{}, false, unavailable
+			}
+		}
+		next = blankCat()
+		next.Voice = current.Voice
+	}
+	if err := writeCat(ctx, tx, id, next); err != nil {
+		return catState{}, false, unavailable
+	}
+	if err := writeCatVoice(ctx, tx, id, next.Voice); err != nil {
+		return catState{}, false, unavailable
+	}
+	if err := tx.Commit(); err != nil {
+		return catState{}, false, unavailable
+	}
+	return next, profilesChanged, nil
+}
+
+func validCatSlug(slug string) bool { return len(slug) <= 40 && catSlugRE.MatchString(slug) }
+
+func (b *bridge) catTool(ctx context.Context, args object) (object, error) {
+	if b.db == nil {
+		return nil, problem(503, "Cat storage unavailable")
+	}
+	op := str(args["op"])
+	switch op {
+	case "list_saved":
+		rows, err := b.db.QueryContext(ctx, `SELECT `+savedCatColumns+` FROM saved_cats ORDER BY slug`)
+		if err != nil {
+			return nil, problem(502, "Cannot read saved cats")
+		}
+		defer rows.Close()
+		list := []savedCat{}
+		for rows.Next() {
+			p, err := readSavedCat(rows)
+			if err != nil {
+				return nil, problem(502, "Cannot read saved cats")
+			}
+			list = append(list, p)
+		}
+		if rows.Err() != nil {
+			return nil, problem(502, "Cannot read saved cats")
+		}
+		return object{"cats": list}, nil
+	case "delete_saved":
+		slug := str(args["slug"])
+		if !validCatSlug(slug) {
+			return nil, problem(400, "Invalid cat slug")
+		}
+		if _, err := b.db.ExecContext(ctx, `DELETE FROM saved_cats WHERE slug=?`, slug); err != nil {
+			return nil, problem(502, "Cannot delete saved cat")
+		}
+		if b.ws != nil {
+			b.ws.mu.Lock()
+			b.ws.savedCatsChanged()
+			b.ws.mu.Unlock()
+		}
+		return object{"ok": true}, nil
+	case "get", "update", "load_saved", "reset_blank":
+	default:
+		return nil, problem(400, "Unknown cat operation")
+	}
+	id := str(args["device_id"])
+	if !deviceIDRE.MatchString(id) {
+		return nil, problem(400, "Invalid device ID")
+	}
+	who, err := b.lookupDevice(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.ws != nil {
+		b.ws.mu.Lock()
+	}
+	c, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), op, args)
+	if b.ws != nil {
+		if err == nil && op != "get" {
+			b.ws.catChanged(id, c, profilesChanged)
+		}
+		b.ws.mu.Unlock()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if op != "get" && c.Name != who.Character && b.oc != nil {
+		b.syncCatTitle(ctx, who)
+	}
+	return object{"ok": true, "device_id": id, "cat": c}, nil
+}
+
+func (b *bridge) syncCatTitle(ctx context.Context, who peer) {
+	b.catTitles.Lock()
+	defer b.catTitles.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	sid, err := b.oc.get(who.DeviceID)
+	if err != nil || sid == "" {
+		return
+	}
+	title := echoEarTitle(who.DeviceID, b.catFor(who).Name)
+	if err := b.oc.jsonCall(ctx, http.MethodPatch, "/api/session/"+sid, object{"title": title}, nil); err != nil {
+		log.Print("EchoEar could not update a cat session title")
+	}
+}
+
+func (b *bridge) reassignCats(ctx context.Context, args object) (object, error) {
+	fromID, toID := str(args["from_device_id"]), str(args["to_device_id"])
+	mode := "swap"
+	if raw, ok := args["mode"]; ok {
+		mode = str(raw)
+	}
+	if !deviceIDRE.MatchString(fromID) || !deviceIDRE.MatchString(toID) || strings.EqualFold(fromID, toID) {
+		return nil, problem(400, "Expected two distinct device IDs")
+	}
+	if mode != "move" && mode != "swap" {
+		return nil, problem(400, "Expected mode move or swap")
+	}
+	if b.db == nil {
+		return nil, problem(503, "Cat storage unavailable")
+	}
+	from, err := b.lookupDevice(fromID)
+	if err != nil {
+		return nil, err
+	}
+	to, err := b.lookupDevice(toID)
+	if err != nil {
+		return nil, err
+	}
+	apply := func() error {
+		if b.ws != nil {
+			b.ws.mu.Lock()
+			defer b.ws.mu.Unlock()
+		}
+		nextFrom, nextTo, archived, err := b.transferCats(ctx, from, to, mode)
+		if err != nil {
+			return err
+		}
+		if b.ws != nil {
+			for _, id := range []string{fromID, toID} {
+				if d := b.ws.devices[strings.ToLower(id)]; d != nil && b.ws.active(d) {
+					b.ws.stopCatTurn(d)
+				}
+			}
+			b.ws.catChanged(fromID, nextFrom, false)
+			b.ws.catChanged(toID, nextTo, archived)
+		}
+		return nil
+	}
+	if b.oc != nil {
+		run := b.oc.prepareMappingChange(fromID, toID)
+		if b.ws != nil {
+			b.ws.stopCatTurns(fromID, toID)
+		}
+		err = run(ctx, func() error {
+			if err := apply(); err != nil {
+				return err
+			}
+			for _, who := range []peer{from, to} {
+				b.syncCatTitle(context.WithoutCancel(ctx), who)
+			}
+			return nil
+		})
+	} else {
+		err = apply()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if b.ws != nil {
+		b.ws.mu.Lock()
+		b.ws.catsReassigned(fromID, toID)
+		b.ws.mu.Unlock()
+	}
+	return object{"ok": true, "mode": mode, "from_device_id": fromID, "to_device_id": toID}, nil
+}
+
+func (b *bridge) transferCats(ctx context.Context, from, to peer, mode string) (catState, catState, bool, error) {
+	fromTheme, toTheme := b.voiceTheme(from), b.voiceTheme(to)
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return catState{}, catState{}, false, problem(502, "Cannot reassign cats")
+	}
+	defer tx.Rollback()
+	type assignment struct {
+		cat catState
+		sid string
+	}
+	read := func(who peer, theme string) (assignment, error) {
+		var a assignment
+		key := strings.ToLower(who.DeviceID)
+		if virtualID.MatchString(key) {
+			if err := tx.QueryRowContext(ctx, "SELECT theme FROM virtual_clients WHERE id=?", key).Scan(&theme); err != nil {
+				return a, err
+			}
+		}
+		var err error
+		a.cat, err = b.readActiveCat(ctx, tx, who)
+		if err != nil {
+			return a, err
+		}
+		if !b.voices.allowed(a.cat.Voice) {
+			a.cat.Voice = b.voices.defaultFor(key, theme)
+		}
+		err = tx.QueryRowContext(ctx, "SELECT COALESCE((SELECT session_id FROM sessions WHERE device_id=?),'')", who.DeviceID).Scan(&a.sid)
+		return a, err
+	}
+	var nextFrom, nextTo assignment
+	archived := false
+	err = func() error {
+		source, err := read(from, fromTheme)
+		if err != nil {
+			return err
+		}
+		target, err := read(to, toTheme)
+		if err != nil {
+			return err
+		}
+		nextFrom, nextTo = target, source
+		if mode == "move" {
+			if target.cat.Configured {
+				if err := saveCatProfile(ctx, tx, target.cat, true); err != nil {
+					return err
+				}
+				archived = true
+			}
+			nextFrom = assignment{cat: blankCat()}
+			nextFrom.cat.Voice = b.voices.defaultFor(strings.ToLower(from.DeviceID), "")
+		}
+		for id, a := range map[string]assignment{from.DeviceID: nextFrom, to.DeviceID: nextTo} {
+			key := strings.ToLower(id)
+			if err := writeCat(ctx, tx, key, a.cat); err != nil {
+				return err
+			}
+			if err := writeCatVoice(ctx, tx, key, a.cat.Voice); err != nil {
+				return err
+			}
+			if a.sid == "" {
+				if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE device_id=?", id); err != nil {
+					return err
+				}
+			} else if _, err := tx.ExecContext(ctx, `INSERT INTO sessions VALUES (?,?,?) ON CONFLICT(device_id)
+				DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at`, id, a.sid, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}()
+	if errors.Is(err, sql.ErrNoRows) {
+		return catState{}, catState{}, false, problem(404, "Device not found")
+	}
+	if err != nil {
+		return catState{}, catState{}, false, problem(502, "Cannot reassign cats")
+	}
+	return nextFrom.cat, nextTo.cat, archived, nil
+}
+
+func writeCatVoice(ctx context.Context, tx *sql.Tx, id, voice string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO voices VALUES (?,?) ON CONFLICT(device_id) DO UPDATE SET voice=excluded.voice`, id, voice)
+	return err
+}
+
+func (b *bridge) catAPI(w http.ResponseWriter, r *http.Request, path string) (any, error) {
+	switch {
+	case path == "/api/cats" && r.Method == http.MethodGet:
+		return b.catTool(r.Context(), object{"op": "list_saved"})
+	case path == "/api/cats/reassign" && r.Method == http.MethodPost:
+		args, err := jsonBody(r)
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
+		defer cancel()
+		return b.reassignCats(ctx, args)
+	case strings.HasPrefix(path, "/api/cats/") && r.Method == http.MethodDelete:
+		if _, err := b.catTool(r.Context(), object{"op": "delete_saved", "slug": strings.TrimPrefix(path, "/api/cats/")}); err != nil {
+			return nil, err
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return nil, nil
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/devices/") && strings.HasSuffix(path, "/cat"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/devices/"), "/cat")
+		args, err := jsonBody(r)
+		if err != nil {
+			return nil, err
+		}
+		if _, load := args["slug"]; load {
+			if len(args) != 1 {
+				return nil, problem(400, "Supply either slug or cat fields")
+			}
+			args["op"] = "load_saved"
+		} else {
+			args["op"] = "update"
+		}
+		args["device_id"] = id
+		return b.catTool(r.Context(), args)
+	}
+	return nil, problem(404, "Not found")
+}
+
+func catPromptContext(c catState) string {
+	if !c.Configured {
+		return ", setup"
+	}
+	if c.Personality != "" {
+		return fmt.Sprintf(", vibe: %s", c.Personality)
+	}
+	return ""
+}

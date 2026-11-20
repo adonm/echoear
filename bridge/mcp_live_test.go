@@ -37,7 +37,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	for _, tool := range catalog.Result.Tools {
 		names = append(names, tool.Name)
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "memory", "asset", "timer", "wait_event"}) {
+	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "cat", "memory", "asset", "timer", "wait_event"}) {
 		t.Fatal("unexpected live MCP catalog", names)
 	}
 	t.Logf("MCP catalog: %v", names)
@@ -83,8 +83,9 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	o := newOpenCode(root, api, testDB(t, ":memory:", ""), project, settings)
 	prompt := turnPrompt(peer{DeviceID: id, Character: character}, false, "typed",
 		"Run a read-only screen check. Use Code Mode execute to call tools.echoear.devices({}), tools.echoear.snapshot({device_id: '"+id+
-			"'}), tools.echoear.memory({op: 'list', scope: '"+id+"'}), tools.echoear.asset({op: 'list'}), and tools.echoear.timer({op: 'list', device_id: '"+
-			id+"'}). Return all five tool results from execute, then say one short sentence. Do not call any other tool.")
+			"'}), tools.echoear.memory({op: 'list', scope: '"+id+"'}), tools.echoear.asset({op: 'list'}), tools.echoear.timer({op: 'list', device_id: '"+
+			id+"'}), and tools.echoear.cat({op: 'get', device_id: '"+id+"'}). Return all six tool results from execute, then say one short sentence. Do not call any other tool.",
+		legacyCat(character, "cake"))
 	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +102,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"devices": "ws_connected", "snapshot": "custom_scene", "memory": "entries", "asset": "assets", "timer": "timers"}
+	want := map[string]string{"devices": "ws_connected", "snapshot": "custom_scene", "memory": "entries", "asset": "assets", "timer": "timers", "cat": "configured"}
 	attempted := map[string]bool{}
 	for _, msg := range msgs {
 		for _, part := range msg.Content {
@@ -120,5 +121,5 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatalf("Code Mode results not seen: %v (tool references: %v)", want, attempted)
 	}
-	t.Log("echoear agent completed devices, snapshot, memory, asset, and timer through execute")
+	t.Log("echoear agent completed devices, snapshot, memory, asset, timer, and cat through execute")
 }

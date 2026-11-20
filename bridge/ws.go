@@ -63,6 +63,7 @@ type wsDevice struct {
 	key      string
 	firmware string
 	theme    string
+	cat      catState
 	vol      int
 	pct      int
 	mV       int
@@ -306,7 +307,11 @@ func (h *wsHub) peerSnapshot(sender string) ([]peer, error) {
 
 func (b *bridge) peerSnapshot(sender string) ([]peer, error) {
 	if b.ws == nil {
-		return b.peers.snapshot(sender)
+		list, err := b.peers.snapshot(sender)
+		for i := range list {
+			list[i].Character = b.catFor(list[i]).Name
+		}
+		return list, err
 	}
 	return b.ws.peerSnapshot(sender)
 }
@@ -319,6 +324,7 @@ func (h *wsHub) combinedPeers(sender string) ([]peer, error) {
 	index := make(map[string]int, len(stored))
 	for i, p := range stored {
 		index[strings.ToLower(p.DeviceID)] = i
+		stored[i].Character = h.b.catFor(p).Name
 	}
 	now := time.Now().Unix()
 	for _, d := range h.devices {
@@ -326,6 +332,7 @@ func (h *wsHub) combinedPeers(sender string) ([]peer, error) {
 			continue
 		}
 		p := d.who
+		p.Character = d.cat.Name
 		if d.virtual() {
 			p.IP = ""
 		}
@@ -353,8 +360,10 @@ func (h *wsHub) peerFrame() wsFrame {
 	for i, entry := range p {
 		if d := h.devices[strings.ToLower(list[i].DeviceID)]; d != nil && h.active(d) {
 			entry["ws"], entry["firmware"] = true, d.firmware
+			entry["cat"] = d.cat.catLook
 		} else {
 			entry["ws"] = false
+			entry["cat"] = h.b.catFor(list[i]).catLook
 		}
 	}
 	return textFrame(object{"op": "peers", "devices": p})
@@ -401,6 +410,53 @@ func (h *wsHub) broadcastPeers() {
 	}
 }
 
+// Called under the hub lock, after committing the cat and profile changes.
+func (h *wsHub) catChanged(id string, cat catState, profilesChanged bool) {
+	key := strings.ToLower(id)
+	if d := h.devices[key]; d != nil && h.active(d) {
+		d.cat = cat
+		h.clearView(d)
+		d.agentSetScene = d.busy
+		now := time.Now()
+		h.wake(d, now)
+		h.render(d, now, true)
+	}
+	f := catFrame(id, cat, cat.Voice)
+	for c := range h.clients {
+		if c.role == "web" && (c.scope == nil || c.scope.ID == key) {
+			c.enqueue(f)
+		}
+	}
+	h.broadcastPeers()
+	if profilesChanged {
+		h.savedCatsChanged()
+	}
+}
+
+func catFrame(id string, cat catState, voice string) wsFrame {
+	return textFrame(object{"op": "cat", "device_id": id, "character": cat.Name, "cat": cat.catLook, "voice": voice})
+}
+
+func (h *wsHub) savedCatsChanged() {
+	f := textFrame(object{"op": "saved_cats"})
+	for c := range h.clients {
+		if c.role == "web" && c.scope == nil {
+			c.enqueue(f)
+		}
+	}
+}
+
+func (h *wsHub) catsReassigned(from, to string) {
+	for _, id := range []string{from, to} {
+		f := textFrame(object{"op": "cat_reassigned", "device_id": id})
+		for c := range h.clients {
+			if c.role == "web" && (c.scope == nil || c.scope.ID == id) {
+				c.enqueue(f)
+			}
+		}
+	}
+}
+
 func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	phone := phoneID.MatchString(ev.DeviceID)
 	var v virtualClient
@@ -440,6 +496,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	ip, _ := lanIP(host, true) // Advertised IP never replaces an HTTP registration.
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: peer{DeviceID: ev.DeviceID, Character: character, IP: ip},
 		firmware: shortText(ev.Firmware, 24, false), theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
+	d.cat = h.b.catFor(d.who)
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
 		h.cancelTurn(old)
@@ -450,6 +507,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	h.devices[d.key], c.device, c.role = d, d, ev.Role
 	h.render(d, now, true)
+	if c.role == "web" {
+		c.enqueue(catFrame(d.who.DeviceID, d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme())))
+	}
 	h.push(d, object{"op": "volume", "level": d.vol}, true)
 	h.push(d, object{"op": "power", "brightness": 85}, true)
 	previous := h.peers
@@ -462,10 +522,11 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		}
 	}
 	if h.b.worker != nil {
+		name := d.cat.Name
 		go func() {
 			ctx, cancel := context.WithTimeout(c.ctx, ttsWait)
 			defer cancel()
-			h.b.warmCharacter(ctx, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), character)
+			h.b.warmCharacter(ctx, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), name)
 		}()
 	}
 }
@@ -521,7 +582,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	case d.drawer && mood == "idle":
 		peers, _ := h.combinedPeers(d.who.DeviceID)
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
-		view = drawerScene(d.who.Character, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
+		view = drawerScene(d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
 	case d.card != nil && (mood == "idle" || mood == "speaking" || mood != "sleepy" && d.card.actions["cat"].kind == "dismiss"):
 		view = *d.card
 	case d.customScene && mood != "sleepy":
@@ -529,11 +590,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	case d.view != nil && mood != "sleepy" && mood != "listening":
 		view = *d.view
 	default:
-		theme := d.theme
-		if theme == "" {
-			theme = d.who.Character
-		}
-		view = catScene(theme, pose)
+		view = catScene(d.cat, pose)
 	}
 	d.pose = pose
 	d.rev++
@@ -795,14 +852,6 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 			h.chime(d, "tap")
 			h.render(d, now, false)
 		}
-	case "new":
-		h.cancelLocalTurn(d)
-		h.clearView(d)
-		var reset func(context.Context) error
-		if h.b.oc != nil {
-			reset = h.b.oc.prepareReset(d.who.DeviceID)
-		}
-		h.beginTurn(d, now, false, func(ctx context.Context, id uint64) { h.resetTurn(ctx, d, id, reset) })
 	case "listen", "reply", "reply_to":
 		if !d.recAt.IsZero() {
 			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)

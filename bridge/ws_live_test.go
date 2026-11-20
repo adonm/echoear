@@ -77,8 +77,13 @@ func TestLiveWebSocket(t *testing.T) {
 		t.Fatal("live mirror patch differs from the device")
 	}
 	from.json(t, object{"ev": "tap", "x": 180, "y": 300})
-	from.until(t, func(f wsFrame) bool { return hasWS("patch", `"id":"new"`)(f) || hasWS("scene", `"id":"new"`)(f) })
-	from.json(t, object{"ev": "tap", "id": "cat", "x": 125, "y": 106})
+	drawer := from.until(t, func(f wsFrame) bool {
+		return hasWS("patch", `"drawer-title"`)(f) || hasWS("scene", `"drawer-title"`)(f)
+	})
+	if bytes.Contains(drawer.data, []byte(`"id":"new"`)) {
+		t.Fatal("hardware drawer offered reset")
+	}
+	from.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 106})
 	from.until(t, hasWS("scene", `"cat-ring"`))
 	then := object{"patch": localSet("caption", "Live reset")}
 	result := liveJSON[struct{ Result struct{ IsError bool } }](t, c, "/mcp", object{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -104,8 +109,11 @@ func TestLiveWebSocket(t *testing.T) {
 	t.Log("live cat drawer and local tap, timed patch, mirror, and exit verified")
 
 	phone := testConnectWS(t, base, token, true)
-	phone.json(t, object{"ev": "hello", "role": "web", "device_id": phoneID, "character": "Plum", "firmware": "web", "volume": 65})
-	phone.until(t, hasWS("scene", `"#D8C7FF"`))
+	phone.json(t, object{"ev": "hello", "role": "web", "device_id": phoneID, "character": "New Cat", "firmware": "web", "volume": 65})
+	face := phone.until(t, hasWS("scene", `"cat-ring"`))
+	if !hasWS("scene", `"bg":"#F3F4F6"`)(face) || !hasWS("scene", "Say hi to design me!")(face) {
+		t.Fatal("live Phone Cat did not start blank")
+	}
 	viewer.until(t, hasWS("peers", phoneID))
 	pcm := bytes.Repeat([]byte{30, 0}, 320)
 	from.json(t, object{"ev": "rec_start", "target": phoneID})
