@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -54,7 +53,7 @@ func apiObjects(t *testing.T, url, key string) []any {
 
 func TestVirtualClientsPersistenceAndDeviceMerge(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.virtual = loadVirtual(filepath.Join(dir, "virtual_clients.json"))
+		b.virtual = virtualStore(b.db)
 	})
 	if got := apiObjects(t, base+"/api/virtual-clients", "virtual_clients"); len(got) != 0 {
 		t.Fatal(got)
@@ -70,8 +69,7 @@ func TestVirtualClientsPersistenceAndDeviceMerge(t *testing.T) {
 	if v["character"] != "Violet" || v["theme"] != "plum" || v["online"] != false || !virtualID.MatchString(id) || v["created_at"] == "" {
 		t.Fatal(v)
 	}
-	reload := loadVirtual(b.virtual.path)
-	if reload.data[id].Character != "Violet" {
+	if v, _, err := virtualStore(b.db).get(id); err != nil || v.Character != "Violet" {
 		t.Fatal("virtual client not persisted")
 	}
 	physical := testConnectWS(t, base, "unit", false)
@@ -92,7 +90,7 @@ func TestVirtualClientsPersistenceAndDeviceMerge(t *testing.T) {
 	testRequest(t, "DELETE", base+"/api/virtual-clients/"+id, "unit", nil, 204)
 	virtual.until(t, func(f wsFrame) bool { return f.op == wsClose })
 	testRequest(t, "DELETE", base+"/api/virtual-clients/"+id, "unit", nil, 404)
-	if len(loadVirtual(b.virtual.path).data) != 0 || len(apiObjects(t, base+"/api/devices", "devices")) != 1 {
+	if clients, err := virtualStore(b.db).all(); err != nil || len(clients) != 0 || len(apiObjects(t, base+"/api/devices", "devices")) != 1 {
 		t.Fatal("deleted virtual client still visible")
 	}
 }
@@ -144,9 +142,9 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	}))
 	defer oc.Close()
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.virtual = loadVirtual(filepath.Join(dir, "virtual_clients.json"))
-		b.tunnels = newTunnelManager(b, filepath.Join(dir, "tunnels.json"), "mock-opentunnel", r)
-		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
+		b.virtual = virtualStore(b.db)
+		b.tunnels = newTunnelManager(b, "mock-opentunnel", r)
+		b.history = &chatHistory{b.db}
 		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `{"transcript":"Voice to Cake."}`)
 		})
@@ -155,7 +153,7 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}},
-			filepath.Join(dir, "sessions.json"), dir, settings)
+			b.db, dir, settings)
 	})
 	defer b.tunnels.shutdown()
 	id := str(testObject(t, testRequest(t, "POST", base+"/api/virtual-clients", "unit", object{"character": "Plum", "theme": "plum"}, 201))["id"])
@@ -176,14 +174,13 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	if details := apiObjects(t, base+"/api/devices", "devices")[0].(object)["tunnel"].(object); details["active"] != true {
 		t.Fatal("unified list missing tunnel")
 	}
-	stat, err := os.Stat(b.tunnels.store.path)
-	if err != nil || stat.Mode().Perm() != 0600 {
-		t.Fatal("insecure tunnel file permissions", err)
-	}
-	restored := newTunnelManager(b, b.tunnels.store.path, "mock-opentunnel", r)
+	restored := newTunnelManager(b, "mock-opentunnel", r)
 	defer restored.shutdown()
 	b.tunnels.mu.Lock()
-	before := b.tunnels.store.data[id]
+	before, _, err := b.tunnels.store.get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	live := b.tunnels.live[id]
 	delete(b.tunnels.live, id)
 	b.tunnels.mu.Unlock()
@@ -316,7 +313,8 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 }
 
 func TestVirtualCatSessionAliasMigration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sessions.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
 	initial := map[string]string{
 		"scope-virt-12345678": "ses_tunnel",
 		"scope-virt-abcdef12": "ses_old",
@@ -328,15 +326,16 @@ func TestVirtualCatSessionAliasMigration(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	o := newOpenCode(ctx, upstream{}, path, "", ocSettings{})
+	db := testDB(t, ":memory:", dir)
+	o := newOpenCode(ctx, upstream{}, db, "", ocSettings{})
 	for id, want := range map[string]string{"virt-12345678": "ses_tunnel", "virt-abcdef12": "ses_lan", "echoear-physical": "ses_cake"} {
 		got, err := o.get(id)
 		if err != nil || got != want {
 			t.Fatalf("%s did not keep its existing session", id)
 		}
 	}
-	if got := loadStore(path, func(_, _ string) bool { return true }); len(got.data) != 3 {
-		t.Fatal("legacy aliases were not removed from the session map")
+	if got, err := sessionStore(db).all(); err != nil || len(got) != 5 {
+		t.Fatal("legacy aliases were not preserved alongside canonical sessions")
 	}
 }
 
@@ -420,13 +419,13 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 	_, base := wsHarness(t, func(b *bridge, dir string) {
-		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
+		b.history = &chatHistory{b.db}
 		file := filepath.Join(dir, "service.json")
 		if err := writeMap(file, object{"url": upstreamServer.URL, "password": "unit"}); err != nil {
 			t.Fatal(err)
 		}
 		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: file, read: openCodeEndpoint}},
-			filepath.Join(dir, "sessions.json"), dir, ocSettings{})
+			b.db, dir, ocSettings{})
 		if err := b.oc.save("echoear-history", "ses_active"); err != nil {
 			t.Fatal(err)
 		}
@@ -500,7 +499,7 @@ func TestAgentSpeechSuppressesTerminalProse(t *testing.T) {
 			t.Fatal(err)
 		}
 		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}},
-			filepath.Join(dir, "sessions.json"), dir, ocSettings{})
+			b.db, dir, ocSettings{})
 	})
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, id, "Cake")

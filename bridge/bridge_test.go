@@ -228,8 +228,9 @@ func TestAudioStream(t *testing.T) {
 
 func TestStateAndDirectMessage(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "devices.json")
-	p := loadPeers(path)
+	path := filepath.Join(dir, "echoear.db")
+	db := testDB(t, path, "")
+	p := peers{deviceStore(db)}
 	mint := peer{"echoear-mint", "Mint", "127.0.0.2", 8080, time.Now().Unix()}
 	if err := p.register(mint); err != nil {
 		t.Fatal(err)
@@ -242,7 +243,7 @@ func TestStateAndDirectMessage(t *testing.T) {
 	if _, err := p.touch("local", "127.0.0.1", ""); err != nil {
 		t.Fatal(err)
 	}
-	others, err := loadPeers(path).snapshot("cake")
+	others, err := (peers{deviceStore(db)}).snapshot("cake")
 	if err != nil || !slices.Equal(targets(others, "everyone"), []peer{mint}) {
 		t.Fatalf("bad peer snapshot %+v %v", others, err)
 	}
@@ -261,7 +262,7 @@ func TestStateAndDirectMessage(t *testing.T) {
 	if err := p.register(mint); err != nil {
 		t.Fatal(err)
 	}
-	next, err := loadPeers(path).snapshot("")
+	next, err := (peers{deviceStore(db)}).snapshot("")
 	if err != nil || !slices.Equal(next, []peer{mint}) || others[0].IP == mint.IP {
 		t.Fatal("register didn't overwrite or modified prior snapshot")
 	}
@@ -269,30 +270,10 @@ func TestStateAndDirectMessage(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal("state mode", err)
 	}
-	blocked := filepath.Join(dir, "blocked.json")
-	if err := os.Mkdir(blocked, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeMap(blocked, object{"new": 2}); err == nil {
-		t.Fatal("unexpected successful replacement of directory")
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 2 || !entries[0].IsDir() {
-		t.Fatal("old state destroyed or temp file leaked")
-	}
-	for _, broken := range []string{`{"mint":[]}`, `{"mint":{"device_id":"mint","character":"Mint","ip":"127.0.0.2","port":80}}`,
-		`{"mint":{"device_id":"mint","character":"Mint","ip":"203.0.113.4","port":80,"last_seen":10}}`} {
-		if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := loadPeers(path).snapshot(""); err == nil {
-			t.Fatal("accepted invalid peer record")
-		}
-	}
 }
 
 func TestBridgeAuthAndBody(t *testing.T) {
-	b := &bridge{token: "correct", peers: loadPeers(filepath.Join(t.TempDir(), "devices.json"))}
+	b := &bridge{token: "correct", peers: peers{deviceStore(testDB(t, ":memory:", ""))}}
 	for _, path := range []string{"/api/devices", "/api/audio/unknown", "/api/intercom", "/ota/version.json"} {
 		for _, tokens := range [][]string{nil, {"wrong"}, {"correct", "correct"}} {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -390,7 +371,7 @@ func TestOpenCodeStreamingAndFallback(t *testing.T) {
 				t.Fatal(err)
 			}
 			o := newOpenCode(ctx, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}},
-				filepath.Join(t.TempDir(), "sessions.json"), t.TempDir(), ocSettings{})
+				testDB(t, ":memory:", ""), t.TempDir(), ocSettings{})
 			var heard []string
 			got, err := o.RunTurnStreaming(ctx, "ses1", "test", func(s string) {
 				heard = append(heard, s)

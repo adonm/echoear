@@ -22,6 +22,7 @@ import (
 )
 
 type bridge struct {
+	db       *bridgeDB
 	root     context.Context
 	token    string
 	peers    peers
@@ -38,6 +39,7 @@ type bridge struct {
 	virtual  *store[virtualClient]
 	tunnels  *tunnelManager
 	history  *chatHistory
+	timers   *timerManager
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
@@ -659,6 +661,12 @@ func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any
 func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any, error) {
 	ctx := r.Context()
 	switch {
+	case path == "/api/memory" || path == "/api/memory/scopes":
+		return b.memoryAPI(w, r, path)
+	case path == "/api/assets" || strings.HasPrefix(path, "/api/assets/"):
+		return b.assetAPI(w, r, path)
+	case path == "/api/timers" || strings.HasPrefix(path, "/api/timers/"):
+		return b.timerAPI(w, r, path, "")
 	case path == "/api/virtual-clients" || strings.HasPrefix(path, "/api/virtual-clients/"):
 		return b.virtualAPI(w, r, path)
 	case path == "/api/tunnel/status" || path == "/api/tunnels" || strings.HasPrefix(path, "/api/tunnels/"):

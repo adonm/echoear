@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -31,37 +28,43 @@ func newChat(role, sender, text, source string) chatEntry {
 		Source: source, Timestamp: time.Now().UTC()}
 }
 
-type chatHistory struct {
-	mu      sync.Mutex
-	path    string
-	entries map[string][]chatEntry
+type chatHistory struct{ db *bridgeDB }
+
+const insertChat = `INSERT INTO chat_events (id,device_id,role,sender,text,source,scene_title,tool_summary,ts_ms)
+	VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`
+
+func chatValues(id string, e chatEntry) []any {
+	return []any{e.ID, id, e.Role, e.Sender, e.Text, e.Source, e.SceneTitle, e.ToolSummary, e.Timestamp.UnixMilli()}
 }
 
-func loadChatHistory(path string) *chatHistory {
-	h := &chatHistory{path: path, entries: make(map[string][]chatEntry)}
-	if raw, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(raw, &h.entries); err != nil || h.entries == nil {
-			log.Print("EchoEar chat event file is invalid; using in-memory history")
-			h.entries, h.path = make(map[string][]chatEntry), ""
-		}
-		for id, entries := range h.entries {
-			h.entries[id] = entries[max(0, len(entries)-localChatLimit):]
-		}
-	} else if !os.IsNotExist(err) {
-		log.Print("EchoEar chat event file is unreadable; using in-memory history")
-		h.path = ""
-	}
-	return h
-}
-
-func (h *chatHistory) add(id string, entry chatEntry) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	all := append(h.entries[id], entry)
-	h.entries[id] = all[max(0, len(all)-localChatLimit):]
-	if h.path != "" && writeMap(h.path, h.entries) != nil {
+func (h *chatHistory) add(id string, e chatEntry) {
+	if _, err := h.db.Exec(insertChat, chatValues(id, e)...); err != nil {
 		log.Print("EchoEar could not persist chat events")
 	}
+}
+
+func (h *chatHistory) list(ctx context.Context, id string) ([]chatEntry, error) {
+	rows, err := h.db.QueryContext(ctx, `SELECT id,role,sender,text,source,scene_title,tool_summary,ts_ms
+		FROM chat_events WHERE device_id=? ORDER BY ts_ms DESC,rowid DESC LIMIT ?`, id, localChatLimit)
+	if err != nil {
+		return nil, problem(502, "Cannot read chat events")
+	}
+	defer rows.Close()
+	var entries []chatEntry
+	for rows.Next() {
+		var e chatEntry
+		var ts int64
+		if err := rows.Scan(&e.ID, &e.Role, &e.Sender, &e.Text, &e.Source, &e.SceneTitle, &e.ToolSummary, &ts); err != nil {
+			return nil, problem(502, "Cannot read chat events")
+		}
+		e.Timestamp = time.UnixMilli(ts).UTC()
+		entries = append(entries, e)
+	}
+	if rows.Err() != nil {
+		return nil, problem(502, "Cannot read chat events")
+	}
+	slices.Reverse(entries)
+	return entries, nil
 }
 
 func (b *bridge) chat(id string, entry chatEntry, persist bool) {
@@ -139,14 +142,16 @@ func (b *bridge) messages(ctx context.Context, id string) (any, error) {
 		}
 	}
 	if b.history != nil {
-		b.history.mu.Lock()
-		for _, entry := range b.history.entries[id] {
+		events, err := b.history.list(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range events {
 			if !seen[entry.ID] {
 				entries = append(entries, entry)
 				seen[entry.ID] = true
 			}
 		}
-		b.history.mu.Unlock()
 	}
 	slices.SortStableFunc(entries, func(a, b chatEntry) int { return a.Timestamp.Compare(b.Timestamp) })
 	return object{"device_id": id, "messages": entries}, nil

@@ -37,7 +37,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	for _, tool := range catalog.Result.Tools {
 		names = append(names, tool.Name)
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "wait_event"}) {
+	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "memory", "asset", "timer", "wait_event"}) {
 		t.Fatal("unexpected live MCP catalog", names)
 	}
 	t.Logf("MCP catalog: %v", names)
@@ -80,9 +80,11 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := newOpenCode(root, api, filepath.Join(t.TempDir(), "sessions.json"), project, settings)
+	o := newOpenCode(root, api, testDB(t, ":memory:", ""), project, settings)
 	prompt := turnPrompt(peer{DeviceID: id, Character: character}, false, "typed",
-		"Run a read-only screen check. Use Code Mode execute to call both tools.echoear.devices({}) and tools.echoear.snapshot({device_id: '"+id+"'}). Return both tool results from execute, then say one short sentence. Do not call any other tool.")
+		"Run a read-only screen check. Use Code Mode execute to call tools.echoear.devices({}), tools.echoear.snapshot({device_id: '"+id+
+			"'}), tools.echoear.memory({op: 'list', scope: '"+id+"'}), tools.echoear.asset({op: 'list'}), and tools.echoear.timer({op: 'list', device_id: '"+
+			id+"'}). Return all five tool results from execute, then say one short sentence. Do not call any other tool.")
 	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -99,19 +101,24 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotDevices, gotSnapshot := false, false
+	want := map[string]string{"devices": "ws_connected", "snapshot": "custom_scene", "memory": "entries", "asset": "assets", "timer": "timers"}
+	attempted := map[string]bool{}
 	for _, msg := range msgs {
 		for _, part := range msg.Content {
-			if part.Type != "tool" || part.Name != "execute" || part.State.Status != "completed" ||
-				!bytes.Contains(part.State.Content, []byte(id)) {
+			if part.Type != "tool" || part.Name != "execute" || part.State.Status != "completed" {
 				continue
 			}
-			gotDevices = gotDevices || bytes.Contains(part.State.Input, []byte("tools.echoear.devices")) && bytes.Contains(part.State.Content, []byte("ws_connected"))
-			gotSnapshot = gotSnapshot || bytes.Contains(part.State.Input, []byte("tools.echoear.snapshot")) && bytes.Contains(part.State.Content, []byte("custom_scene"))
+			for tool, field := range want {
+				called := bytes.Contains(part.State.Input, []byte("tools.echoear."+tool))
+				attempted[tool] = attempted[tool] || called
+				if called && bytes.Contains(part.State.Content, []byte(field)) {
+					delete(want, tool)
+				}
+			}
 		}
 	}
-	if !gotDevices || !gotSnapshot {
-		t.Fatalf("Code Mode results not seen (devices=%t, snapshot=%t)", gotDevices, gotSnapshot)
+	if len(want) != 0 {
+		t.Fatalf("Code Mode results not seen: %v (tool references: %v)", want, attempted)
 	}
-	t.Log("echoear agent completed tools.echoear.devices and tools.echoear.snapshot through execute")
+	t.Log("echoear agent completed devices, snapshot, memory, asset, and timer through execute")
 }

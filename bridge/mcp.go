@@ -138,6 +138,10 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 			if errors.As(err, &conflict) {
 				out["rev"] = conflict.rev
 			}
+			var version *versionConflict
+			if errors.As(err, &version) {
+				out["version"] = version.version
+			}
 		}
 		wire, _ := json.Marshal(out)
 		result = object{"content": []object{{"type": "text", "text": string(wire)}}, "structuredContent": out, "isError": err != nil}
@@ -217,7 +221,9 @@ var mcpTools = func() []object {
 		"patch": ref("patch"), "state": str("Switch to this named state before applying patch or move"),
 		"move": move, "revert_ms": integer("Undo visual attributes changed by move or patch.set, and any background change", 50, 10000),
 		"after_ms": integer("Delay before then; required with then, at most two chained delays", 50, 10000), "then": ref("reaction"),
-		"ask": object{"type": "string", "maxLength": 240, "description": "Start a new AI turn only when needed"}, "exit": object{"type": "boolean"}})
+		"ask": object{"type": "string", "maxLength": 240, "description": "Start a new AI turn only when needed"}, "exit": object{"type": "boolean"},
+		"broadcast": object{"type": "boolean", "description": "Apply the local visual/audio reaction to all connected cats in the current room"},
+		"store":     schema(object{"scope": str("shared, a device ID, or game:<slug>"), "key": str("Memory key"), "value": object{}}, "scope", "key", "value")})
 	reaction["dependentRequired"] = object{"after_ms": []string{"then"}, "then": []string{"after_ms"}}
 	withSceneDefs := func(in object) object {
 		in["$defs"] = object{"node": schema(node, "id", "t"), "reaction": reaction, "patch": schema(patch)}
@@ -232,6 +238,7 @@ var mcpTools = func() []object {
 		tool("snapshot", "Read the device status, 360×360 keyed scene and last 20 events.", withID(object{})),
 		tool("scene", "Draw geometric shapes and ASCII text on a 360×360 screen, or restore the cat face. Use tap and cycle for local reactions; move a node or group and undo with revert_ms. Use say or chime for immediate audio.",
 			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states, "chime": chime, "say": say,
+				"room": str("Join a live multiplayer room by slug"), "asset": str("Load saved visuals by name"), "save_as": str("Save sanitized visuals as this asset name"),
 				"preset": object{"type": "string", "enum": []string{"face"}}}))),
 		tool("patch", "Update visuals or local reactions by node ID; snapshot again if expected_rev conflicts.",
 			withSceneDefs(withID(patchArgs))),
@@ -241,6 +248,16 @@ var mcpTools = func() []object {
 			schema(object{"from_device_id": str("Sender ID"), "to_device_id": str("Recipient ID or all"), "text": str("Message to speak")}, "from_device_id", "to_device_id", "text")),
 		tool("control", "Set a connected device's volume, put it to sleep, or wake it. Supply volume, sleep, or both.",
 			withID(object{"volume": integer("Speaker volume", 0, 100), "sleep": object{"type": "boolean", "description": "True dims and sleeps; false wakes"}})),
+		tool("memory", "List, get, set or delete persistent JSON for a device, shared, or a game room. Use expected_version to prevent lost updates.",
+			schema(object{"op": object{"enum": []string{"list", "get", "set", "delete"}}, "scope": str("shared, a device ID, or game:<slug>"),
+				"key": str("Memory key"), "value": object{}, "expected_version": integer("Zero requires a new key; otherwise require this version", 0, 1<<53-1)}, "op", "scope")),
+		tool("asset", "Save, list, get or delete reusable scene visuals and local reactions by name.",
+			withSceneDefs(schema(object{"op": object{"enum": []string{"save", "list", "get", "delete"}}, "name": str("Asset slug"),
+				"kind": object{"enum": []string{"scene", "nodes"}}, "author": str("Optional author"), "bg": bg, "title": title, "nodes": nodes, "states": states}, "op"))),
+		tool("timer", "Set, list or cancel restart-safe timers. Default firing is local; wake_agent starts a new bounded turn instead.",
+			withID(object{"op": object{"enum": []string{"set", "list", "cancel"}}, "id": str("Timer ID to cancel"), "all": object{"type": "boolean"},
+				"in_seconds": integer("Delay in seconds; at least 30 for wake_agent", 1, 86400), "at": str("RFC3339 time within 24 hours, instead of in_seconds"),
+				"label": str("Short timer label"), "say": say, "chime": chime, "wake_agent": object{"type": "boolean"}}, "op")),
 		tool("wait_event", "Wait for input needed by the current turn; use local reactions for regular controls. On timeout or cancellation, event is null.",
 			withID(object{"after_cursor": integer("Last cursor seen; defaults to current cursor", 0, 1<<53-1),
 				"timeout_ms": integer("Defaults to 15000; clamped to 60000", 0, 60000)})),
@@ -415,6 +432,7 @@ func (b *bridge) lookupDevice(id string) (peer, error) {
 func (h *wsHub) deviceStatus(entry object, id string) {
 	key := strings.ToLower(id)
 	entry["ws_connected"], entry["ws"], entry["mode"] = false, false, "offline"
+	entry["room"] = ""
 	entry["battery_pct"], entry["volume"], entry["scene_rev"], entry["event_cursor"] = nil, nil, uint64(0), uint64(0)
 	if entry["online"] == true {
 		entry["mode"] = "http"
@@ -426,13 +444,14 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
 		_, rev := d.sceneState()
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, rev, d.firmware
+		entry["room"] = d.room
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct
 		}
 	}
 }
 
-var mcpDeviceFields = []string{"device_id", "character", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "scene_rev", "event_cursor", "theme"}
+var mcpDeviceFields = []string{"device_id", "character", "kind", "online", "ws_connected", "mode", "battery_pct", "volume", "scene_rev", "event_cursor", "theme", "room"}
 
 func mcpDevice(entry object) object {
 	out := make(object, len(mcpDeviceFields))
@@ -456,6 +475,14 @@ func mcpUint(args object, key string) (*uint64, error) {
 }
 
 func (b *bridge) callMCP(ctx context.Context, name string, args object) (object, error) {
+	switch name {
+	case "memory":
+		return b.memory(ctx, args, false)
+	case "asset":
+		return b.asset(ctx, args)
+	case "timer":
+		return b.timerMCP(ctx, args)
+	}
 	if b.ws == nil {
 		return nil, problem(503, "Device hub unavailable")
 	}
@@ -503,6 +530,15 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 	case "scene", "patch":
 		var say, chime string
 		if name == "scene" {
+			if _, present := args["asset"]; present {
+				if args["preset"] != nil {
+					return nil, problem(400, "Use asset or preset, not both")
+				}
+				args, err = b.sceneAsset(ctx, args)
+				if err != nil {
+					return nil, err
+				}
+			}
 			if raw, ok := args["say"]; ok {
 				say, err = spokenText(str(raw))
 				if err != nil {
@@ -516,7 +552,7 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 				}
 			}
 		}
-		result, err := b.ws.mcpScene(id, name, args, chime)
+		result, err := b.ws.mcpScene(ctx, id, name, args, chime)
 		if err == nil && name == "scene" {
 			title := shortText(args["title"], 48, false)
 			text := "Showed a scene"
@@ -615,7 +651,7 @@ func listNodes(v any) ([]object, error) {
 func visualNode(raw object, partial bool) (object, error) {
 	n := object{}
 	if id := str(raw["id"]); !partial {
-		if !validSceneID(id) || id == exitNode {
+		if !validSceneID(id) || id == exitNode || id == "echoear-title" {
 			return nil, problem(400, "Invalid or reserved node ID")
 		}
 		n["id"] = id
@@ -677,7 +713,7 @@ func visualNode(raw object, partial bool) (object, error) {
 	return n, nil
 }
 
-func (h *wsHub) mcpScene(id, method string, args object, chime string) (object, error) {
+func (h *wsHub) mcpScene(ctx context.Context, id, method string, args object, chime string) (object, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.devices[strings.ToLower(id)]
@@ -696,12 +732,15 @@ func (h *wsHub) mcpScene(id, method string, args object, chime string) (object, 
 			h.chime(d, chime)
 		}
 		_, rev := d.sceneState()
-		return object{"ok": true, "device_id": id, "rev": rev, "event_cursor": h.ring(d.key).cursor}
+		return object{"ok": true, "device_id": id, "rev": rev, "room": d.room, "event_cursor": h.ring(d.key).cursor}
 	}
 	now := time.Now()
 	if preset, ok := args["preset"]; ok && method == "scene" {
 		if preset != "face" {
 			return nil, problem(400, "Unknown preset")
+		}
+		if args["save_as"] != nil || args["room"] != nil {
+			return nil, problem(400, "The face preset cannot be saved or join a room")
 		}
 		h.clearView(d)
 		d.agentSetScene = d.busy
@@ -723,7 +762,17 @@ func (h *wsHub) mcpScene(id, method string, args object, chime string) (object, 
 	if err != nil {
 		return nil, err
 	}
+	room := str(args["room"])
+	if _, supplied := args["room"]; supplied && !slugRE.MatchString(room) {
+		return nil, problem(400, "Invalid room slug")
+	}
+	if name, supplied := args["save_as"]; supplied {
+		if _, err := h.b.saveAsset(ctx, str(name), "scene", d.who.Character, view, states); err != nil {
+			return nil, err
+		}
+	}
 	h.clearLocalScene(d)
+	d.room = room
 	d.states = states
 	h.showCustomScene(d, view, now, true)
 	return status(), nil

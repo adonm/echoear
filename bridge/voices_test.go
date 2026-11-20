@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"net/http/httptest"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
@@ -40,9 +39,11 @@ func TestSpeechClipsCacheByVoice(t *testing.T) {
 
 func TestDeviceVoiceDefaults(t *testing.T) {
 	b, _ := wsHarness(t, func(b *bridge, dir string) {
-		b.voices = loadVoices(filepath.Join(dir, "voices.json"), "")
-		b.virtual = loadVirtual(filepath.Join(dir, "virtual_clients.json"))
-		b.virtual.data["virt-01234567"] = virtualClient{ID: "virt-01234567", Character: "Green Cat", Theme: "mint"}
+		b.voices = deviceVoiceStore(b.db, "")
+		b.virtual = virtualStore(b.db)
+		if err := b.virtual.save("virt-01234567", virtualClient{ID: "virt-01234567", Character: "Green Cat", Theme: "mint"}, false); err != nil {
+			t.Fatal(err)
+		}
 	})
 	for _, tc := range []struct {
 		device, character string
@@ -58,7 +59,7 @@ func TestDeviceVoiceDefaults(t *testing.T) {
 			t.Errorf("%s: got voice %q, want %q", tc.device, got, tc.want)
 		}
 	}
-	configured := loadVoices(b.voices.path, emmaVoice)
+	configured := deviceVoiceStore(b.db, emmaVoice)
 	if !configured.allowed(heartVoice) ||
 		configured.get("echoear-33d8", "cake") != emmaVoice ||
 		configured.get("echoear-2cac", "mint") != fableVoice {
@@ -68,8 +69,8 @@ func TestDeviceVoiceDefaults(t *testing.T) {
 
 func TestDeviceVoiceAPI(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.voices = loadVoices(filepath.Join(dir, "voices.json"), emmaVoice)
-		b.virtual = loadVirtual(filepath.Join(dir, "virtual_clients.json"))
+		b.voices = deviceVoiceStore(b.db, emmaVoice)
+		b.virtual = virtualStore(b.db)
 	})
 	cake := testConnectWS(t, base, "unit", false)
 	cake.hello(t, "echoear-33d8", "Cake")
@@ -87,7 +88,7 @@ func TestDeviceVoiceAPI(t *testing.T) {
 	if got["device_id"] != "ECHOEAR-33D8" || got["voice"] != fableVoice {
 		t.Fatalf("unexpected update response: %v", got)
 	}
-	if reloaded := loadVoices(b.voices.path, emmaVoice); reloaded.data["echoear-33d8"] != fableVoice {
+	if voice, _, err := voiceStore(b.db).get("echoear-33d8"); err != nil || voice != fableVoice {
 		t.Fatal("override not persisted under lowercase device ID")
 	}
 	if d := apiObjects(t, base+"/api/devices", "devices")[0].(object); d["voice"] != fableVoice {
@@ -122,7 +123,7 @@ func TestDeviceVoiceAPI(t *testing.T) {
 
 func TestDrawerVoiceToggle(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.voices = loadVoices(filepath.Join(dir, "voices.json"), heartVoice)
+		b.voices = deviceVoiceStore(b.db, heartVoice)
 	})
 	const id = "echoear-33d8"
 	c := testConnectWS(t, base, "unit", false)
@@ -134,7 +135,7 @@ func TestDrawerVoiceToggle(t *testing.T) {
 		c.json(t, object{"ev": "tap", "id": "voice", "x": 180, "y": 317})
 		c.until(t, hasWS("chime", `"kind":"tap"`))
 		c.until(t, hasWS("patch", "Voice: "+label))
-		if reloaded := loadVoices(b.voices.path, heartVoice); reloaded.get(id, "cake") != voice {
+		if reloaded := deviceVoiceStore(b.db, heartVoice); reloaded.get(id, "cake") != voice {
 			t.Errorf("drawer did not persist %s", label)
 		}
 	}

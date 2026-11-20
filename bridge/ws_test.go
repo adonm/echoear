@@ -176,7 +176,8 @@ func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
 	t.Helper()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
-	b := &bridge{root: ctx, token: "unit", peers: loadPeers(filepath.Join(dir, "devices.json")), peerHTTP: pooledClient()}
+	db := testDB(t, filepath.Join(dir, "echoear.db"), "")
+	b := &bridge{root: ctx, token: "unit", db: db, peers: peers{deviceStore(db)}, peerHTTP: pooledClient()}
 	if setup != nil {
 		setup(b, dir)
 	}
@@ -612,7 +613,7 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 			t.Fatal(err)
 		}
 		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}},
-			filepath.Join(dir, "sessions.json"), dir, ocSettings{})
+			b.db, dir, ocSettings{})
 	})
 	dev := testConnectWS(t, base, "unit", false)
 	dev.hello(t, "echoear-a", "Cake")

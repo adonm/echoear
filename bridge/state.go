@@ -5,12 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -25,86 +22,6 @@ var (
 )
 
 func runeLen(s string) int { return utf8.RuneCountInString(s) }
-
-type store[T comparable] struct {
-	path string
-	mu   sync.Mutex
-	data map[string]T // nil means invalid on disk; never replace it silently.
-}
-
-func loadStore[T comparable](path string, valid func(string, T) bool) *store[T] {
-	s := &store[T]{path: path}
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		s.data = map[string]T{}
-	} else if err == nil && json.Unmarshal(raw, &s.data) == nil {
-		for key, value := range s.data {
-			if !deviceIDRE.MatchString(key) || !valid(key, value) {
-				s.data = nil
-				break
-			}
-		}
-	} else {
-		s.data = nil
-	}
-	return s
-}
-
-func (s *store[T]) invalid() error { return problem(502, "Invalid "+filepath.Base(s.path)) }
-
-func writeMap(path string, value any) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".echoear-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	defer f.Close()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if err := json.NewEncoder(f).Encode(value); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
-}
-
-// saveLocked rolls back the in-memory record if the replacement fails.
-func (s *store[T]) saveLocked(key string, value T, remove bool) error {
-	if s.data == nil {
-		return s.invalid()
-	}
-	old, existed := s.data[key]
-	if remove {
-		if !existed {
-			return nil
-		}
-		delete(s.data, key)
-	} else {
-		if existed && value == old {
-			return nil
-		}
-		s.data[key] = value
-	}
-	if err := writeMap(s.path, s.data); err != nil {
-		if existed {
-			s.data[key] = old
-		} else {
-			delete(s.data, key)
-		}
-		return problem(502, fmt.Sprintf("Cannot save %s: %T", filepath.Base(s.path), err))
-	}
-	return nil
-}
 
 const (
 	emmaVoice  = "bf_emma"
@@ -123,13 +40,11 @@ type deviceVoices struct {
 	fallback string
 }
 
-func loadVoices(path, fallback string) deviceVoices {
+func deviceVoiceStore(db *bridgeDB, fallback string) deviceVoices {
 	if voiceNames[fallback] == "" {
 		fallback = heartVoice
 	}
-	return deviceVoices{loadStore(path, func(id, voice string) bool {
-		return id == strings.ToLower(id) && voiceNames[voice] != ""
-	}), fallback}
+	return deviceVoices{voiceStore(db), fallback}
 }
 
 func (v deviceVoices) allowed(voice string) bool {
@@ -149,9 +64,9 @@ func (v deviceVoices) defaultFor(id, theme string) string {
 func (v deviceVoices) get(id, theme string) string {
 	id = strings.ToLower(id)
 	if v.store != nil {
-		v.mu.Lock()
-		voice := v.data[id]
-		v.mu.Unlock()
+		var voice string
+		_ = v.db.QueryRow(`SELECT COALESCE((SELECT voice FROM voices WHERE device_id=?),
+			(SELECT voice FROM virtual_clients WHERE id=?),'')`, id, id).Scan(&voice)
 		if v.allowed(voice) {
 			return voice
 		}
@@ -165,7 +80,7 @@ func (v deviceVoices) save(id, voice string) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.saveLocked(strings.ToLower(id), voice, voice == "")
+	return v.store.save(strings.ToLower(id), voice, voice == "")
 }
 
 func (v deviceVoices) toggle(id, theme string) error {
@@ -175,15 +90,12 @@ func (v deviceVoices) toggle(id, theme string) error {
 	id = strings.ToLower(id)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	current := v.data[id]
-	if !v.allowed(current) {
-		current = v.defaultFor(id, theme)
-	}
+	current := v.get(id, theme)
 	next := heartVoice
 	if current == heartVoice {
 		next = fableVoice
 	}
-	return v.saveLocked(id, next, false)
+	return v.store.save(id, next, false)
 }
 
 func lanIP(value string, loopback bool) (string, error) {
@@ -239,27 +151,25 @@ func (p *peer) UnmarshalJSON(raw []byte) error {
 
 type peers struct{ *store[peer] }
 
-func loadPeers(path string) peers {
-	return peers{loadStore(path, func(id string, p peer) bool {
-		_, err := lanIP(p.IP, true)
-		return id == p.DeviceID && err == nil && (characterRE.MatchString(p.Character) || p.Character == truncate(id, 40)) &&
-			p.Port > 0 && p.Port <= 65535 && p.LastSeen >= 0
-	})}
+func validLegacyPeer(id string, p peer) bool {
+	_, err := lanIP(p.IP, true)
+	return id == p.DeviceID && err == nil && (characterRE.MatchString(p.Character) || p.Character == truncate(id, 40)) &&
+		p.Port > 0 && p.Port <= 65535 && p.LastSeen >= 0
 }
 
 func (p peers) register(who peer) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.saveLocked(who.DeviceID, who, false)
+	return p.store.save(who.DeviceID, who, false)
 }
 
 func (p peers) touch(id, ip, character string) (peer, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.data == nil {
-		return peer{}, p.invalid()
+	who, known, err := p.store.get(id)
+	if err != nil {
+		return peer{}, err
 	}
-	who, known := p.data[id]
 	who.DeviceID, who.LastSeen = id, time.Now().Unix()
 	if character != "" {
 		who.Character = character
@@ -270,19 +180,18 @@ func (p peers) touch(id, ip, character string) (peer, error) {
 		who.IP, who.Port = ip, 80
 	}
 	if who.IP != "" {
-		return who, p.saveLocked(id, who, false)
+		return who, p.store.save(id, who, false)
 	}
 	return who, nil
 }
 
 func (p peers) snapshot(sender string) ([]peer, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.data == nil {
-		return nil, p.invalid()
+	data, err := p.all()
+	if err != nil {
+		return nil, err
 	}
-	others := make([]peer, 0, len(p.data))
-	for id, who := range p.data {
+	others := make([]peer, 0, len(data))
+	for id, who := range data {
 		if !strings.EqualFold(sender, id) {
 			others = append(others, who)
 		}

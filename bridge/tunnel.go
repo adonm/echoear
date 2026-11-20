@@ -60,6 +60,7 @@ type tunnelRecord struct {
 	LocalPort int    `json:"local_port"`
 	Token     string `json:"scoped_token"`
 	Profile   string `json:"profile"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 var (
@@ -96,21 +97,29 @@ type tunnelManager struct {
 	closed bool
 }
 
-func newTunnelManager(b *bridge, path, bin string, runner tunnelRunner) *tunnelManager {
-	m := &tunnelManager{b: b, bin: bin, runner: runner, live: make(map[string]*scopeServer),
-		store: loadStore(path, func(id string, r tunnelRecord) bool {
-			name, address := routeAddress(r.URL)
-			return id == r.DeviceID && virtualID.MatchString(id) && dnsLabel.MatchString(r.RouteName) &&
-				name == r.RouteName && address == r.URL && r.LocalPort > 0 && r.LocalPort <= 65535 &&
-				scopeKey.MatchString(r.Token) && profileKey.MatchString(r.Profile)
-		})}
-	return m
+func newTunnelManager(b *bridge, bin string, runner tunnelRunner) *tunnelManager {
+	return &tunnelManager{b: b, bin: bin, runner: runner, live: make(map[string]*scopeServer), store: tunnelStore(b.db)}
+}
+
+func validLegacyTunnel(id string, r tunnelRecord) bool {
+	name, address := routeAddress(r.URL)
+	return id == r.DeviceID && virtualID.MatchString(id) && dnsLabel.MatchString(r.RouteName) &&
+		name == r.RouteName && address == r.URL && r.LocalPort > 0 && r.LocalPort <= 65535 &&
+		scopeKey.MatchString(r.Token) && profileKey.MatchString(r.Profile)
 }
 
 func (m *tunnelManager) restore() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for id, record := range m.store.data {
+	data, err := m.store.all()
+	if err != nil {
+		log.Print("EchoEar could not read saved tunnels")
+		return
+	}
+	for id, record := range data {
+		if !validLegacyTunnel(id, record) {
+			continue
+		}
 		if v, ok := m.b.virtualByID(id); ok {
 			if scope, _, err := m.listen(v, record.Token, record.LocalPort); err == nil {
 				m.live[id] = scope
@@ -127,7 +136,7 @@ func (m *tunnelManager) info(id string) object {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if v, ok := m.store.data[id]; ok {
+	if v, ok, _ := m.store.get(id); ok {
 		out := v.public(m.live[id] != nil)
 		delete(out, "device_id")
 		delete(out, "local_port")
@@ -175,13 +184,14 @@ func (b *bridge) tunnelAPI(w http.ResponseWriter, r *http.Request, path string) 
 	if m.closed {
 		return nil, problem(503, "Tunnel manager shutting down")
 	}
-	if m.store.data == nil {
-		return nil, m.store.invalid()
-	}
 	switch {
 	case path == "/api/tunnels" && r.Method == http.MethodGet:
-		out := make([]object, 0, len(m.store.data))
-		for _, v := range m.store.data {
+		data, err := m.store.all()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]object, 0, len(data))
+		for _, v := range data {
 			out = append(out, v.public(m.live[v.DeviceID] != nil))
 		}
 		slices.SortFunc(out, func(a, b object) int { return strings.Compare(str(a["device_id"]), str(b["device_id"])) })
@@ -212,7 +222,14 @@ func (m *tunnelManager) addLocked(ctx context.Context, id string) (object, error
 	if !ok || !virtualID.MatchString(id) {
 		return nil, problem(404, "Tunnel requires an existing virtual client")
 	}
-	if values, exists := m.store.data[id]; exists {
+	values, exists, err := m.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		if !validLegacyTunnel(id, values) {
+			return nil, problem(502, "Invalid saved tunnel")
+		}
 		if m.live[id] == nil {
 			server, _, err := m.listen(v, values.Token, values.LocalPort)
 			if err != nil {
@@ -225,7 +242,7 @@ func (m *tunnelManager) addLocked(ctx context.Context, id string) (object, error
 	if m.runner == nil {
 		return nil, problem(503, "OpenTunnel CLI not found")
 	}
-	record := tunnelRecord{DeviceID: id, Token: randomHex(16), Profile: "echoear-" + randomHex(12)}
+	record := tunnelRecord{DeviceID: id, Token: randomHex(16), Profile: "echoear-" + randomHex(12), CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	server, port, err := m.listen(v, record.Token, 0)
 	if err != nil {
 		return nil, problem(502, "Cannot start scoped listener")
@@ -238,7 +255,7 @@ func (m *tunnelManager) addLocked(ctx context.Context, id string) (object, error
 		server.close()
 		return nil, problem(502, "OpenTunnel route add did not return a usable URL")
 	}
-	if err := m.store.saveLocked(id, record, false); err != nil {
+	if err := m.store.save(id, record, false); err != nil {
 		server.close()
 		return nil, err
 	}
@@ -247,10 +264,10 @@ func (m *tunnelManager) addLocked(ctx context.Context, id string) (object, error
 }
 
 func (m *tunnelManager) removeLocked(ctx context.Context, id string, required bool) error {
-	if m.store.data == nil {
-		return m.store.invalid()
+	v, ok, err := m.store.get(id)
+	if err != nil {
+		return err
 	}
-	v, ok := m.store.data[id]
 	if !ok {
 		if required {
 			return problem(404, "Tunnel not found")
@@ -260,6 +277,9 @@ func (m *tunnelManager) removeLocked(ctx context.Context, id string, required bo
 	if m.runner == nil {
 		return problem(503, "OpenTunnel CLI not found")
 	}
+	if !validLegacyTunnel(id, v) {
+		return problem(502, "Invalid saved tunnel")
+	}
 	if _, err := m.runner.run(ctx, "route", "remove", v.RouteName, "--profile", v.Profile); err != nil {
 		return problem(502, "OpenTunnel route remove failed")
 	}
@@ -267,7 +287,7 @@ func (m *tunnelManager) removeLocked(ctx context.Context, id string, required bo
 		delete(m.live, id)
 		s.close()
 	}
-	return m.store.saveLocked(id, tunnelRecord{}, true)
+	return m.store.save(id, tunnelRecord{}, true)
 }
 
 func (m *tunnelManager) shutdown() {
@@ -331,9 +351,11 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 		}
 		messageID, messages := messagesDevice(path)
 		voiceID, voice := voiceDevice(path)
+		timers := r.Method == http.MethodGet && path == "/api/timers" ||
+			r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/timers/")
 		get := r.Method == http.MethodGet && (path == "/ws" || path == "/api/scope" || messages)
 		post := r.Method == http.MethodPost && (path == "/api/chat" || path == "/api/reset" || voice)
-		if !get && !post {
+		if !get && !post && !timers {
 			sendError(w, problem(404, "Not found"))
 			return
 		}
@@ -342,6 +364,9 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			return
 		}
 		switch {
+		case timers:
+			value, err := b.timerAPI(w, r, path, v.ID)
+			sendResult(w, value, err)
 		case path == "/api/scope":
 			sendJSON(w, 200, object{"scoped": true, "device_id": v.ID, "character": v.Character, "theme": v.Theme,
 				"voice": b.voices.get(v.ID, v.Theme)})

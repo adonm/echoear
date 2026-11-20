@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
-	"log"
-	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -237,31 +235,9 @@ type ocReset struct {
 	done  chan struct{}
 }
 
-func newOpenCode(ctx context.Context, u upstream, path, project string, settings ocSettings) *openCode {
-	sessions := loadStore(path, func(_ string, sid string) bool { return sessionIDRE.MatchString(sid) })
-	var unified map[string]string
-	for key, sid := range sessions.data {
-		id, old := strings.CutPrefix(key, "scope-")
-		if !old || !virtualID.MatchString(id) {
-			continue
-		}
-		if unified == nil {
-			unified = maps.Clone(sessions.data)
-		}
-		// Keep the LAN session if both exist; otherwise keep the tunnel's conversation.
-		if unified[id] == "" {
-			unified[id] = sid
-		}
-		delete(unified, key)
-	}
-	if unified != nil {
-		if err := writeMap(path, unified); err != nil {
-			log.Print("EchoEar could not migrate virtual cat session aliases")
-		}
-		sessions.data = unified
-	}
+func newOpenCode(ctx context.Context, u upstream, db *bridgeDB, project string, settings ocSettings) *openCode {
 	o := &openCode{upstream: u, project: project, settings: settings,
-		store:  sessions,
+		store:  sessionStore(db),
 		active: make(map[string]context.CancelFunc), interrupts: make(map[string]bool), resets: make(map[string]*ocReset),
 		feed: eventFeed{ready: make(chan struct{}), bySession: make(map[string]map[chan ocEvent]struct{})}}
 	for i := range o.turns {
@@ -272,18 +248,12 @@ func newOpenCode(ctx context.Context, u upstream, path, project string, settings
 }
 
 func (o *openCode) get(device string) (string, error) {
-	o.store.mu.Lock()
-	defer o.store.mu.Unlock()
-	if o.store.data == nil {
-		return "", o.store.invalid()
-	}
-	return o.store.data[device], nil
+	sid, _, err := o.store.get(device)
+	return sid, err
 }
 
 func (o *openCode) save(device, sid string) error {
-	o.store.mu.Lock()
-	defer o.store.mu.Unlock()
-	return o.store.saveLocked(device, sid, sid == "")
+	return o.store.save(device, sid, sid == "")
 }
 
 func (o *openCode) lock(ctx context.Context, device string) (func(), error) {

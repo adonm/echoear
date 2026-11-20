@@ -15,35 +15,27 @@ type virtualClient struct {
 	ID        string    `json:"id"`
 	Character string    `json:"character"`
 	Theme     string    `json:"theme"`
+	Voice     string    `json:"voice,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func loadVirtual(path string) *store[virtualClient] {
-	return loadStore(path, func(id string, v virtualClient) bool {
-		_, theme := catPalettes[v.Theme]
-		return id == v.ID && virtualID.MatchString(id) && characterRE.MatchString(v.Character) && theme && !v.CreatedAt.IsZero()
-	})
+func validLegacyVirtual(id string, v virtualClient) bool {
+	_, theme := catPalettes[v.Theme]
+	return id == v.ID && virtualID.MatchString(id) && characterRE.MatchString(v.Character) && theme && !v.CreatedAt.IsZero()
 }
 
 func (b *bridge) virtualSnapshot() (map[string]virtualClient, error) {
 	if b.virtual == nil {
 		return nil, nil
 	}
-	b.virtual.mu.Lock()
-	defer b.virtual.mu.Unlock()
-	if b.virtual.data == nil {
-		return nil, b.virtual.invalid()
-	}
-	return maps.Clone(b.virtual.data), nil
+	return b.virtual.all()
 }
 
 func (b *bridge) virtualByID(id string) (virtualClient, bool) {
 	if b.virtual == nil {
 		return virtualClient{}, false
 	}
-	b.virtual.mu.Lock()
-	defer b.virtual.mu.Unlock()
-	v, ok := b.virtual.data[id]
+	v, ok, _ := b.virtual.get(id)
 	return v, ok
 }
 
@@ -78,25 +70,10 @@ func (b *bridge) virtualAPI(w http.ResponseWriter, r *http.Request, path string)
 		if _, supplied := obj["voice"]; supplied && !b.voices.allowed(voice) {
 			return nil, problem(400, "Unsupported voice")
 		}
-		b.virtual.mu.Lock()
-		v := virtualClient{Character: name, Theme: theme, CreatedAt: time.Now().UTC()}
-		for {
-			v.ID = "virt-" + randomHex(4)
-			if _, exists := b.virtual.data[v.ID]; !exists {
-				break
-			}
-		}
-		err = b.virtual.saveLocked(v.ID, v, false)
-		if err == nil && voice != "" {
-			if err = b.voices.save(v.ID, voice); err != nil {
-				if rollback := b.virtual.saveLocked(v.ID, virtualClient{}, true); rollback != nil {
-					err = rollback
-				}
-			}
-		}
-		b.virtual.mu.Unlock()
+		v := virtualClient{ID: "virt-" + randomHex(4), Character: name, Theme: theme, Voice: voice, CreatedAt: time.Now().UTC()}
+		_, err = b.virtual.db.ExecContext(r.Context(), `INSERT INTO virtual_clients (id,character,theme,voice,created_at) VALUES (?,?,?,?,?)`, b.virtual.values(v.ID, v)...)
 		if err != nil {
-			return nil, err
+			return nil, problem(502, "Cannot create virtual client")
 		}
 		sendJSON(w, 201, b.publicVirtual(v))
 		return nil, nil
@@ -114,9 +91,7 @@ func (b *bridge) virtualAPI(w http.ResponseWriter, r *http.Request, path string)
 				return nil, err
 			}
 		}
-		b.virtual.mu.Lock()
-		err := b.virtual.saveLocked(id, virtualClient{}, true)
-		b.virtual.mu.Unlock()
+		err := b.virtual.save(id, virtualClient{}, true)
 		if err != nil {
 			return nil, err
 		}

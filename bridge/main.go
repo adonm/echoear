@@ -61,6 +61,19 @@ func run() error {
 	}
 	project := filepath.Dir(workerPath)
 	local := filepath.Join(data, "echoear")
+	syscall.Umask(0o077)
+	if err := os.MkdirAll(local, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(local, 0o700); err != nil {
+		return err
+	}
+	db, err := openBridgeDB(context.Background(), env("ECHOEAR_DB_PATH", filepath.Join(local, "echoear.db")), local,
+		os.Getenv("ECHOEAR_TURSO_URL"), os.Getenv("ECHOEAR_TURSO_AUTH_TOKEN"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
 	ports := env("ECHOEAR_BRIDGE_PORT", "8765")
 	if port, err := strconv.Atoi(ports); err != nil || port < 0 || port > 65535 {
 		return errors.New("invalid ECHOEAR_BRIDGE_PORT")
@@ -71,9 +84,17 @@ func run() error {
 	}
 	root, finish := context.WithCancel(context.Background())
 	defer finish()
+	if db.cloud != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			db.syncPeriodically(root)
+		}()
+		defer func() { finish(); <-done }()
+	}
 	oc := newOpenCode(root, upstream{"OpenCode", pooledClient(),
 		&fileCache[endpoint]{path: filepath.Join(state, "opencode/service.json"), read: openCodeEndpoint}},
-		filepath.Join(local, "sessions.json"), project, settings)
+		db, project, settings)
 	hex := hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: filepath.Join(data, "hex/local-api.json"), read: hexEndpoint}},
 		&fileCache[string]{path: filepath.Join(data, "hex/settings.json"), read: hexQuery}}
 	models := filepath.Join(local, "tts-models")
@@ -83,10 +104,10 @@ func run() error {
 	}
 	python := env("ECHOEAR_TTS_PYTHON", filepath.Join(home, ".local/share/echoear/tts-venv/bin/python"))
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
-	b := &bridge{root: root, token: token, peers: loadPeers(filepath.Join(local, "devices.json")),
+	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
 		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
-		voices:  loadVoices(filepath.Join(local, "voices.json"), env("ECHOEAR_TTS_VOICE", heartVoice)),
-		virtual: loadVirtual(filepath.Join(local, "virtual_clients.json")), history: loadChatHistory(filepath.Join(local, "chat_events.json")),
+		voices:  deviceVoiceStore(db, env("ECHOEAR_TTS_VOICE", heartVoice)),
+		virtual: virtualStore(db), history: &chatHistory{db},
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
 	b.ws = newWSHub(b)
 	bin := findTunnelCLI(home)
@@ -94,8 +115,18 @@ func run() error {
 	if bin != "" {
 		runner = tunnelCLI(bin)
 	}
-	b.tunnels = newTunnelManager(b, filepath.Join(local, "tunnels.json"), bin, runner)
+	b.tunnels = newTunnelManager(b, bin, runner)
 	b.tunnels.restore()
+	b.timers = newTimerManager(b)
+	if err := b.timers.restore(time.Now()); err != nil {
+		b.timers.close()
+		b.tunnels.shutdown()
+		b.ws.shutdown()
+		finish()
+		_ = listener.Close()
+		<-worker.done
+		return err
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(root, ttsWait)
 		defer cancel()
@@ -114,6 +145,7 @@ func run() error {
 	go func() { served <- server.Serve(listener) }()
 	select {
 	case <-signals.Done():
+		b.timers.close()
 		b.tunnels.shutdown()
 		b.ws.shutdown()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -125,6 +157,7 @@ func run() error {
 	case err = <-served:
 	}
 	finish()
+	b.timers.close()
 	b.tunnels.shutdown()
 	b.ws.shutdown()
 	<-worker.done

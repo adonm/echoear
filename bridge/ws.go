@@ -84,6 +84,7 @@ type wsDevice struct {
 	pet         time.Time
 	asleep      bool
 	customScene bool
+	room        string
 	states      map[string]sceneView
 	cycles      map[string]cyclePosition
 	sceneTimers map[*time.Timer]struct{}
@@ -521,7 +522,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		peers, _ := h.combinedPeers(d.who.DeviceID)
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
 		view = drawerScene(d.who.Character, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
-	case d.card != nil && (mood == "idle" || mood == "speaking"):
+	case d.card != nil && (mood == "idle" || mood == "speaking" || mood != "sleepy" && d.card.actions["cat"].kind == "dismiss"):
 		view = *d.card
 	case d.customScene && mood != "sleepy":
 		view = d.view.withActivity(mood)
@@ -763,8 +764,12 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 	}
 	key, a := d.scene.action(ev.ID, ev.X, ev.Y, "tap")
 	waiting := false
+	event := object{"id": key, "x": ev.X, "y": ev.Y}
+	if d.room != "" {
+		event["room"], event["from_device_id"] = d.room, d.who.DeviceID
+	}
 	if key != "" || d.customScene {
-		waiting = h.emit(d.who.DeviceID, "tap", object{"id": key, "x": ev.X, "y": ev.Y})
+		waiting = h.emit(d.who.DeviceID, "tap", event)
 		if d.customScene && key != "" && waiting && a.kind != "local" && a.kind != "cat" {
 			h.chime(d, "tap")
 			return
@@ -780,8 +785,11 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		h.render(d, now, false)
 	case "cat":
 		h.leaveScene(d, waiting && d.customScene, now)
+	case "dismiss":
+		d.card = nil
+		h.render(d, now, false)
 	case "local":
-		h.localTap(d, key, waiting, now)
+		h.localTap(d, key, event, waiting, now)
 	case "voice":
 		if err := h.b.voices.toggle(d.who.DeviceID, d.voiceTheme()); err == nil {
 			h.chime(d, "tap")

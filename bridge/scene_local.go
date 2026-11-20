@@ -19,6 +19,8 @@ const (
 type tapReaction struct {
 	chime, speak, state, ask string
 	exit                     bool
+	broadcast                bool
+	store                    *memoryWrite
 	patch                    *scenePatch
 	move                     *nodeMove
 	delay, revert            time.Duration
@@ -54,11 +56,26 @@ func parseReaction(raw object, states map[string]sceneView, patchDepth, delayDep
 			if _, ok := value.(string); !ok {
 				return r, problem(400, "Expected a string for tap."+key)
 			}
-		case "exit":
-			var ok bool
-			if r.exit, ok = value.(bool); !ok {
-				return r, problem(400, "Expected a boolean for tap.exit")
+		case "exit", "broadcast":
+			flag, ok := value.(bool)
+			if !ok {
+				return r, problem(400, "Expected a boolean for tap."+key)
 			}
+			if key == "exit" {
+				r.exit = flag
+			} else {
+				r.broadcast = flag
+			}
+		case "store":
+			fields, ok := value.(object)
+			if !ok || len(fields) != 3 {
+				return r, problem(400, "Expected tap.store with scope, key and value")
+			}
+			write, err := parseMemoryWrite(fields)
+			if err != nil {
+				return r, err
+			}
+			r.store = &write
 		case "patch":
 			p, ok := value.(object)
 			if !ok || patchDepth >= maxPatchDepth {
@@ -541,6 +558,7 @@ func (h *wsHub) stopSceneTimers(d *wsDevice) {
 func (h *wsHub) clearLocalScene(d *wsDevice) {
 	h.stopSceneTimers(d)
 	d.states, d.cycles = nil, nil
+	d.room = ""
 }
 
 func (h *wsHub) scheduleSceneTimer(d *wsDevice, delay time.Duration, run func(time.Time)) {
@@ -609,22 +627,33 @@ func (h *wsHub) patchScene(d *wsDevice, patch *scenePatch, move *nodeMove, now t
 	return nil
 }
 
-func (h *wsHub) localTap(d *wsDevice, id string, waiting bool, now time.Time) {
+func (h *wsHub) localTap(d *wsDevice, id string, event object, waiting bool, now time.Time) {
 	controls := d.scene.controls[id]
 	r, _ := controls["tap"].(*tapReaction)
 	cycle, _ := controls["cycle"].(*reactionCycle)
 	var step *tapReaction
+	var pos cyclePosition
 	if cycle != nil {
-		pos := d.cycles[id]
+		pos = d.cycles[id]
 		if pos.cycle != cycle {
 			pos = cyclePosition{cycle: cycle}
 		}
 		step = &(*cycle)[pos.index]
 		pos.index = (pos.index + 1) % len(*cycle)
-		if d.cycles == nil {
-			d.cycles = make(map[string]cyclePosition)
+		setCyclePosition(d, id, pos)
+	}
+	if d.room != "" && (r != nil && r.broadcast || step != nil && step.broadcast) {
+		for _, other := range h.devices {
+			if other == d || other.room != d.room || !h.active(other) {
+				continue
+			}
+			h.emit(other.who.DeviceID, "tap", event)
+			if step != nil && step.broadcast {
+				if otherCycle, ok := other.view.controls[id]["cycle"].(*reactionCycle); ok && len(*otherCycle) == len(*cycle) {
+					setCyclePosition(other, id, cyclePosition{otherCycle, pos.index})
+				}
+			}
 		}
-		d.cycles[id] = pos
 	}
 	if r != nil && h.react(d, *r, waiting, now) || step != nil && h.react(d, *step, waiting, now) {
 		return
@@ -634,7 +663,37 @@ func (h *wsHub) localTap(d *wsDevice, id string, waiting bool, now time.Time) {
 	}
 }
 
+func setCyclePosition(d *wsDevice, id string, pos cyclePosition) {
+	if d.cycles == nil {
+		d.cycles = make(map[string]cyclePosition)
+	}
+	d.cycles[id] = pos
+}
+
 func (h *wsHub) react(d *wsDevice, r tapReaction, waiting bool, now time.Time) bool {
+	if w := r.store; w != nil {
+		if h.b.db == nil {
+			h.push(d, object{"op": "error", "status": 503, "error": "Memory unavailable"}, true)
+			return false
+		}
+		if _, err := h.b.db.setMemory(d.client.ctx, *w, nil); err != nil {
+			h.push(d, object{"op": "error", "status": 502, "error": "Cannot store tap memory"}, true)
+			return false
+		}
+	}
+	if r.broadcast && d.room != "" {
+		local := r
+		local.ask, local.exit, local.then = "", false, nil
+		for _, other := range h.devices {
+			if other != d && other.room == d.room && h.active(other) {
+				h.applyReaction(other, local, true, now)
+			}
+		}
+	}
+	return h.applyReaction(d, r, waiting, now)
+}
+
+func (h *wsHub) applyReaction(d *wsDevice, r tapReaction, waiting bool, now time.Time) bool {
 	if r.chime != "" {
 		h.chime(d, r.chime)
 	}

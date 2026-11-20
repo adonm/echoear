@@ -102,7 +102,7 @@ func fakeTTS(ctx context.Context, requests *atomic.Int32) *synthWorker {
 
 func TestMCPProtocolAndScene(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
+		b.history = &chatHistory{b.db}
 	})
 	const id = "echoear-test"
 	c := testConnectWS(t, base, "unit", false)
@@ -127,7 +127,7 @@ func TestMCPProtocolAndScene(t *testing.T) {
 			t.Fatal(tool)
 		}
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "wait_event"}) {
+	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "memory", "asset", "timer", "wait_event"}) {
 		t.Fatal(names)
 	}
 	list := toolTest(t, base, "devices", object{}, false)
@@ -174,9 +174,9 @@ func TestMCPProtocolAndScene(t *testing.T) {
 	if first := messages[0].(object); first["scene_title"] != "Quiz" || first["source"] != "mcp" {
 		t.Fatal(first)
 	}
-	entries := loadChatHistory(b.history.path)
-	if len(entries.entries[id]) != 3 {
-		t.Fatal(entries.entries[id])
+	entries, err := b.history.list(t.Context(), id)
+	if err != nil || len(entries) != 3 {
+		t.Fatal(entries, err)
 	}
 }
 
@@ -388,7 +388,7 @@ func expectChatAndPCM(t *testing.T, client *testWS, text string) {
 func TestMCPSceneInlineChimeAndSay(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.worker = fakeTTS(b.root, nil)
-		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
+		b.history = &chatHistory{b.db}
 	})
 	const id = "phone-a071"
 	c := testConnectWS(t, base, "unit", false)
@@ -423,8 +423,8 @@ func TestMCPSceneInlineChimeAndSay(t *testing.T) {
 func TestMCPSpeakChimeAndIntercom(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.worker = fakeTTS(b.root, nil)
-		b.history = loadChatHistory(filepath.Join(dir, "chat_events.json"))
-		b.virtual = loadVirtual(filepath.Join(dir, "virtual_clients.json"))
+		b.history = &chatHistory{b.db}
+		b.virtual = virtualStore(b.db)
 	})
 	const from = "echoear-source"
 	to := str(testObject(t, testRequest(t, "POST", base+"/api/virtual-clients", "unit", object{"character": "Plum", "theme": "plum"}, 201))["id"])

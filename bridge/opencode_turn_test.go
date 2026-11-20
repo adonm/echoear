@@ -21,7 +21,7 @@ func testOpenCode(t *testing.T, ctx context.Context, dir string, handle http.Han
 		t.Fatal(err)
 	}
 	return newOpenCode(ctx, upstream{"OpenCode", api.Client(), &fileCache[endpoint]{path: config, read: openCodeEndpoint}},
-		filepath.Join(dir, "sessions.json"), dir, ocSettings{})
+		testDB(t, ":memory:", ""), dir, ocSettings{})
 }
 
 func expectValue[T comparable](t *testing.T, result <-chan T, want T) {
