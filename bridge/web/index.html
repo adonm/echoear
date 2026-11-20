@@ -77,6 +77,13 @@
         </div>
         <p id="tunnel-note" class="note" role="status"></p>
       </section>
+      <section class="device-group">
+        <details id="saved-state">
+          <summary>Saved Memory &amp; Assets</summary>
+          <p id="saved-note" class="note" role="status"></p>
+          <div id="saved-items"></div>
+        </details>
+      </section>
     </aside>
 
     <section id="face" class="face-panel panel" aria-labelledby="face-heading">
@@ -140,6 +147,11 @@
           </div>
         </div>
       </header>
+      <section id="active-timers" class="timer-strip" aria-label="Active timers" hidden>
+        <h3>Active Timers</h3>
+        <ul id="timer-items" class="compact-list"></ul>
+        <p id="timer-note" class="note" role="status"></p>
+      </section>
       <div id="transcript" tabindex="0" role="region" aria-label="Chat transcript">
         <p id="empty-chat" class="empty-chat">Choose a cat to open its chat.</p>
         <ol id="messages" class="messages"></ol>

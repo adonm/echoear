@@ -19,8 +19,10 @@ printf 'PASS shell checks\n'
 source scripts/go-bin.sh
 GO_BIN=$(resolve_go)
 python3 -m py_compile bridge/tts_worker.py
+node --check bridge/web/client.js
 (
     cd bridge
+    "$GO_BIN" mod verify
     "$GO_BIN" vet ./...
     "$GO_BIN" test -race ./...
 )

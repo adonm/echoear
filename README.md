@@ -84,9 +84,12 @@ token. Select a physical EchoEar to mirror and control it, or use
 The Chat panel loads the cat's conversation history across sessions and
 updates live over `/ws`. Use **Voice** under the screen for one-click Heart or
 Fable, or choose among Heart and all eight UK voices in the dropdown. The
-choice is saved per device in `voices.json`. Mint defaults to Fable (`bm_fable`,
+choice is saved per device in the bridge database. Mint defaults to Fable (`bm_fable`,
 UK English). Cake and other cats default to Heart (`af_heart`, US English)
 unless `ECHOEAR_TTS_VOICE` sets a different fallback.
+The conversation panel shows active timers for the selected cat with a
+countdown and a Cancel button. The LAN sidebar's **Saved Memory & Assets**
+section lets you inspect and delete saved keys and visuals.
 
 Plain LAN HTTP supports the SVG mirror, text chat, and audio playback.
 Microphone access requires HTTPS or localhost. On stop, the browser captures
@@ -113,8 +116,9 @@ OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
 reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
-Code Mode exposes nine tools under `tools.echoear`: `devices`, `snapshot`,
-`scene`, `patch`, `speak`, `chime`, `intercom`, `control`, and `wait_event`.
+Code Mode exposes 12 tools under `tools.echoear`: `devices`, `snapshot`,
+`scene`, `patch`, `speak`, `chime`, `intercom`, `control`, `memory`, `asset`,
+`timer`, and `wait_event`.
 Use `devices` to discover peers. `control` sets volume (0–100) and/or sleep
 state on a connected device.
 Scenes and patches support declarative `tap` and `cycle` reactions, named `states`,
@@ -126,6 +130,35 @@ a new turn. Drawings stay on screen across conversation turns until replaced,
 reset, or exited with **Cat** or `preset: "face"`. A `scene` can also play a
 `chime` or `say` text inline. The agent
 defaults to 1–2 short spoken sentences and answers at length when asked.
+
+- Join a multiplayer game by drawing the scene with `room: "tictactoe"` on each cat.
+  A tap or cycle reaction with `broadcast: true` applies the same visual/audio
+  changes in the room. Add `store: {scope, key, value}` to persist the move once.
+- `memory` stores JSON under `shared`, a device ID, or `game:<room>`.
+  `set` can require `expected_version`: 0 means create only; a positive value
+  is a compare-and-swap. On conflict, reread before making the next move.
+- Use `asset` to save/load reusable scenes or node sets, or use `scene.save_as`
+  to draw and save together. `scene.asset` loads one with optional overrides
+  and extra nodes.
+- `timer` sets reminders up to 24 hours out (8 per cat, 32 total). Local
+  timers show an **OK** card, chime, and optionally speak. `wake_agent` instead
+  starts a bounded turn; it requires `in_seconds >= 30` and cannot be set during
+  a timer-triggered turn. Future timers survive a restart; reminders missed
+  by at most two minutes fire once after a short grace period.
+
+## Bridge data
+
+The bridge uses the embedded Turso Go driver without CGO. Persistent state lives
+in `~/.local/share/echoear/echoear.db` (or `$XDG_DATA_HOME/echoear/echoear.db`);
+`ECHOEAR_DB_PATH` overrides it. Keep the data directory private (0700, database
+0600). The first boot imports valid rows from the six legacy JSON files in that
+directory in one transaction and never modifies those backups.
+
+Optional Turso Cloud sync runs every minute when both `ECHOEAR_TURSO_URL`
+and `ECHOEAR_TURSO_AUTH_TOKEN` are set. Use a dedicated private remote and one
+active bridge per database: the data includes chat events and tunnel credentials,
+and the bridge, not the cloud, performs timer side effects. No cloud credentials
+or connectivity are required for normal local operation.
 
 ## API
 
@@ -149,6 +182,9 @@ OpenCode streams its reply over SSE.
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
 | `POST /api/tts` | `{"text":"Hello!"}`, optional `device_id` → complete PCM clip using that device's voice |
 | `POST /api/reset` | `{"device_id":"my-echoear"}` → forget conversation mapping |
+| `GET /api/memory?scope=…`, `GET /api/memory/scopes`, `DELETE /api/memory?scope=…&key=…` | LAN-only saved JSON and populated scopes |
+| `GET /api/assets`, `DELETE /api/assets/{name}` | LAN-only reusable visual assets |
+| `GET /api/timers?device_id=…`, `DELETE /api/timers/{id}` | List/cancel active timers; scoped links can see and cancel only their own cat's timers |
 | `GET /ota/version.json`, `GET /ota/latest.bin` | Build manifest or `firmware/build/echoear.bin` with SHA-256 |
 
 Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body

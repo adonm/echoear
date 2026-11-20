@@ -30,7 +30,7 @@ const say = (id, text) => {
   const element = $(id);
   if (element.textContent !== text) element.textContent = text;
 };
-let app, view, ws, watched, retry, poll, rev = 0, pointer;
+let app, view, ws, watched, retry, poll, timerTick, rev = 0, pointer;
 const keyed = new Map();
 function send(event) {
   if (ws?.readyState !== WebSocket.OPEN) return false;
@@ -67,6 +67,7 @@ async function api(current, path, options) {
 
 function stop() {
   clearInterval(poll);
+  clearInterval(timerTick);
   view?.loading?.abort();
   view = app = null;
   disconnect();
@@ -93,6 +94,7 @@ async function authorize(token) {
     stop();
     setLocal("echoear-token", token);
     app = {token, scope, devices:[], deviceVersion:0, sidebar:!scope && wide.matches, tunnel:null};
+    timerTick = setInterval(tickTimers, 1000);
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
     $("sidebar-toggle").hidden = !!scope;
@@ -132,6 +134,102 @@ function renderSidebar() {
   $("workspace").dataset.sidebar = app?.sidebar ? "open" : "closed";
   $("sidebar-toggle").setAttribute("aria-expanded", String(!!app?.sidebar));
 }
+
+function tickTimers() {
+  for (const clock of $("timer-items").querySelectorAll("time")) {
+    const seconds = Math.max(0, Math.ceil((Date.parse(clock.dateTime) - Date.now()) / 1000));
+    clock.textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+}
+
+function removeButton(text, label, action) {
+  const button = node("button", "quiet compact-action", text);
+  button.type = "button";
+  button.setAttribute("aria-label", `${text} ${label}`);
+  button.onclick = async () => {
+    button.disabled = true;
+    try { await action(); } finally { button.disabled = false; }
+  };
+  return button;
+}
+
+async function loadTimers() {
+  const current = app, cat = view;
+  if (!current || !cat?.id) return;
+  const request = cat.timerRequest = (cat.timerRequest || 0) + 1;
+  try {
+    const {timers} = await api(current, `/api/timers?device_id=${encodeURIComponent(cat.id)}`);
+    if (app !== current || view !== cat || cat.timerRequest !== request) return;
+    const items = timers.map(timer => {
+      const item = node("li", "compact-item"), clock = node("time", "timer-clock");
+      clock.dateTime = timer.fire_at;
+      item.append(clock, node("span", "compact-label", timer.label), removeButton("Cancel", timer.label, async () => {
+        try {
+          await api(current, `/api/timers/${encodeURIComponent(timer.id)}`, {method:"DELETE"});
+          if (view === cat) say("timer-note", "");
+        } catch {
+          if (view === cat) say("timer-note", "The timer could not be canceled. It may have already fired.");
+        }
+        if (view === cat) loadTimers();
+      }));
+      return item;
+    });
+    $("timer-items").replaceChildren(...items);
+    $("active-timers").hidden = !items.length;
+    tickTimers();
+  } catch {
+    if (view === cat && cat.timerRequest === request) say("timer-note", "Could not load timers.");
+  }
+}
+
+async function loadSaved() {
+  const current = app, cat = view, details = $("saved-state");
+  if (!current || current.scope || !details.open) return;
+  const request = current.savedRequest = (current.savedRequest || 0) + 1;
+  const active = () => app === current && view === cat && current.savedRequest === request;
+  say("saved-note", "Loading…");
+  $("saved-items").replaceChildren();
+  try {
+    const [{scopes}, {assets}] = await Promise.all([api(current, "/api/memory/scopes"), api(current, "/api/assets")]);
+    if (!active()) return;
+    const names = [...new Set(["shared", ...(cat?.id ? [cat.id] : []), ...scopes.map(s => s.scope).filter(s => s.startsWith("game:"))])];
+    const memory = await Promise.all(names.map(scope => api(current, `/api/memory?scope=${encodeURIComponent(scope)}`)));
+    if (!active()) return;
+    const remove = (path, label) => removeButton("Delete", label, async () => {
+      try {
+        await api(current, path, {method:"DELETE"});
+        if (app === current) loadSaved();
+      } catch {
+        if (app === current) say("saved-note", "Could not delete the saved item.");
+      }
+    });
+    const section = (label, entries) => {
+      const group = node("section", "saved-group"), list = node("ul", "compact-list");
+      list.append(...entries);
+      group.append(node("h3", "", label), entries.length ? list : node("p", "small", "Nothing saved."));
+      return group;
+    };
+    const groups = memory.map(({scope, entries}) => section(scope, entries.map(entry => {
+      const item = node("li"), row = node("div", "compact-item");
+      row.append(node("code", "compact-label", entry.key), remove(
+        `/api/memory?scope=${encodeURIComponent(scope)}&key=${encodeURIComponent(entry.key)}`, entry.key));
+      item.append(row, node("pre", "saved-value", JSON.stringify(entry.value, null, 2)));
+      return item;
+    })));
+    groups.push(section("Visual assets", assets.map(asset => {
+      const item = node("li", "compact-item");
+      item.append(node("span", "compact-label", `${asset.name} · ${asset.kind}`),
+        remove(`/api/assets/${encodeURIComponent(asset.name)}`, asset.name));
+      return item;
+    })));
+    $("saved-items").replaceChildren(...groups);
+    say("saved-note", "");
+  } catch {
+    if (active()) say("saved-note", "Could not load saved items.");
+  }
+}
+$("saved-state").ontoggle = loadSaved;
+
 $("sidebar-toggle").onclick = () => { app.sidebar = !app.sidebar; renderSidebar(); };
 wide.addEventListener("change", e => {
   if (app && !app.scope) { app.sidebar = e.matches; renderSidebar(); }
@@ -413,10 +511,15 @@ function select(d, quick = false) {
   say("chat-note", "");
   say("tunnel-note", "");
   say("voice-note", "");
+  say("timer-note", "");
+  $("timer-items").replaceChildren();
+  $("active-timers").hidden = true;
+  loadSaved();
   renderCurrent();
   renderDevices();
   renderTranscript(true);
   if (id) {
+    loadTimers();
     if (!quick) loadHistory();
     connect();
   } else say("link-state", "No cat selected");
@@ -507,6 +610,7 @@ function connect(attempt = 0) {
   socket.binaryType = "arraybuffer";
   socket.onopen = () => {
     if (ws !== socket) return;
+    loadTimers();
     send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",volume}
       : {ev:"hello",role:"web"});
   };
@@ -544,6 +648,10 @@ function syncWatch(live) {
 const modeLabel = {idle:"Idle", thinking:"Thinking", listening:"Listening", speaking:"Speaking", sleepy:"Sleepy"};
 
 function command(msg) {
+  if (msg.type === "timers") {
+    if (msg.device_id === view.id) loadTimers();
+    return;
+  }
   if (msg.type === "chat") {
     if (msg.device_id === view.id && msg.entry?.id) {
       view.entries.set(msg.entry.id, msg.entry);
