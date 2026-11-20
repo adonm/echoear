@@ -224,11 +224,18 @@ type diagReport struct {
 	Latency   map[string]diagSummary `json:"latency"`
 	Turns     []diagTurn             `json:"recent_turns"`
 	Devices   []diagDevice           `json:"devices"`
+	SVGCache  diagCache              `json:"svg_cache"`
 	diagSystem
+}
+
+type diagCache struct {
+	Hits   uint64 `json:"hits"`
+	Misses uint64 `json:"misses"`
 }
 
 func (b *bridge) diagnosticReport() diagReport {
 	out := diagReport{Generated: time.Now().UTC(), Latency: make(map[string]diagSummary), Turns: []diagTurn{}, Devices: []diagDevice{}}
+	out.SVGCache.Hits, out.SVGCache.Misses = screens.stats()
 	b.diag.mu.Lock()
 	out.diagSystem = b.diag.system
 	for i, name := range diagMetricNames {
@@ -279,9 +286,7 @@ func (d *wsDevice) diagDevice() diagDevice {
 func (h *wsHub) diagDevices() []diagDevice {
 	virtual, _ := h.b.virtualSnapshot()
 	roundOTA, boxOTA := fileBytes(h.b.ota.path) > 0, fileBytes(h.b.box3OTA.path) > 0
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	peers, _ := h.combinedPeers("")
+	peers, _ := h.peerSnapshot("")
 	devices := make(map[string]diagDevice, len(peers)+len(virtual))
 	for _, p := range peers {
 		id := strings.ToLower(p.DeviceID)
@@ -290,6 +295,7 @@ func (h *wsHub) diagDevices() []diagDevice {
 	for id, v := range virtual {
 		devices[id] = diagDevice{ID: id, Character: h.b.catFor(peer{DeviceID: id, Character: v.Character}).Name, Kind: "virtual", Mode: "offline"}
 	}
+	h.mu.Lock()
 	for id, d := range h.devices {
 		if h.active(d) {
 			device := d.diagDevice()
@@ -297,6 +303,7 @@ func (h *wsHub) diagDevices() []diagDevice {
 			devices[id] = device
 		}
 	}
+	h.mu.Unlock()
 	out := make([]diagDevice, 0, len(devices))
 	for _, d := range devices {
 		out = append(out, d)

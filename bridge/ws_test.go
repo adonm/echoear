@@ -340,6 +340,46 @@ func TestWSMirrorAndControls(t *testing.T) {
 	dev.until(t, hasWS("chime", `"kind":"cancel"`))
 }
 
+func TestWSWebOnlyDisplayAndIdenticalAppRender(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "phone-ab12"
+	web := testConnectWS(t, base, "unit", true)
+	web.hello(t, id, "Cake")
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	native := d.svg.fb != nil
+	b.ws.mu.Unlock()
+	if native {
+		t.Fatal("native framebuffer allocated for a browser cat")
+	}
+	const code = `function render() {
+		return '<svg><circle data-id="app-dot" cx="180" cy="180" r="35" fill="#3579da"/></svg>';
+	} function onTap(s,p,id) { if (id === "app-dot") chime("tap"); }`
+	toolTest(t, base, "run_app", object{"devices": id, "code": code}, false)
+	web.until(t, func(f wsFrame) bool {
+		if isDisplay(f) {
+			t.Fatal("web-only app received RGB565")
+		}
+		return hasWS("svg", "app-dot")(f)
+	})
+	b.ws.mu.Lock()
+	native = d.svg.fb != nil || d.appView.fb != nil
+	hit := hitID(d.svg.hits, 180, 180)
+	rev, gen := d.rev, d.renderGen
+	b.ws.mu.Unlock()
+	if native || hit != "app-dot" {
+		t.Fatal("web-only app needs hitboxes but no native framebuffer", hit)
+	}
+	web.json(t, object{"ev": "tap", "id": "app-dot", "x": 180, "y": 180})
+	web.until(t, hasWS("chime", `"kind":"tap"`))
+	b.ws.mu.Lock()
+	unchanged := d.rev == rev && d.renderGen == gen
+	b.ws.mu.Unlock()
+	if !unchanged {
+		t.Fatal("identical app SVG scheduled a new frame")
+	}
+}
+
 func setupTestHex(t *testing.T, dir string, handle http.HandlerFunc) hexClient {
 	t.Helper()
 	srv := httptest.NewServer(handle)
@@ -441,19 +481,20 @@ func TestWSRecordingLimits(t *testing.T) {
 				b.ws.mu.Unlock()
 			}
 			dev.until(t, hasWS("rec", `"action":"stop","op":"rec","target":""`))
-			cancelled := false
 			dev.until(t, func(f wsFrame) bool {
-				cancelled = cancelled || hasWS("chime", `"kind":"cancel"`)(f)
+				if hasWS("chime", `"kind":"cancel"`)(f) {
+					t.Fatal("recording limits must not play the explicit cancel chime")
+				}
 				return hasWS("mode", `"mode":"idle"`)(f)
 			})
 			select {
 			case <-hexCalled:
-				if len(tc.pcm) == 0 || cancelled {
-					t.Fatal("unexpected transcription or cancellation")
+				if len(tc.pcm) == 0 {
+					t.Fatal("transcribed an empty recording")
 				}
 			default:
-				if len(tc.pcm) != 0 || !cancelled {
-					t.Fatal("captured PCM was not transcribed or an empty recording was not cancelled")
+				if len(tc.pcm) != 0 {
+					t.Fatal("captured PCM was not transcribed")
 				}
 			}
 			b.ws.mu.Lock()
@@ -465,6 +506,96 @@ func TestWSRecordingLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWSHardwareSendWaitsForFinalPCM(t *testing.T) {
+	for _, recEnd := range []bool{true, false} {
+		name := "rec_end"
+		if !recEnd {
+			name = "fail-safe"
+		}
+		t.Run(name, func(t *testing.T) {
+			const id = "echoear-dma"
+			const samples = sampleRate * 80 / 1000
+			first := bytes.Repeat([]byte{12, 0}, samples)
+			tail := bytes.Repeat([]byte{23, 0}, samples)
+			pcm := first
+			if recEnd {
+				pcm = slices.Concat(first, tail)
+			}
+			pad := make([]byte, len(hexSilence))
+			want := WrapWAV(slices.Concat(pad, pcm, pad))
+			wav := make(chan []byte, 2)
+			b, base := wsHarness(t, func(b *bridge, dir string) {
+				b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
+					got, _ := io.ReadAll(r.Body)
+					wav <- got
+					_, _ = io.WriteString(w, `{"transcript":""}`)
+				})
+			})
+			dev, web := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
+			dev.hello(t, id, "Cake")
+			web.watch(t, id)
+			dev.json(t, object{"ev": "rec_start"})
+			web.until(t, hasWS("svg", "rec-send"))
+			dev.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, first...)))
+			dev.json(t, object{"ev": "tap", "x": 247, "y": 310})
+			dev.until(t, hasWS("rec", `"action":"stop","op":"rec","target":""`))
+			b.ws.mu.Lock()
+			d := b.ws.devices[id]
+			stopping := d.recOpen && d.recStopping && d.recStopTimer != nil && bytes.Equal(d.mic, first) && !d.busy
+			b.ws.mu.Unlock()
+			if !stopping {
+				t.Fatal("Send finalized before it could receive the final DMA packet")
+			}
+			if recEnd {
+				dev.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, tail...)))
+				dev.json(t, object{"ev": "rec_end"})
+			}
+			select {
+			case got := <-wav:
+				if !bytes.Equal(got, want) {
+					t.Fatalf("STT got %d WAV bytes, want %d with intact PCM", len(got), len(want))
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("recording was not finalized")
+			}
+			b.ws.mu.Lock()
+			cleared := d.recAt.IsZero() && !d.recOpen && !d.recStopping && d.recStopTimer == nil && len(d.mic) == 0
+			b.ws.mu.Unlock()
+			if !cleared {
+				t.Fatal("recording did not clear its stop timer and PCM")
+			}
+		})
+	}
+}
+
+func TestWSHardwareSendFailsafeDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &bridge{root: t.Context()}
+		c := &wsClient{role: "device", ctx: t.Context(), out: make(chan wsFrame, 8)}
+		d := &wsDevice{client: c, key: "echoear-no-ack", recAt: time.Now(), recOpen: true, screen: roundScreen, cat: blankCat()}
+		h := &wsHub{b: b, devices: map[string]*wsDevice{d.key: d}}
+		h.mu.Lock()
+		h.recordingControl(d, time.Now(), false)
+		h.mu.Unlock()
+		time.Sleep(449 * time.Millisecond)
+		synctest.Wait()
+		h.mu.Lock()
+		waiting := d.recOpen && d.recStopping
+		h.mu.Unlock()
+		if !waiting {
+			t.Fatal("fail-safe fired before 450 ms")
+		}
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		h.mu.Lock()
+		done := !d.recOpen && !d.recStopping && d.recStopTimer == nil
+		h.mu.Unlock()
+		if !done {
+			t.Fatal("fail-safe did not clear recording at 450 ms")
+		}
+	})
 }
 
 func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
@@ -611,6 +742,63 @@ func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
 	}
 	phone.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
 	phone.until(t, hasWS("mode", `"mode":"idle"`))
+}
+
+func TestWSPlaybackAbortIgnoresOldACKs(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "echoear-abort"
+	dev := testConnectWS(t, base, "unit", false)
+	dev.hello(t, id, "Cake")
+	play := func() json.Number {
+		stream := newAudioStream()
+		stream.append(bytes.Repeat([]byte{12, 0}, 800))
+		stream.finish(nil)
+		b.ws.mu.Lock()
+		d := b.ws.devices[id]
+		b.ws.play(d, stream)
+		audio := json.Number(strconv.FormatUint(d.audio, 10))
+		b.ws.mu.Unlock()
+		return audio
+	}
+	first := play()
+	dev.until(t, hasWS("tts", `"state":"end"`))
+	second := play()
+	if first == second {
+		t.Fatal("replacement reused the aborted generation")
+	}
+	abort := dev.until(t, func(f wsFrame) bool {
+		if hasWS("chime", `"kind":"cancel"`)(f) || hasWS("tts", `"state":"end"`)(f) || hasWS("tts", `"state":"start"`)(f) {
+			t.Fatalf("abort did not precede replacement: %s", f.data)
+		}
+		return hasWS("tts", `"state":"abort"`)(f)
+	})
+	if got := testObject(t, abort.data)["audio"]; got != first {
+		t.Fatalf("abort used audio ID %v, want %v", got, first)
+	}
+	dev.until(t, hasWS("tts", `"state":"end"`))
+	dev.json(t, object{"ev": "tts_ack", "state": "done", "audio": first})
+	dev.json(t, object{"ev": "tts_ack", "state": "interrupted", "audio": first})
+	dev.barrier(t)
+	awaiting := func() bool {
+		b.ws.mu.Lock()
+		defer b.ws.mu.Unlock()
+		return b.ws.devices[id].awaitAck
+	}
+	if !awaiting() {
+		t.Fatal("aborted stream ACK cleared replacement playback")
+	}
+	dev.json(t, object{"ev": "tts_ack", "state": "done", "audio": second})
+	dev.barrier(t)
+	if awaiting() {
+		t.Fatal("matching audio ACK did not clear replacement playback")
+	}
+	play()
+	dev.until(t, hasWS("tts", `"state":"end"`))
+	dev.json(t, object{"ev": "tts_ack", "state": "done"})
+	dev.barrier(t)
+	if awaiting() {
+		t.Fatal("0.8.4 ACK without an audio ID was not accepted")
+	}
 }
 
 func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {

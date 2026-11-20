@@ -1,13 +1,71 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"image"
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestAppVMLeavesHubUnlockedAndCannotPublishAfterExit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &bridge{root: t.Context()}
+		c := &wsClient{role: "web", ctx: t.Context(), out: make(chan wsFrame, 8)}
+		d := &wsDevice{client: c, key: "phone-a100", screen: roundScreen, cat: blankCat()}
+		h := &wsHub{b: b, devices: map[string]*wsDevice{d.key: d}}
+		const code = `function init() { return {color: "red"}; }
+			function render(s) { return '<svg><rect width="360" height="360" fill="' + s.color + '"/></svg>'; }
+			function onTap(s) { waitForTest(); s.color = "lime"; chime("tap"); }`
+		a, views, err := initApp(savedApp{Code: code}, []appPlayer{{id: d.key}}, nil, []*wsDevice{d})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entered, proceed := make(chan struct{}), make(chan struct{})
+		release := syncOnceClose(proceed)
+		defer release()
+		if err := a.vm.Set("waitForTest", func() {
+			close(entered)
+			<-proceed
+		}); err != nil {
+			t.Fatal(err)
+		}
+		a.ctx, a.cancel = context.WithCancel(t.Context())
+		h.mu.Lock()
+		d.app, d.appView = a, views[0]
+		h.render(d, time.Now(), false)
+		h.mu.Unlock()
+		synctest.Wait()
+		h.mu.Lock()
+		h.updateApp(a, 0, "", 180, 180, time.Now())
+		h.mu.Unlock()
+		synctest.Wait()
+		select {
+		case <-entered:
+		default:
+			t.Fatal("app tap did not run")
+		}
+		if !h.mu.TryLock() {
+			t.Fatal("VM held the global hub lock")
+		}
+		h.closeApp(a, time.Now())
+		h.mu.Unlock()
+		release()
+		synctest.Wait()
+		if d.app != nil || d.displayApp != nil || !strings.Contains(d.svg.source, "cat-ring") {
+			t.Fatal("exited app published its superseded render")
+		}
+		for len(c.out) > 0 {
+			f := <-c.out
+			if hasWS("chime", `"kind":"tap"`)(f) || hasWS("svg", "lime")(f) {
+				t.Fatal("exited app's effects escaped", string(f.data))
+			}
+		}
+	})
+}
 
 func (s *testWS) helloV2(t *testing.T, id, cat string) wsFrame {
 	t.Helper()
@@ -45,10 +103,10 @@ func TestAppSandboxAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.update(0, "spot", 180, 180); err == nil || !strings.Contains(err.Error(), "timeout") {
+	if _, err := app.update(0, "spot", 180, 180, nil); err == nil || !strings.Contains(err.Error(), "timeout") {
 		t.Fatal(err)
 	}
-	if _, err := app.screens(); err != nil {
+	if _, err := app.screens(nil); err != nil {
 		t.Fatalf("interruption leaked into next call: %v", err)
 	}
 }
@@ -146,7 +204,7 @@ func TestTicTacToePersonalizedAndAuthoritative(t *testing.T) {
 	requireView(1, "Waiting...")
 	apply := func(index int, id string) {
 		t.Helper()
-		views, err = a.update(index, id, 150, 150)
+		views, err = a.update(index, id, 150, 150, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

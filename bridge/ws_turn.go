@@ -11,6 +11,7 @@ const (
 	pcmPrefix    = 0x02
 	pcmPacket    = 4 << 10
 	maxAudioLead = 8 * time.Second
+	recStopWait  = 450 * time.Millisecond
 )
 
 func recordTarget(s string) (string, bool) {
@@ -19,6 +20,10 @@ func recordTarget(s string) (string, bool) {
 }
 
 func (h *wsHub) clearRecording(d *wsDevice) {
+	if d.recStopTimer != nil {
+		d.recStopTimer.Stop()
+		d.recStopTimer = nil
+	}
 	d.recAt, d.recOpen, d.recTarget, d.mic = time.Time{}, false, "", nil
 	d.recStopping = false
 }
@@ -40,15 +45,29 @@ func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
 	if d.recAt.IsZero() || d.recStopping && !cancelled {
 		return
 	}
-	h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget, "cancelled": cancelled}, false)
 	if cancelled {
+		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget, "cancelled": true}, false)
 		d.recIgnoreStart = !d.recOpen
 		h.endRecording(d, wsEvent{Cancelled: true}, now)
-	} else if len(d.mic) != 0 && d.client.role != "web" {
-		h.endRecording(d, wsEvent{}, now)
-	} else {
-		d.recStopping = true // Let the client finish and deliver any pending PCM.
+		return
 	}
+	h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
+	d.recStopping = true
+	if d.client.role == "web" {
+		return
+	}
+	// Keep accepting DMA packets until the board's rec_end. The timer is
+	// tied to this stop request, so it cannot end a subsequent recording.
+	var timer *time.Timer
+	timer = time.AfterFunc(recStopWait, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.active(d) && d.recStopTimer == timer {
+			d.recIgnoreStart = !d.recOpen
+			h.endRecording(d, wsEvent{}, time.Now())
+		}
+	})
+	d.recStopTimer = timer
 }
 
 func (h *wsHub) micChunk(c *wsClient, data []byte) {
@@ -71,7 +90,7 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 
 func (h *wsHub) stopRecordingAtLimit(d *wsDevice, now time.Time) {
 	h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
-	h.endRecording(d, wsEvent{Cancelled: len(d.mic) == 0}, now)
+	h.endRecording(d, wsEvent{}, now)
 }
 
 func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
@@ -458,11 +477,8 @@ func (h *wsHub) stopPlayback(d *wsDevice, notify bool) {
 		d.stopAudio()
 		d.stopAudio = nil
 	}
-	if d.ttsStarted {
-		h.push(d, object{"op": "tts", "state": "end", "audio": d.audio}, false)
-	}
 	if notify && (d.ttsStarted || d.awaitAck) {
-		h.push(d, object{"op": "chime", "kind": "cancel"}, false)
+		h.push(d, object{"op": "tts", "state": "abort", "audio": d.audio}, false)
 	}
 	d.ttsStarted, d.awaitAck = false, false
 	d.audio++
@@ -654,7 +670,10 @@ func (h *wsHub) speakLocalAfter(d *wsDevice, text string, prefix []byte) {
 		}
 		return
 	}
-	voice := h.b.voiceFor(d.who)
+	voice := d.voice
+	if voice == "" {
+		voice = h.b.voices.defaultFor(d.voiceTheme())
+	}
 	stream := newAudioStream()
 	if len(prefix) != 0 {
 		stream.append(prefix)

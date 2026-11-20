@@ -119,8 +119,8 @@ type appEffect struct {
 	all        bool
 }
 
-// VM access is serialized by the hub after initialization. Tick scheduling
-// reuses the hub animation loop so an instance owns no background goroutines.
+// One worker owns the VM and lastScreens after initialization. The hub owns
+// device membership, queued events, and tick scheduling.
 type appInstance struct {
 	spec                                           savedApp
 	players                                        []appPlayer
@@ -132,8 +132,20 @@ type appInstance struct {
 	memory                                         map[string]json.RawMessage
 	effects                                        []appEffect
 	allowEffects                                   bool
+	geometry                                       []screenGeometry
+	lastScreens                                    []svgScreen
+	ctx                                            context.Context
+	cancel                                         context.CancelFunc
+	events                                         []appEvent
+	running, tickQueued                            bool
 	nextTick, timeOfSpeech                         time.Time
 	remaining                                      int
+}
+
+type appEvent struct {
+	i, x, y int
+	id      string
+	now     time.Time
 }
 
 func (a *appInstance) runJS(fn func() (goja.Value, error)) (goja.Value, error) {
@@ -187,7 +199,16 @@ func (a *appInstance) player(i int) goja.Value {
 }
 
 func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice) (*appInstance, []svgScreen, error) {
-	a := &appInstance{spec: spec, players: players, memory: memory, devices: devices, scope: "app:" + spec.Name}
+	a := &appInstance{spec: spec, players: players, memory: memory, devices: devices, scope: "app:" + spec.Name,
+		geometry: make([]screenGeometry, len(players)), lastScreens: make([]svgScreen, len(players))}
+	for i := range players {
+		// Geometry and the client role do not change after hello.
+		if devices == nil {
+			a.geometry[i] = roundScreen
+		} else if devices[i].client.role != "web" {
+			a.geometry[i] = devices[i].screen
+		}
+	}
 	if spec.Code != "" {
 		if len(spec.Code) > 16<<10 {
 			return nil, nil, problem(400, "App code exceeds 16 KB")
@@ -196,7 +217,7 @@ func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessa
 			return nil, nil, err
 		}
 	}
-	screens, err := a.screens()
+	screens, err := a.screens(nil)
 	return a, screens, err
 }
 
@@ -351,53 +372,41 @@ func (a *appInstance) initVM() error {
 	return nil
 }
 
-func (a *appInstance) screens() ([]svgScreen, error) {
+func (a *appInstance) screens(connected []bool) ([]svgScreen, error) {
 	out := make([]svgScreen, len(a.players))
-	static := make(map[screenGeometry]svgScreen)
 	for i := range out {
-		if a.devices != nil && a.devices[i] == nil {
+		if connected != nil && !connected[i] {
 			continue
 		}
-		geometry := roundScreen
-		if a.devices != nil {
-			geometry = a.devices[i].screen
-			if a.devices[i].virtual() {
-				geometry = screenGeometry{}
+		raw := a.spec.SVG
+		if a.vm != nil {
+			value, err := a.call(a.render, a.state, a.player(i))
+			if err != nil {
+				return nil, err
 			}
-		}
-		if a.vm == nil {
-			screen, ok := static[geometry]
+			s, ok := value.(goja.String)
 			if !ok {
-				var err error
-				screen, err = buildScreen(a.spec.SVG, true, geometry)
-				if err != nil {
-					return nil, err
-				}
-				static[geometry] = screen
+				return nil, fmt.Errorf("app.js render must return an SVG string")
 			}
-			out[i] = screen
+			if s.Length() > maxSVG {
+				return nil, fmt.Errorf("app.js render: SVG exceeds 64 KB")
+			}
+			raw = s.String()
+		}
+		if last := a.lastScreens[i]; last.source != "" && last.raw == raw {
+			out[i] = last
 			continue
 		}
-		value, err := a.call(a.render, a.state, a.player(i))
-		if err != nil {
-			return nil, err
-		}
-		s, ok := value.(goja.String)
-		if !ok {
-			return nil, fmt.Errorf("app.js render must return an SVG string")
-		}
-		if s.Length() > maxSVG {
-			return nil, fmt.Errorf("app.js render: SVG exceeds 64 KB")
-		}
-		out[i], err = buildScreen(s.String(), true, geometry)
+		screen, err := buildScreen(raw, true, a.geometry[i])
 		if err != nil {
 			return nil, fmt.Errorf("render for player %d: %w", i, err)
 		}
+		a.lastScreens[i], out[i] = screen, screen
 	}
 	return out, nil
 }
 
-func (a *appInstance) update(i int, id string, x, y int) ([]svgScreen, error) {
+func (a *appInstance) update(i int, id string, x, y int, connected []bool) ([]svgScreen, error) {
 	fn := a.tick
 	if i >= 0 {
 		fn = a.tap
@@ -422,7 +431,7 @@ func (a *appInstance) update(i int, id string, x, y int) ([]svgScreen, error) {
 	if slices.ContainsFunc(a.effects, func(e appEffect) bool { return e.kind == "exit" }) {
 		return nil, nil
 	}
-	return a.screens()
+	return a.screens(connected)
 }
 
 func appDevices(raw any) ([]string, error) {
@@ -460,6 +469,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	h.mu.Lock()
 	players := make([]appPlayer, 0, len(ids))
 	devices := make([]*wsDevice, 0, len(ids))
+	gens := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		d := h.devices[strings.ToLower(id)]
 		if d == nil || !h.active(d) {
@@ -467,6 +477,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 			return nil, problem(409, "Device is not connected: "+id)
 		}
 		devices = append(devices, d)
+		gens = append(gens, d.appGen)
 		players = append(players, appPlayer{d.who.DeviceID, d.cat.Name, len(players)})
 	}
 	h.mu.Unlock()
@@ -474,7 +485,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for _, d := range devices {
-			if d.app != nil {
+			if h.active(d) && d.app != nil {
 				h.closeApp(d.app, time.Now())
 			}
 		}
@@ -542,7 +553,11 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		}
 		a.SVG = svgString(clean)
 		if a.Code != "" {
-			if _, _, err := renderSVG(a.SVG); err != nil {
+			var geometry screenGeometry
+			if slices.ContainsFunc(devices, func(d *wsDevice) bool { return d.client.role == "device" }) {
+				geometry = roundScreen
+			}
+			if _, err := buildScreen(a.SVG, false, geometry); err != nil {
 				return nil, problem(400, err.Error())
 			}
 		}
@@ -561,19 +576,23 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	if err != nil {
 		return nil, problem(400, err.Error())
 	}
+	if save != "" {
+		if err := b.saveApp(ctx, a); err != nil {
+			return nil, err
+		}
+	}
 	h.mu.Lock()
-	for _, d := range devices {
+	for i, d := range devices {
 		if !h.active(d) {
 			h.mu.Unlock()
 			return nil, problem(409, "Device disconnected: "+d.who.DeviceID)
 		}
-	}
-	if save != "" {
-		if err := b.saveApp(ctx, a); err != nil {
+		if d.appGen != gens[i] {
 			h.mu.Unlock()
-			return nil, err
+			return nil, problem(409, "Device view changed: "+d.who.DeviceID)
 		}
 	}
+	inst.ctx, inst.cancel = context.WithCancel(b.root)
 	now := time.Now()
 	if inst.tick != nil && a.TickMS != 0 {
 		inst.remaining = a.MaxTicks
@@ -649,13 +668,15 @@ func (h *wsHub) dropApp(d *wsDevice) {
 			}
 		}
 		d.app, d.appView = nil, svgScreen{}
+		if !slices.ContainsFunc(a.devices, func(d *wsDevice) bool { return d != nil }) {
+			a.cancel()
+		}
 	}
 }
 
 func (h *wsHub) closeApp(a *appInstance, now time.Time) {
 	for _, d := range a.devices {
 		if d != nil {
-			h.dropApp(d)
 			h.clearView(d)
 			h.render(d, now, false)
 		}
@@ -666,22 +687,86 @@ func (h *wsHub) tickApps(now time.Time) {
 	seen := map[*appInstance]bool{}
 	for _, d := range h.devices {
 		a := d.app
-		if a == nil || seen[a] || a.remaining == 0 || now.Before(a.nextTick) || !h.active(d) {
+		if a == nil || seen[a] || a.remaining == 0 || a.tickQueued || now.Before(a.nextTick) || !h.active(d) {
 			continue
 		}
 		seen[a] = true
-		a.remaining--
-		a.nextTick = now.Add(time.Duration(a.spec.TickMS) * time.Millisecond)
-		h.updateApp(a, -1, "", 0, 0, now)
+		if h.updateApp(a, -1, "", 0, 0, now) {
+			a.remaining--
+			a.nextTick = now.Add(time.Duration(a.spec.TickMS) * time.Millisecond)
+		}
 	}
 }
 
-func (h *wsHub) updateApp(a *appInstance, i int, id string, x, y int, now time.Time) {
+func (h *wsHub) updateApp(a *appInstance, i int, id string, x, y int, now time.Time) bool {
 	if id == exitNode {
 		h.closeApp(a, now)
+		return true
+	}
+	if i >= 0 && a.tap == nil || i < 0 && a.tick == nil || len(a.events) >= 32 {
+		return false
+	}
+	a.events = append(a.events, appEvent{i, x, y, id, now})
+	if i < 0 {
+		a.tickQueued = true
+	}
+	if !a.running {
+		a.running = true
+		go h.runAppEvents(a)
+	}
+	return true
+}
+
+func (h *wsHub) runAppEvents(a *appInstance) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for len(a.events) != 0 && !h.closed && a.ctx.Err() == nil {
+		ev := a.events[0]
+		a.events = a.events[1:]
+		if ev.i >= 0 && (a.devices[ev.i] == nil || !h.active(a.devices[ev.i])) {
+			continue
+		}
+		var connected [8]bool
+		for i, d := range a.devices {
+			connected[i] = d != nil && h.active(d)
+		}
+		h.mu.Unlock()
+		views, err := a.update(ev.i, ev.id, ev.x, ev.y, connected[:len(a.devices)])
+		if err == nil {
+			h.storeAppEffects(a)
+		}
+		h.mu.Lock()
+		if ev.i < 0 {
+			a.tickQueued = false
+		}
+		if !h.closed && a.ctx.Err() == nil {
+			h.commitAppEvent(a, ev, views, err)
+		}
+	}
+	a.running, a.events = false, nil
+}
+
+func (h *wsHub) storeAppEffects(a *appInstance) {
+	if h.b.db == nil {
 		return
 	}
-	screens, err := a.update(i, id, x, y)
+	for _, e := range a.effects {
+		if e.kind == "exit" || a.ctx.Err() != nil {
+			return
+		}
+		if e.kind == "store" {
+			ctx, cancel := context.WithTimeout(a.ctx, 200*time.Millisecond)
+			_, err := h.b.db.setMemory(ctx, memoryWrite{a.scope, e.text, string(e.value)}, nil)
+			cancel()
+			if err == nil {
+				a.memory[e.text] = e.value
+			}
+		}
+	}
+}
+
+func (h *wsHub) commitAppEvent(a *appInstance, ev appEvent, views []svgScreen, err error) {
+	now := ev.now
 	if err != nil {
 		for _, d := range a.devices {
 			if d != nil && h.active(d) {
@@ -699,17 +784,6 @@ func (h *wsHub) updateApp(a *appInstance, i int, id string, x, y int, now time.T
 			return
 		}
 		if e.kind == "store" {
-			if h.b.db != nil {
-				ctx, cancel := context.WithTimeout(h.b.root, 200*time.Millisecond)
-				_, err := h.b.db.setMemory(ctx, memoryWrite{a.scope, e.text, string(e.value)}, nil)
-				cancel()
-				if err == nil {
-					if a.memory == nil {
-						a.memory = map[string]json.RawMessage{}
-					}
-					a.memory[e.text] = e.value
-				}
-			}
 			continue
 		}
 		if e.kind == "say" {
@@ -719,7 +793,7 @@ func (h *wsHub) updateApp(a *appInstance, i int, id string, x, y int, now time.T
 			a.timeOfSpeech = now
 		}
 		for j, d := range a.devices {
-			if d == nil || !h.active(d) || i >= 0 && j != i && !e.all {
+			if d == nil || !h.active(d) || ev.i >= 0 && j != ev.i && !e.all {
 				continue
 			}
 			switch e.kind {
@@ -732,10 +806,10 @@ func (h *wsHub) updateApp(a *appInstance, i int, id string, x, y int, now time.T
 			}
 		}
 	}
-	for j, screen := range screens {
-		if d := a.devices[j]; d != nil && h.active(d) {
+	for j, screen := range views {
+		if d := a.devices[j]; d != nil && h.active(d) && screen.source != "" && d.appView.raw != screen.raw {
 			d.appView = screen
-			h.render(d, now, false)
+			h.render(d, time.Now(), false)
 		}
 	}
 }

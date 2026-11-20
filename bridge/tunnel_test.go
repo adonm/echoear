@@ -315,8 +315,12 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	conn.json(t, object{"ev": "watch", "device_id": id})
 	conn.until(t, hasWS("svg", "#D8C7FF"))
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
-	conn.until(t, hasWS("svg", "#F3F4F6"))
-	conn.until(t, hasWS("cat", `"configured":false`))
+	faceSeen, catSeen := false, false
+	conn.until(t, func(f wsFrame) bool {
+		faceSeen = faceSeen || hasWS("svg", "#F3F4F6")(f)
+		catSeen = catSeen || hasWS("cat", `"configured":false`)(f)
+		return faceSeen && catSeen
+	})
 	scope = testObject(t, testRequest(t, "GET", scoped+"/api/scope", token, nil, 200))
 	if scope["character"] != "New Cat" || scope["cat"].(object)["configured"] != false {
 		t.Fatal("scope retained the old cat after reset", scope)

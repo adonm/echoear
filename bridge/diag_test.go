@@ -192,6 +192,7 @@ func TestAccessibleRecordingControls(t *testing.T) {
 	dev.until(t, hasWS("chime", `"kind":"cancel"`))
 	dev.json(t, object{"ev": "rec_end"})
 	dev.barrier(t)
+	mirror.until(t, hasWS("svg", `data-id=\"menu\"`))
 	select {
 	case <-transcribed:
 		t.Fatal("cancelled PCM reached Hex")
@@ -202,9 +203,9 @@ func TestAccessibleRecordingControls(t *testing.T) {
 	dev.until(t, hasWS("rec", `"action":"stop"`))
 	select {
 	case <-transcribed:
-		// The target did not send rec_end; buffered hardware PCM went immediately.
+		// The target did not send rec_end; the fail-safe used buffered hardware PCM.
 	case <-time.After(2 * time.Second):
-		t.Fatal("Send waited for the hardware rec_end event")
+		t.Fatal("Send did not finalize after the hardware rec_end timeout")
 	}
 	dev.json(t, object{"ev": "rec_end"})
 	dev.barrier(t)
@@ -231,7 +232,7 @@ func TestAccessibleStopAndFaceInterrupt(t *testing.T) {
 		b.ws.mu.Unlock()
 		mirror.until(t, hasWS("svg", `data-id=\"stop\"`))
 		mirror.json(t, object{"ev": "tap", "id": target})
-		dev.until(t, hasWS("chime", `"kind":"cancel"`))
+		mirror.until(t, hasWS("svg", `data-id=\"menu\"`))
 		select {
 		case <-cancelled:
 		case <-time.After(2 * time.Second):

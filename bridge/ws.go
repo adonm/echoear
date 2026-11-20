@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"maps"
 	"math"
 	"net"
@@ -71,6 +73,7 @@ type wsClient struct {
 	drained    chan struct{}
 	role       string
 	watch      string
+	lastPeers  wsFrame
 	device     *wsDevice
 	scope      *virtualClient
 	pingMu     sync.Mutex
@@ -86,6 +89,8 @@ type wsDevice struct {
 	screen     screenGeometry
 	board      string
 	theme      string
+	voice      string
+	announcing bool
 	cat        catState
 	vol        int
 	autoVol    bool
@@ -96,9 +101,14 @@ type wsDevice struct {
 	telemetry  wsStatus
 	frame      *diagFrame
 	svg        svgScreen
-	svgRaw     string
+	svgWire    wsFrame
+	displayApp *appInstance
+	renderGen  uint64
+	rendering  bool
+	renderNext *renderRequest
 	app        *appInstance
 	appView    svgScreen
+	appGen     uint64
 
 	scene    sceneView
 	view     *sceneView
@@ -119,6 +129,7 @@ type wsDevice struct {
 	recOpen        bool
 	recTarget      string
 	recStopping    bool
+	recStopTimer   *time.Timer
 	recIgnoreStart bool
 	mic            []byte
 	turn           uint64
@@ -140,13 +151,17 @@ func (d *wsDevice) virtual() bool { return d.client.role == "web" || webDeviceID
 // The hub lock orders state changes and control frames. Socket writes,
 // playback queue waits, and backend requests never run under it.
 type wsHub struct {
-	b       *bridge
-	mu      sync.Mutex
-	conns   sync.WaitGroup
-	clients map[*wsClient]struct{}
-	devices map[string]*wsDevice
-	closed  bool
-	peers   string
+	b             *bridge
+	mu            sync.Mutex
+	settingsMu    sync.Mutex
+	conns         sync.WaitGroup
+	clients       map[*wsClient]struct{}
+	devices       map[string]*wsDevice
+	closed        bool
+	peers         string
+	storedPeers   []peerDisplay
+	refreshing    bool
+	refreshNeeded bool
 }
 
 func newWSHub(b *bridge) *wsHub {
@@ -344,7 +359,9 @@ func (h *wsHub) push(d *wsDevice, v object, mirror bool) {
 	}
 }
 
-func (h *wsHub) active(d *wsDevice) bool { return h.devices[d.key] == d && d.client.ctx.Err() == nil }
+func (h *wsHub) active(d *wsDevice) bool {
+	return !h.closed && h.devices[d.key] == d && d.client.ctx.Err() == nil
+}
 
 func (h *wsHub) detach(c *wsClient) {
 	h.mu.Lock()
@@ -353,6 +370,7 @@ func (h *wsHub) detach(c *wsClient) {
 	if d := c.device; d != nil && h.devices[d.key] == d {
 		h.dropApp(d)
 		delete(h.devices, d.key)
+		h.clearRecording(d)
 		h.cancelTurn(d)
 		h.stopPlayback(d, false)
 		h.broadcastPeers()
@@ -366,6 +384,7 @@ func (h *wsHub) disconnectDevice(id string) {
 		h.dropApp(d)
 		d.client.cancel()
 		delete(h.devices, id)
+		h.clearRecording(d)
 		h.cancelTurn(d)
 		h.stopPlayback(d, false)
 		h.broadcastPeers()
@@ -373,9 +392,25 @@ func (h *wsHub) disconnectDevice(id string) {
 }
 
 func (h *wsHub) peerSnapshot(sender string) ([]peer, error) {
+	stored, err := h.b.peers.snapshot(sender)
+	if err != nil {
+		return nil, err
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.combinedPeers(sender)
+	online := h.onlinePeers(sender)
+	h.mu.Unlock()
+	list := make([]peer, 0, len(stored)+len(online))
+	for _, p := range stored {
+		if _, connected := online[strings.ToLower(p.DeviceID)]; !connected {
+			p.Character = h.b.catFor(p).Name
+			list = append(list, p)
+		}
+	}
+	for _, p := range online {
+		list = append(list, p.peer)
+	}
+	slices.SortFunc(list, func(a, b peer) int { return strings.Compare(a.DeviceID, b.DeviceID) })
+	return list, nil
 }
 
 func (b *bridge) peerSnapshot(sender string) ([]peer, error) {
@@ -389,16 +424,16 @@ func (b *bridge) peerSnapshot(sender string) ([]peer, error) {
 	return b.ws.peerSnapshot(sender)
 }
 
-func (h *wsHub) combinedPeers(sender string) ([]peer, error) {
-	stored, err := h.b.peers.snapshot(sender)
-	if err != nil {
-		return nil, err
-	}
-	index := make(map[string]int, len(stored))
-	for i, p := range stored {
-		index[strings.ToLower(p.DeviceID)] = i
-		stored[i].Character = h.b.catFor(p).Name
-	}
+type peerDisplay struct {
+	peer
+	cat      catLook
+	auto     bool
+	online   bool
+	firmware string
+}
+
+func (h *wsHub) onlinePeers(sender string) map[string]peerDisplay {
+	out := make(map[string]peerDisplay, len(h.devices))
 	for _, d := range h.devices {
 		if !h.active(d) || strings.EqualFold(sender, d.who.DeviceID) {
 			continue
@@ -408,63 +443,105 @@ func (h *wsHub) combinedPeers(sender string) ([]peer, error) {
 		if d.virtual() {
 			p.IP = ""
 		}
-		if i, ok := index[d.key]; ok {
-			stored[i] = p
-		} else {
-			stored = append(stored, p)
-		}
+		out[d.key] = peerDisplay{p, d.cat.catLook, d.autoVol, true, d.firmware}
 	}
-	slices.SortFunc(stored, func(a, b peer) int { return strings.Compare(a.DeviceID, b.DeviceID) })
-	return stored, nil
+	return out
 }
 
-func (h *wsHub) peerFrame() wsFrame {
-	list, _ := h.combinedPeers("")
-	p := publicPeers(list)
-	for i, entry := range p {
-		if d := h.devices[strings.ToLower(list[i].DeviceID)]; d != nil && h.active(d) {
-			entry["ws"], entry["online"], entry["firmware"] = true, true, d.firmware
-			entry["cat"] = d.cat.catLook
-			entry["auto_volume"] = d.autoVol
-		} else {
-			entry["ws"] = false
-			entry["cat"] = h.b.catFor(list[i]).catLook
-			entry["auto_volume"], _ = h.b.volumePrefs(list[i].DeviceID)
+func (h *wsHub) peerFrame(scoped bool) wsFrame {
+	online := h.onlinePeers("")
+	list := make([]peerDisplay, 0, len(h.storedPeers)+len(online))
+	if !scoped {
+		for _, p := range h.storedPeers {
+			if _, ok := online[strings.ToLower(p.DeviceID)]; !ok {
+				list = append(list, p)
+			}
 		}
 	}
-	return textFrame(object{"op": "peers", "devices": p})
-}
-
-func (h *wsHub) scopedPeerFrame() wsFrame {
-	list, _ := h.combinedPeers("")
+	for _, p := range online {
+		list = append(list, p)
+	}
+	slices.SortFunc(list, func(a, b peerDisplay) int { return strings.Compare(a.DeviceID, b.DeviceID) })
 	devices := make([]object, 0, len(list))
 	for _, p := range list {
-		if d := h.devices[strings.ToLower(p.DeviceID)]; d != nil && h.active(d) {
+		if scoped {
 			devices = append(devices, object{"device_id": p.DeviceID, "character": p.Character, "online": true})
+			continue
 		}
+		entry := object{"device_id": p.DeviceID, "character": p.Character, "ip": p.IP,
+			"port": p.Port, "last_seen": p.LastSeen, "online": p.online,
+			"ws": p.online, "cat": p.cat, "auto_volume": p.auto}
+		if p.online {
+			entry["firmware"] = p.firmware
+		}
+		devices = append(devices, entry)
 	}
 	return textFrame(object{"op": "peers", "devices": devices})
 }
 
 func (h *wsHub) broadcastPeers() {
+	h.broadcastPeerFrames()
+	for c := range h.clients {
+		if c.role == "web" && c.scope == nil {
+			h.refreshNeeded = true
+			if !h.refreshing {
+				h.refreshing = true
+				go h.refreshStoredPeers()
+			}
+			return
+		}
+	}
+}
+
+func (c *wsClient) pushPeers(f wsFrame) {
+	if !bytes.Equal(c.lastPeers.data, f.data) {
+		c.lastPeers = f
+		c.enqueue(f)
+	}
+}
+
+func (h *wsHub) refreshStoredPeers() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for h.refreshNeeded && !h.closed {
+		h.refreshNeeded = false
+		h.mu.Unlock()
+		list, err := h.b.peers.snapshot("")
+		stored := make([]peerDisplay, 0, len(list))
+		for _, p := range list {
+			cat := h.b.catFor(p)
+			p.Character = cat.Name
+			auto, _ := h.b.volumePrefs(p.DeviceID)
+			stored = append(stored, peerDisplay{peer: p, cat: cat.catLook, auto: auto})
+		}
+		h.mu.Lock()
+		if err == nil && !h.closed && !h.refreshNeeded {
+			h.storedPeers = stored
+			h.broadcastPeerFrames()
+		}
+	}
+	h.refreshing = false
+}
+
+func (h *wsHub) broadcastPeerFrames() {
 	if len(h.clients) == 0 {
 		h.peers = ""
 		return
 	}
-	f := h.peerFrame()
+	f := h.peerFrame(false)
 	if string(f.data) != h.peers {
 		h.peers = string(f.data)
 		var scoped wsFrame
 		for c := range h.clients {
 			switch {
-			case c.role != "web":
+			case c.role != "web" || c.device != nil && c.device.announcing:
 			case c.scope == nil:
-				c.enqueue(f)
+				c.pushPeers(f)
 			default:
 				if scoped.data == nil {
-					scoped = h.scopedPeerFrame()
+					scoped = h.peerFrame(true)
 				}
-				c.enqueue(scoped)
+				c.pushPeers(scoped)
 			}
 		}
 		for _, d := range h.devices {
@@ -480,6 +557,10 @@ func (h *wsHub) catChanged(id string, cat catState, profilesChanged bool) {
 	key := strings.ToLower(id)
 	if d := h.devices[key]; d != nil && h.active(d) {
 		d.cat = cat
+		d.voice = cat.Voice
+		if !h.b.voices.allowed(d.voice) {
+			d.voice = h.b.voices.defaultFor(d.voiceTheme())
+		}
 		h.clearView(d)
 		d.agentSetScene = d.busy
 		now := time.Now()
@@ -546,8 +627,14 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		return
 	}
 	if ev.Role == "web" && !phone && v.ID == "" {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.closed || c.ctx.Err() != nil {
+			return
+		}
 		c.role = "web"
-		c.enqueue(h.peerFrame())
+		c.pushPeers(h.peerFrame(false))
+		h.broadcastPeers()
 		return
 	}
 	screen, board := roundScreen, ""
@@ -609,15 +696,22 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: who,
 		firmware: shortText(ev.Firmware, 24, false), screen: screen, board: board,
-		theme: v.Theme, pct: -1, last: now, moodAt: now}
+		theme: v.Theme, pct: -1, last: now, moodAt: now, announcing: true}
 	d.cat = h.b.catFor(d.who)
+	d.voice = h.b.voices.get(d.who.DeviceID, d.voiceTheme())
 	d.autoVol, d.vol = h.b.volumePrefs(d.key)
 	if ev.Role == "device" {
 		d.telemetry.HasBattery = new(board == "esp-vocat")
 	}
 	d.status(ev.wsStatus)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed || c.ctx.Err() != nil {
+		return
+	}
 	if old := h.devices[d.key]; old != nil {
 		h.dropApp(old)
+		h.clearRecording(old)
 		h.cancelTurn(old)
 		h.stopPlayback(old, true)
 		old.client.cancel()
@@ -625,26 +719,26 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	h.devices[d.key], c.device, c.role = d, d, ev.Role
 	h.render(d, now, true)
+}
+
+func (h *wsHub) announce(d *wsDevice) {
+	d.announcing = false
+	c := d.client
 	if c.role == "web" {
-		c.enqueue(catFrame(d.who.DeviceID, d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme())))
+		c.enqueue(catFrame(d.who.DeviceID, d.cat, d.voice))
 	}
 	h.push(d, d.volumeFrame(false), true)
-	h.push(d, object{"op": "power", "brightness": 85}, true)
-	previous := h.peers
+	h.push(d, object{"op": "power", "brightness": d.brightness()}, true)
 	h.broadcastPeers()
-	if c.role == "web" && previous == h.peers {
-		if c.scope != nil {
-			c.enqueue(h.scopedPeerFrame())
-		} else {
-			c.enqueue(h.peerFrame())
-		}
+	if c.role == "web" {
+		c.pushPeers(h.peerFrame(c.scope != nil))
 	}
 	if h.b.worker != nil {
-		name := d.cat.Name
+		name, voice := d.cat.Name, d.voice
 		go func() {
 			ctx, cancel := context.WithTimeout(c.ctx, ttsWait)
 			defer cancel()
-			h.b.warmCharacter(ctx, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), name)
+			h.b.warmCharacter(ctx, voice, name)
 		}()
 	}
 }
@@ -707,6 +801,15 @@ func (d *wsDevice) voiceTheme() string {
 	return deviceTheme(d.who.Character)
 }
 
+type renderRequest struct {
+	view   sceneView
+	cat    *catState
+	pose   catPose
+	app    *appInstance
+	screen svgScreen
+	full   bool
+}
+
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	mood := "idle"
 	switch {
@@ -729,60 +832,137 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	pose := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 	pose.blink = pose.blink || now.Before(d.pet)
 	d.pose = pose
-	var view sceneView
-	var svg string
+	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full}
 	switch {
 	case d.drawer != "" && mood == "idle":
 		switch d.drawer {
 		case "volume":
-			view = volumeScene(d.autoVol, d.vol)
+			r.view = volumeScene(d.autoVol, d.vol)
 		case "voice":
-			view = voiceScene(h.b.voices.get(d.who.DeviceID, d.voiceTheme()))
+			r.view = voiceScene(d.voice)
 		case "intercom":
-			peers, _ := h.combinedPeers(d.who.DeviceID)
 			choices := []menuPeer{{"all", "Everyone", "#FFADAC", "#FFD68B"}}
-			for _, p := range peers {
-				if device := h.devices[strings.ToLower(p.DeviceID)]; device != nil && h.active(device) {
-					choices = append(choices, menuPeer{p.DeviceID, p.Character, device.cat.FaceBG, device.cat.AccentColor})
+			for _, other := range h.devices {
+				if other != d && h.active(other) {
+					choices = append(choices, menuPeer{other.who.DeviceID, other.cat.Name, other.cat.FaceBG, other.cat.AccentColor})
 				}
 			}
+			slices.SortFunc(choices[1:], func(a, b menuPeer) int { return strings.Compare(a.id, b.id) })
 			d.peerPage = min(max(0, d.peerPage), (len(choices)-1)/4)
-			view = intercomSceneMenu(choices, d.peerPage)
+			r.view = intercomSceneMenu(choices, d.peerPage)
 		case "stats":
 			if d.client.scope == nil {
 				d.statsAt = now
-				view = h.statsScene(d)
+				r.view = h.statsScene(d)
 				break
 			}
 			fallthrough
 		default:
-			view = menuHome(h.b.voices.get(d.who.DeviceID, d.voiceTheme()), d.autoVol, d.vol, d.client.scope != nil)
+			r.view = menuHome(d.voice, d.autoVol, d.vol, d.client.scope != nil)
 		}
 	case mood == "listening":
-		view = catChrome(d.cat, pose)
-		svg = view.svg(catArt(d.cat, pose))
+		r.cat, r.pose = new(d.cat), pose
 	case d.card != nil && (mood == "idle" || mood == "speaking" || mood != "sleepy" && d.card.duringTurn):
-		view = *d.card
+		r.view = *d.card
 	case d.app != nil && mood != "sleepy":
-		d.svgRaw = ""
-		d.scene = sceneView{title: d.app.spec.Title}
-		h.pushScreen(d, d.appView, full)
-		return
+		r.app, r.screen = d.app, d.appView
+		r.view.title = d.app.spec.Title
 	case d.view != nil && mood != "sleepy":
-		view = *d.view
+		r.view = *d.view
 	default:
-		view = catChrome(d.cat, pose)
-		svg = view.svg(catArt(d.cat, pose))
+		r.cat, r.pose = new(d.cat), pose
 	}
-	if svg == "" {
-		if mood == "thinking" || mood == "speaking" {
-			view.actions = maps.Clone(view.actions)
-			view.stopControl()
+	if r.cat == nil && r.app == nil && (mood == "thinking" || mood == "speaking") {
+		r.view.actions = maps.Clone(r.view.actions)
+		r.view.stopControl()
+	}
+	d.renderGen++
+	d.renderNext = &r
+	if !d.rendering {
+		d.rendering = true
+		go h.renderFrames(d)
+	}
+}
+
+// A device has one frame builder and one replaceable pending request. A dirty
+// rectangle is always based on the last frame committed to that device's queue.
+func (h *wsHub) renderFrames(d *wsDevice) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for d.renderNext != nil && h.active(d) {
+		r, gen, prev, rev := *d.renderNext, d.renderGen, d.svg, d.rev+1
+		web := d.client.role == "web"
+		var geometry screenGeometry
+		if d.client.role == "device" {
+			geometry = d.screen
 		}
-		svg = view.svg("")
+		d.renderNext = nil
+		h.mu.Unlock()
+
+		screen := r.screen
+		var err error
+		if r.app == nil {
+			var face string
+			if r.cat != nil {
+				r.view = catChrome(*r.cat, r.pose)
+				face = catArt(*r.cat, r.pose)
+			}
+			raw := r.view.svg(face)
+			if !r.full && raw == prev.raw {
+				screen = prev
+			} else {
+				screen, err = buildScreen(raw, false, geometry)
+			}
+		}
+		var svgWire, native wsFrame
+		var rawBytes int
+		if err == nil && (r.full && r.app == nil || screen.source != prev.source) {
+			start := time.Now()
+			if screen.fb != nil {
+				rect := dirtyRect(prev.fb, screen.fb, geometry)
+				if !rect.Empty() {
+					native = displayFrame(screen.fb, rect, rev, geometry.width)
+					rawBytes = 12 + rect.Dx()*rect.Dy()*2
+				}
+			}
+			screen.render += time.Since(start)
+			svgWire = textFrame(object{"op": "svg", "rev": rev, "svg": screen.source})
+		}
+
+		h.mu.Lock()
+		if !h.active(d) || d.renderGen != gen {
+			continue
+		}
+		if err != nil {
+			log.Printf("EchoEar screen: %v", err)
+			continue
+		}
+		d.scene, d.displayApp, d.svg = r.view, r.app, screen
+		if svgWire.data == nil {
+			continue
+		}
+		d.rev, d.svgWire = rev, svgWire
+		if web {
+			d.client.enqueue(svgWire)
+			h.trackFrame(d, screen.render, len(svgWire.data), len(screen.source), "svg")
+		} else if native.data != nil {
+			d.client.enqueue(native)
+			codec := "RGB565"
+			if native.data[9] == 1 {
+				codec = "RLE565"
+			}
+			h.trackFrame(d, screen.render, len(native.data), rawBytes, codec)
+		}
+		for c := range h.clients {
+			if c.watch == d.key {
+				c.enqueue(svgWire)
+			}
+		}
+		if d.announcing {
+			h.announce(d)
+		}
 	}
-	d.scene = view
-	h.renderSVGView(d, svg, full)
+	d.rendering, d.renderNext = false, nil
 }
 
 func (h *wsHub) wake(d *wsDevice, now time.Time) {
@@ -793,12 +973,15 @@ func (h *wsHub) wake(d *wsDevice, now time.Time) {
 func (h *wsHub) setSleeping(d *wsDevice, asleep bool) {
 	if d.asleep != asleep {
 		d.asleep = asleep
-		brightness := 85
-		if asleep {
-			brightness = 12
-		}
-		h.push(d, object{"op": "power", "brightness": brightness}, true)
+		h.push(d, object{"op": "power", "brightness": d.brightness()}, true)
 	}
+}
+
+func (d *wsDevice) brightness() int {
+	if d.asleep {
+		return 12
+	}
+	return 85
 }
 
 func (h *wsHub) animate(ctx context.Context) {
@@ -818,7 +1001,7 @@ func (h *wsHub) animate(ctx context.Context) {
 			h.tickApps(now)
 			for _, d := range h.devices {
 				switch {
-				case !d.recAt.IsZero() && now.Sub(d.recAt) > 90*time.Second:
+				case !d.recAt.IsZero() && d.recStopTimer == nil && now.Sub(d.recAt) > 90*time.Second:
 					h.stopRecordingAtLimit(d, now)
 				case d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)):
 					h.playbackDone(d, now)
@@ -846,21 +1029,24 @@ func (h *wsHub) animate(ctx context.Context) {
 
 func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed || c.ctx.Err() != nil {
+		h.mu.Unlock()
 		return
 	}
 	if c.scope != nil && ev.DeviceID != "" && ev.DeviceID != c.scope.ID {
+		h.mu.Unlock()
 		c.enqueue(textFrame(object{"op": "error", "status": 403, "error": "Device out of scope"}))
 		return
 	}
 	now := time.Now()
 	if c.role == "" {
+		h.mu.Unlock()
 		if ev.Event == "hello" {
 			h.hello(c, ev, now)
 		}
 		return
 	}
+	defer h.mu.Unlock()
 	d := c.device
 	if d == nil {
 		if ev.Event == "watch" && c.role == "web" {
@@ -870,13 +1056,11 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			}
 			c.watch = strings.ToLower(ev.DeviceID)
 			if d := h.devices[c.watch]; d != nil && h.active(d) {
-				c.enqueue(h.svgFrame(d))
-				c.enqueue(textFrame(d.volumeFrame(false)))
-				brightness := 85
-				if d.asleep {
-					brightness = 12
+				if d.svgWire.data != nil {
+					c.enqueue(d.svgWire)
 				}
-				c.enqueue(textFrame(object{"op": "power", "brightness": brightness}))
+				c.enqueue(textFrame(d.volumeFrame(false)))
+				c.enqueue(textFrame(object{"op": "power", "brightness": d.brightness()}))
 			} else {
 				c.watch = ""
 			}
@@ -894,7 +1078,9 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		return
 	}
 	if c.scope != nil && ev.Event == "watch" && ev.DeviceID == c.scope.ID {
-		c.enqueue(h.svgFrame(d))
+		if d.svgWire.data != nil {
+			c.enqueue(d.svgWire)
+		}
 		return
 	}
 	switch ev.Event {
@@ -989,9 +1175,11 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	} else if slices.ContainsFunc(d.svg.hits, func(hit hitBox) bool { return hit.id == ev.ID }) {
 		key = ev.ID
 	}
-	if d.app != nil && d.svg.source == d.appView.source {
-		if i := slices.Index(d.app.devices, d); i >= 0 {
-			h.updateApp(d.app, i, key, ev.X, ev.Y, now)
+	if d.displayApp != nil {
+		if d.app == d.displayApp {
+			if i := slices.Index(d.app.devices, d); i >= 0 {
+				h.updateApp(d.app, i, key, ev.X, ev.Y, now)
+			}
 		}
 		return
 	}
@@ -1021,30 +1209,21 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	case "rec-cancel", "rec-send":
 		h.recordingControl(d, now, a.kind == "rec-cancel")
 	case "stop":
-		playing := d.ttsStarted || d.awaitAck
 		h.leaveScene(d, now)
-		if !playing {
-			h.chime(d, "cancel")
-		}
 	case "cat":
 		h.leaveScene(d, now)
 	case "dismiss":
 		d.card = nil
 		h.render(d, now, false)
 	case "voice-select":
-		if err := h.b.voices.save(d.who.DeviceID, a.value); err == nil {
+		h.mu.Unlock()
+		err := h.saveVoice(d.who.DeviceID, a.value)
+		h.mu.Lock()
+		if err == nil && h.active(d) {
 			h.chime(d, "tap")
-			h.render(d, now, false)
 		}
 	case "vol-auto", "vol-minus", "vol-plus":
-		level := d.vol
-		switch a.kind {
-		case "vol-minus":
-			level = max(0, level-10)
-		case "vol-plus":
-			level = min(100, level+10)
-		}
-		if err := h.setVolume(d.client.ctx, d, a.kind == "vol-auto" && !d.autoVol, level, now); err != nil {
+		if err := h.setVolume(d.client.ctx, d, false, 0, a.kind); err != nil && h.active(d) {
 			h.push(d, object{"op": "error", "status": 502, "error": err.Error()}, true)
 		}
 	case "listen", "reply":
@@ -1068,6 +1247,7 @@ func (h *wsHub) leaveScene(d *wsDevice, now time.Time) {
 }
 
 func (h *wsHub) clearView(d *wsDevice) {
+	d.appGen++
 	h.dropApp(d)
 	d.drawer, d.view, d.pending, d.card = "", nil, nil, nil
 }
@@ -1076,7 +1256,40 @@ func (d *wsDevice) volumeFrame(persist bool) object {
 	return object{"op": "volume", "device_id": d.who.DeviceID, "level": d.vol, "auto_volume": d.autoVol, "persist": persist}
 }
 
-func (h *wsHub) setVolume(ctx context.Context, d *wsDevice, auto bool, level int, now time.Time) error {
+func (h *wsHub) saveVoice(id, voice string) error {
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+	if err := h.b.voices.save(id, voice); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
+		d.voice = voice
+		if d.drawer != "" {
+			h.render(d, time.Now(), false)
+		}
+	}
+	return nil
+}
+
+// Takes and returns with h.mu held. Serialize writes without blocking the hub.
+func (h *wsHub) setVolume(ctx context.Context, d *wsDevice, auto bool, level int, action string) error {
+	h.mu.Unlock()
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+	h.mu.Lock()
+	if !h.active(d) {
+		return problem(409, "Device is not connected")
+	}
+	switch action {
+	case "vol-minus":
+		level = max(0, d.vol-10)
+	case "vol-plus":
+		level = min(100, d.vol+10)
+	case "vol-auto":
+		auto, level = !d.autoVol, d.vol
+	}
 	savedLevel := level
 	if auto {
 		savedLevel = initialAutoVolume
@@ -1086,8 +1299,14 @@ func (h *wsHub) setVolume(ctx context.Context, d *wsDevice, auto bool, level int
 			level = d.vol
 		}
 	}
-	if err := h.b.saveVolumePrefs(ctx, d.key, auto, savedLevel); err != nil {
+	h.mu.Unlock()
+	err := h.b.saveVolumePrefs(ctx, d.key, auto, savedLevel)
+	h.mu.Lock()
+	if err != nil {
 		return err
+	}
+	if !h.active(d) {
+		return problem(409, "Device disconnected while saving volume")
 	}
 	if auto != d.autoVol {
 		d.hasAmbient = false
@@ -1095,6 +1314,7 @@ func (h *wsHub) setVolume(ctx context.Context, d *wsDevice, auto bool, level int
 	changedMode := d.autoVol != auto
 	d.autoVol, d.vol = auto, level
 	h.push(d, d.volumeFrame(!auto), true)
+	now := time.Now()
 	d.meter = now.Add(1800 * time.Millisecond)
 	h.render(d, now, false)
 	if changedMode {

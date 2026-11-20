@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+	"unsafe"
 
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
@@ -26,6 +30,7 @@ import (
 
 const screenSize = 360
 const maxSVG = 64 << 10
+const screenCacheSize = 32
 
 type screenGeometry struct {
 	width, height int
@@ -51,6 +56,97 @@ func inScreenCircle(x, y int) bool {
 type hitBox struct {
 	id             string
 	x1, y1, x2, y2 int
+}
+
+type svgScreen struct {
+	raw, source string
+	hits        []hitBox
+	fb          []uint16
+	render      time.Duration
+}
+
+type screenCacheKey struct {
+	hash     [sha256.Size]byte
+	geometry screenGeometry
+	exit     bool
+}
+
+// Cached screens and their slices are immutable after publication.
+type screenCache struct {
+	mu           sync.Mutex
+	entries      map[screenCacheKey]svgScreen
+	keys         [screenCacheSize]screenCacheKey
+	next         int
+	hits, misses uint64
+}
+
+var screens screenCache
+
+func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	return screens.build(raw, exit, geometry)
+}
+
+func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	start := time.Now()
+	// Sum256 only reads the input. View the immutable string as bytes so
+	// hashing the SVG does not allocate a copy on the cache hit path.
+	hash := sha256.Sum256(unsafe.Slice(unsafe.StringData(raw), len(raw)))
+	key := screenCacheKey{hash, geometry, exit}
+	c.mu.Lock()
+	screen, ok := c.entries[key]
+	if ok {
+		c.hits++
+		c.mu.Unlock()
+		screen.render = time.Since(start)
+		return screen, nil
+	}
+	c.misses++
+	c.mu.Unlock()
+
+	screen, err := buildScreenUncached(raw, exit, geometry)
+	if err != nil {
+		return svgScreen{}, err
+	}
+	c.mu.Lock()
+	if cached, ok := c.entries[key]; ok {
+		screen = cached
+	} else {
+		if c.entries == nil {
+			c.entries = make(map[screenCacheKey]svgScreen, screenCacheSize)
+		}
+		if len(c.entries) == screenCacheSize {
+			delete(c.entries, c.keys[c.next])
+		}
+		c.keys[c.next] = key
+		c.next = (c.next + 1) % screenCacheSize
+		c.entries[key] = screen
+	}
+	c.mu.Unlock()
+	screen.render = time.Since(start)
+	return screen, nil
+}
+
+func buildScreenUncached(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	root, hits, err := prepareSVG(raw, exit)
+	if err != nil {
+		return svgScreen{}, err
+	}
+	screen := svgScreen{raw: raw, source: svgString(root), hits: hits}
+	if geometry.width != 0 {
+		screen.fb, err = rasterSVG(screen.source, geometry, root.background())
+	}
+	return screen, err
+}
+
+func (c *screenCache) stats() (hits, misses uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits, c.misses
+}
+
+func renderSVG(raw string) ([]uint16, []hitBox, error) {
+	s, err := buildScreen(raw, false, roundScreen)
+	return s.fb, s.hits, err
 }
 
 func hitID(hits []hitBox, x, y int) string {

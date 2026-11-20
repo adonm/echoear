@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"html"
-	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -433,84 +432,4 @@ func catArt(cat catState, pose catPose) string {
 		return svgString(layer)
 	}
 	return ""
-}
-
-type svgScreen struct {
-	source string
-	hits   []hitBox
-	fb     []uint16
-	render time.Duration
-}
-
-func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
-	start := time.Now()
-	root, hits, err := prepareSVG(raw, exit)
-	if err != nil {
-		return svgScreen{}, err
-	}
-	screen := svgScreen{source: svgString(root), hits: hits}
-	if geometry.width != 0 {
-		screen.fb, err = rasterSVG(screen.source, geometry, root.background())
-	}
-	screen.render = time.Since(start)
-	return screen, err
-}
-
-func renderSVG(raw string) ([]uint16, []hitBox, error) {
-	s, err := buildScreen(raw, false, roundScreen)
-	return s.fb, s.hits, err
-}
-
-func (h *wsHub) svgFrame(d *wsDevice) wsFrame {
-	return textFrame(object{"op": "svg", "rev": d.rev, "svg": d.svg.source})
-}
-
-func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, full bool) {
-	if !full && screen.source == d.svg.source {
-		return
-	}
-	d.rev++
-	if d.client.role == "web" {
-		d.svg = screen
-		frame := h.svgFrame(d)
-		d.client.enqueue(frame)
-		h.trackFrame(d, screen.render, len(frame.data), len(screen.source), "svg")
-	} else {
-		if screen.fb != nil {
-			rect := dirtyRect(d.svg.fb, screen.fb, d.screen)
-			if !rect.Empty() {
-				start := time.Now()
-				frame := displayFrame(screen.fb, rect, d.rev, d.screen.width)
-				d.client.enqueue(frame)
-				codec := "RGB565"
-				if frame.data[9] == 1 {
-					codec = "RLE565"
-				}
-				h.trackFrame(d, screen.render+time.Since(start), len(frame.data), 12+rect.Dx()*rect.Dy()*2, codec)
-			}
-		}
-		d.svg = screen
-	}
-	for c := range h.clients {
-		if c.watch == d.key {
-			c.enqueue(h.svgFrame(d))
-		}
-	}
-}
-
-func (h *wsHub) renderSVGView(d *wsDevice, raw string, full bool) {
-	if !full && raw == d.svgRaw {
-		return
-	}
-	var geometry screenGeometry
-	if d.client.role == "device" {
-		geometry = d.screen
-	}
-	screen, err := buildScreen(raw, false, geometry)
-	if err != nil {
-		log.Printf("EchoEar screen: %v", err)
-		return
-	}
-	d.svgRaw = raw
-	h.pushScreen(d, screen, full)
 }

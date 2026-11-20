@@ -201,9 +201,7 @@ func (b *bridge) deviceList() ([]object, error) {
 			entry["tunnel"] = details
 		}
 		if b.ws != nil {
-			b.ws.mu.Lock()
 			b.ws.deviceStatus(entry, id)
-			b.ws.mu.Unlock()
 		} else {
 			entry["auto_volume"], entry["volume"] = b.volumePrefs(id)
 			entry["sleeping"] = false

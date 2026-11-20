@@ -1095,6 +1095,7 @@ function command(msg) {
       if (view.virtual) {
         if (msg.state === "start") endedAudio = null;
         if (msg.state === "end") { endedAudio = msg.audio ?? 0; ackIfDone(); }
+        if (msg.state === "abort") stopSound();
       }
       break;
     case "error":

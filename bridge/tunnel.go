@@ -373,9 +373,7 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			out := object{"scoped": true, "device_id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme, "voices": voiceCatalog,
 				"voice": b.voices.get(v.ID, v.Theme)}
 			if b.ws != nil {
-				b.ws.mu.Lock()
 				b.ws.deviceStatus(out, v.ID)
-				b.ws.mu.Unlock()
 			} else {
 				out["auto_volume"], out["volume"] = b.volumePrefs(v.ID)
 			}

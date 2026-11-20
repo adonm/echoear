@@ -196,15 +196,12 @@ func (b *bridge) voiceAPI(r *http.Request, id string) (any, error) {
 	if !b.voices.allowed(voice) {
 		return nil, problem(400, "Unsupported voice")
 	}
-	if err := b.voices.save(id, voice); err != nil {
-		return nil, err
-	}
+	save := b.voices.save
 	if b.ws != nil {
-		b.ws.mu.Lock()
-		if d := b.ws.devices[strings.ToLower(id)]; d != nil && d.drawer != "" {
-			b.ws.render(d, time.Now(), false)
-		}
-		b.ws.mu.Unlock()
+		save = b.ws.saveVoice
+	}
+	if err := save(id, voice); err != nil {
+		return nil, err
 	}
 	return object{"device_id": id, "voice": voice}, nil
 }

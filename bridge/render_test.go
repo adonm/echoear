@@ -4,9 +4,115 @@ import (
 	"encoding/binary"
 	"image"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func facePoseSVGs() []string {
+	cat := blankCat()
+	return []string{
+		catSVG(cat, catPose{mood: "idle", battery: 80}),
+		catSVG(cat, catPose{mood: "idle", battery: 80, blink: true}),
+		catSVG(cat, catPose{mood: "speaking", battery: 80}),
+		catSVG(cat, catPose{mood: "sleepy", battery: 80}),
+	}
+}
+
+func TestFacePoseCacheReusesFramesAndHitboxes(t *testing.T) {
+	var cache screenCache
+	poses := facePoseSVGs()
+	prior := make([]svgScreen, len(poses))
+	for i, svg := range poses {
+		screen, err := cache.build(svg, false, roundScreen)
+		if err != nil || len(screen.fb) != screenSize*screenSize || hitID(screen.hits, 180, 180) != "cat-ring" {
+			t.Fatalf("pose %d did not build: %v", i, err)
+		}
+		prior[i] = screen
+	}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for i, svg := range poses {
+				screen, err := cache.build(svg, false, roundScreen)
+				if err != nil || &screen.fb[0] != &prior[i].fb[0] || &screen.hits[0] != &prior[i].hits[0] {
+					t.Errorf("pose %d did not reuse cached pixels and hits: %v", i, err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if hits, misses := cache.stats(); hits != 4*uint64(len(poses)) || misses != uint64(len(poses)) {
+		t.Fatalf("cache stats: hits=%d misses=%d", hits, misses)
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		_, _ = cache.build(poses[0], false, roundScreen)
+	}); allocs != 0 {
+		t.Fatalf("cache hit allocated %.2f times", allocs)
+	}
+}
+
+func TestScreenCacheSeparatesGeometryAndEvicts(t *testing.T) {
+	var cache screenCache
+	const raw = `<svg><rect width="360" height="360" fill="red"/></svg>`
+	for _, geometry := range []screenGeometry{{}, {320, 240, "round"}, {320, 240, "rect"}, roundScreen} {
+		screen, err := cache.build(raw, false, geometry)
+		if err != nil || len(screen.fb) != geometry.width*geometry.height {
+			t.Fatalf("geometry %+v: %v, %d pixels", geometry, err, len(screen.fb))
+		}
+		if geometry.width != 0 && (screen.fb[0] != 0) != (geometry.shape == "rect") {
+			t.Fatalf("cache mixed screen shapes: %+v", geometry)
+		}
+	}
+	withExit, err := cache.build(raw, true, screenGeometry{})
+	if err != nil || hitID(withExit.hits, 180, 318) != exitNode || withExit.fb != nil {
+		t.Fatal("web-only drawing did not retain its exit hitbox", err)
+	}
+	for i := range screenCacheSize {
+		if _, err := cache.build(`<svg><text>`+strconv.Itoa(i)+`</text></svg>`, false, screenGeometry{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := cache.build(raw, false, screenGeometry{}); err != nil {
+		t.Fatal(err)
+	}
+	if hits, misses := cache.stats(); hits != 0 || misses != screenCacheSize+6 || len(cache.entries) != screenCacheSize {
+		t.Fatalf("cache did not bound its FIFO: hits=%d misses=%d size=%d", hits, misses, len(cache.entries))
+	}
+}
+
+func BenchmarkFacePoseCache(b *testing.B) {
+	poses := facePoseSVGs()
+	for _, display := range []struct {
+		name     string
+		geometry screenGeometry
+	}{{"360x360", roundScreen}, {"320x240", screenGeometry{320, 240, "rect"}}} {
+		b.Run(display.name+"/uncached", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := range b.N {
+				if _, err := buildScreenUncached(poses[i%len(poses)], false, display.geometry); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(display.name+"/hit", func(b *testing.B) {
+			var cache screenCache
+			for _, pose := range poses {
+				if _, err := cache.build(pose, false, display.geometry); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				if _, err := cache.build(poses[i%len(poses)], false, display.geometry); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 func TestRasterSVGShapesTextAndHitOrder(t *testing.T) {
 	raw := svgStart + `<rect width="360" height="360" fill="#101820"/>

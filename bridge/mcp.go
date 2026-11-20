@@ -231,6 +231,7 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 	entry["ws_connected"], entry["ws"], entry["mode"] = false, false, "offline"
 	entry["battery_pct"], entry["volume"], entry["scene_rev"] = nil, nil, uint64(0)
 	entry["sleeping"] = false
+	h.mu.Lock()
 	if d := h.devices[key]; d != nil && h.active(d) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
 		entry["character"], entry["cat"] = d.cat.Name, d.cat.catLook
@@ -242,12 +243,14 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct
 		}
-	} else {
-		auto, level := h.b.volumePrefs(id)
-		entry["auto_volume"] = auto
-		if !auto {
-			entry["volume"] = level
-		}
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
+	auto, level := h.b.volumePrefs(id)
+	entry["auto_volume"] = auto
+	if !auto {
+		entry["volume"] = level
 	}
 }
 
@@ -514,18 +517,23 @@ func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object,
 		if setSleep {
 			return nil, problem(409, "Device is not connected")
 		}
-		if err := h.b.saveVolumePrefs(ctx, id, auto, level); err != nil {
+		h.mu.Unlock()
+		h.settingsMu.Lock()
+		err := h.b.saveVolumePrefs(ctx, id, auto, level)
+		h.settingsMu.Unlock()
+		h.mu.Lock()
+		if err != nil {
 			return nil, err
 		}
 		return object{"ok": true, "device_id": id, "volume": level, "auto_volume": auto, "sleeping": false}, nil
 	}
-	now := time.Now()
 	if setVolume {
-		if err := h.setVolume(ctx, d, auto, level, now); err != nil {
+		if err := h.setVolume(ctx, d, auto, level, ""); err != nil {
 			return nil, err
 		}
 	}
 	if setSleep {
+		now := time.Now()
 		d.last = now
 		h.setSleeping(d, asleep)
 		h.render(d, now, false)

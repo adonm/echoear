@@ -232,9 +232,13 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	if !hasWS("svg", "#C0FFEE")(frame) || !hasWS("svg", "#1A1926")(frame) {
 		t.Fatal("live cat lost an extra or an animated eye")
 	}
-	web.until(t, hasWS("svg", "#172344"))
-	web.until(t, hasWS("cat", `"character":"Cosmo"`))
-	web.until(t, hasWS("saved_cats", ""))
+	faceSeen, catSeen, savedSeen := false, false, false
+	web.until(t, func(f wsFrame) bool {
+		faceSeen = faceSeen || hasWS("svg", "#172344")(f)
+		catSeen = catSeen || hasWS("cat", `"character":"Cosmo"`)(f)
+		savedSeen = savedSeen || hasWS("saved_cats", "")(f)
+		return faceSeen && catSeen && savedSeen
+	})
 	list := apiObjects(t, base+"/api/devices", "devices")
 	if len(list) != 1 || list[0].(object)["character"] != "Cosmo" || list[0].(object)["cat"].(object)["face_bg"] != "#172344" {
 		t.Fatal("MCP devices did not reflect cat design", list)
