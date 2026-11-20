@@ -72,6 +72,45 @@ func synthesizeMelody(notes []string) ([]byte, error) {
 	return pcm, nil
 }
 
+var sfxPresets = map[string]struct {
+	ms                        int
+	from, to, harmonic, noise float64
+}{
+	"boing":  {320, 230, 610, .24, 0},
+	"pop":    {95, 750, 170, .16, .22},
+	"win":    {430, 0, 0, 0, 0},
+	"buzz":   {240, 155, 120, .65, .12},
+	"ding":   {380, 1175, 1160, .28, 0},
+	"whoosh": {360, 220, 720, 0, .85},
+}
+
+func sfxPCM(name string) ([]byte, error) {
+	p, ok := sfxPresets[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown SFX name")
+	}
+	if name == "win" {
+		return synthesizeMelody([]string{"C5:65", "E5:65", "G5:65", "C6:235"})
+	}
+	n := p.ms * sampleRate / 1000
+	pcm := make([]byte, n*2)
+	var phase, filtered float64
+	rng := uint32(1)
+	for i := range n {
+		t := float64(i) / float64(n)
+		phase += 2 * math.Pi * (p.from + (p.to-p.from)*t) / sampleRate
+		rng = rng*1664525 + 1013904223
+		filtered += (.15 + .45*t) * (float64(int32(rng>>16)-32768)/32768 - filtered)
+		fade := min(1, float64(i)/80, float64(n-1-i)/80) * (1 - t) * (1 - t)
+		if name == "whoosh" {
+			fade = math.Sin(math.Pi * t)
+		}
+		tone := (1-p.noise)*math.Sin(phase) + p.harmonic*math.Sin(2*phase) + p.noise*filtered
+		binary.LittleEndian.PutUint16(pcm[2*i:], uint16(int16(16000*fade*tone)))
+	}
+	return pcm, nil
+}
+
 func melodyInput(raw any, path string) ([]string, []byte, error) {
 	if s, ok := raw.(string); ok {
 		list := strings.Fields(s)

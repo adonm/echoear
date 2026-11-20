@@ -29,6 +29,7 @@ type savedTimer struct {
 	Chime     string    `json:"chime"`
 	WakeAgent bool      `json:"wake_agent"`
 	Notes     []string  `json:"notes,omitempty"`
+	AppName   string    `json:"app,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	FireAt    time.Time `json:"fire_at"`
 }
@@ -46,7 +47,7 @@ type timerManager struct {
 	fromTimerTurn int
 }
 
-const timerColumns = "id,device_id,label,say,chime,wake_agent,created_at,fire_at,notes_json"
+const timerColumns = "id,device_id,label,say,chime,wake_agent,created_at,fire_at,notes_json,app_name"
 
 func newTimerManager(b *bridge) *timerManager {
 	ctx, cancel := context.WithCancel(b.root)
@@ -57,7 +58,7 @@ func scanTimer(r rowScanner) (savedTimer, error) {
 	var t savedTimer
 	var wake int
 	var created, fire, notes string
-	err := r.Scan(&t.ID, &t.DeviceID, &t.Label, &t.Say, &t.Chime, &wake, &created, &fire, &notes)
+	err := r.Scan(&t.ID, &t.DeviceID, &t.Label, &t.Say, &t.Chime, &wake, &created, &fire, &notes, &t.AppName)
 	if err != nil {
 		return t, err
 	}
@@ -172,10 +173,21 @@ func parseTimer(args object, now time.Time) (savedTimer, error) {
 			return t, err
 		}
 	}
+	if raw, present := args["app"]; present {
+		t.AppName = str(raw)
+		if !slugRE.MatchString(t.AppName) {
+			return t, fieldError("timer.app", "expected a saved app name")
+		}
+	}
 	return t, nil
 }
 
 func (m *timerManager) set(ctx context.Context, t savedTimer) error {
+	if t.AppName != "" {
+		if _, err := m.b.loadApp(ctx, t.AppName); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -186,9 +198,9 @@ func (m *timerManager) set(ctx context.Context, t savedTimer) error {
 	}
 	notes, _ := json.Marshal(t.Notes)
 	result, err := m.b.db.ExecContext(ctx, `INSERT INTO timers (`+timerColumns+`)
-		SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM timers WHERE device_id=?) < 8
+		SELECT ?,?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM timers WHERE device_id=?) < 8
 		AND (SELECT count(*) FROM timers) < 32`, t.ID, t.DeviceID, t.Label, t.Say, t.Chime, t.WakeAgent,
-		t.CreatedAt.Format(time.RFC3339Nano), t.FireAt.Format(time.RFC3339Nano), string(notes), t.DeviceID)
+		t.CreatedAt.Format(time.RFC3339Nano), t.FireAt.Format(time.RFC3339Nano), string(notes), t.AppName, t.DeviceID)
 	if err != nil {
 		return problem(502, "Cannot save timer")
 	}
@@ -348,6 +360,13 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 	h.mu.Lock()
 	d := h.devices[strings.ToLower(t.DeviceID)]
 	if d != nil && h.active(d) {
+		if t.AppName != "" {
+			defer func() {
+				if _, err := b.runSavedApp(ctx, t.DeviceID, t.AppName); err != nil && ctx.Err() == nil {
+					log.Printf("EchoEar could not launch timer app %q: %v", t.AppName, err)
+				}
+			}()
+		}
 		now := time.Now()
 		if t.WakeAgent {
 			completed := make(chan struct{})

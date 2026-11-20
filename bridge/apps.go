@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"net/http"
 	"slices"
@@ -88,7 +89,7 @@ func (b *bridge) appAPI(w http.ResponseWriter, r *http.Request, path string) (an
 		if err != nil {
 			return nil, err
 		}
-		return b.runApp(ctx, object{"devices": data["device_id"], "load": data["name"]})
+		return b.runSavedApp(ctx, str(data["device_id"]), str(data["name"]))
 	case r.Method == http.MethodDelete:
 		name := strings.TrimPrefix(path, "/api/apps/")
 		if !slugRE.MatchString(name) {
@@ -122,30 +123,31 @@ type appEffect struct {
 // One worker owns the VM and lastScreens after initialization. The hub owns
 // device membership, queued events, and tick scheduling.
 type appInstance struct {
-	spec                                           savedApp
-	players                                        []appPlayer
-	devices                                        []*wsDevice
-	vm                                             *goja.Runtime
-	self, state                                    goja.Value
-	render, tap, tick, parse, stringify, errorText goja.Callable
-	scope                                          string
-	memory                                         map[string]json.RawMessage
-	effects                                        []appEffect
-	allowEffects                                   bool
-	geometry                                       []screenGeometry
-	lastScreens                                    []svgScreen
-	ctx                                            context.Context
-	cancel                                         context.CancelFunc
-	events                                         []appEvent
-	running, tickQueued                            bool
-	nextTick, timeOfSpeech                         time.Time
-	remaining                                      int
+	spec                                savedApp
+	players                             []appPlayer
+	devices                             []*wsDevice
+	vm                                  *goja.Runtime
+	self, state                         goja.Value
+	render, parse, stringify, errorText goja.Callable
+	hooks                               map[string]goja.Callable
+	scope                               string
+	memory                              map[string]json.RawMessage
+	effects                             []appEffect
+	allowEffects                        bool
+	geometry                            []screenGeometry
+	lastScreens                         []svgScreen
+	ctx                                 context.Context
+	cancel                              context.CancelFunc
+	events                              []appEvent
+	running, tickQueued                 bool
+	nextTick, timeOfSpeech              time.Time
+	remaining                           int
 }
 
 type appEvent struct {
-	i, x, y int
-	id      string
-	now     time.Time
+	i, x, y  int
+	kind, id string
+	now      time.Time
 }
 
 func (a *appInstance) runJS(fn func() (goja.Value, error)) (goja.Value, error) {
@@ -240,7 +242,7 @@ func (a *appInstance) initVM() error {
 	run := func(name string, f func(goja.FunctionCall) goja.Value) {
 		_ = vm.Set(name, func(c goja.FunctionCall) goja.Value {
 			if !a.allowEffects {
-				panic(vm.NewTypeError("%s is only available in onTap/onTick", name))
+				panic(vm.NewTypeError("%s is only available in onTap/onDrag/onUp/onTick", name))
 			}
 			if len(a.effects) >= 8 {
 				panic(vm.NewTypeError("Too many app effects"))
@@ -273,6 +275,17 @@ func (a *appInstance) initVM() error {
 			return goja.Undefined()
 		})
 	}
+	for _, name := range []string{"sfx", "sfxAll"} {
+		run(name, func(c goja.FunctionCall) goja.Value {
+			kind, _ := asString(c.Argument(0))
+			pcm, err := sfxPCM(kind)
+			if err != nil {
+				bad(err)
+			}
+			a.effects = append(a.effects, appEffect{kind: "pcm", pcm: pcm, all: name == "sfxAll"})
+			return goja.Undefined()
+		})
+	}
 	run("chime", func(c goja.FunctionCall) goja.Value {
 		kind, _ := asString(c.Argument(0))
 		if !validChime(kind) {
@@ -292,7 +305,7 @@ func (a *appInstance) initVM() error {
 		a.effects = append(a.effects, appEffect{kind: "exit"})
 		return goja.Undefined()
 	})
-	run("storeGet", func(c goja.FunctionCall) goja.Value {
+	_ = vm.Set("storeGet", func(c goja.FunctionCall) goja.Value {
 		key, _ := asString(c.Argument(0))
 		if !memoryKeyRE.MatchString(key) {
 			panic(vm.NewTypeError("Invalid app memory key"))
@@ -335,9 +348,10 @@ func (a *appInstance) initVM() error {
 	}
 	methods, err := a.runJS(func() (goja.Value, error) {
 		return vm.RunScript("app-contract.js", `(function() {
-			if (app && typeof app === "object") return [app, app.init, app.render, app.onTap, app.onTick];
+			if (app && typeof app === "object") return [app, app.init, app.render, app.onTap, app.onDrag, app.onUp, app.onTick];
 			return [void 0, typeof init === "function" ? init : void 0, typeof render === "function" ? render : void 0,
-				typeof onTap === "function" ? onTap : void 0, typeof onTick === "function" ? onTick : void 0];
+				typeof onTap === "function" ? onTap : void 0, typeof onDrag === "function" ? onDrag : void 0,
+				typeof onUp === "function" ? onUp : void 0, typeof onTick === "function" ? onTick : void 0];
 		})()`)
 	})
 	if err != nil {
@@ -347,8 +361,10 @@ func (a *appInstance) initVM() error {
 	a.self = obj.Get("0")
 	init, _ := goja.AssertFunction(obj.Get("1"))
 	a.render, _ = goja.AssertFunction(obj.Get("2"))
-	a.tap, _ = goja.AssertFunction(obj.Get("3"))
-	a.tick, _ = goja.AssertFunction(obj.Get("4"))
+	a.hooks = make(map[string]goja.Callable, 4)
+	for i, kind := range []string{"tap", "drag", "up", "tick"} {
+		a.hooks[kind], _ = goja.AssertFunction(obj.Get(fmt.Sprint(i + 3)))
+	}
 	if a.render == nil {
 		return fmt.Errorf("app.js must define render(state, player)")
 	}
@@ -406,17 +422,14 @@ func (a *appInstance) screens(connected []bool) ([]svgScreen, error) {
 	return out, nil
 }
 
-func (a *appInstance) update(i int, id string, x, y int, connected []bool) ([]svgScreen, error) {
-	fn := a.tick
-	if i >= 0 {
-		fn = a.tap
-	}
+func (a *appInstance) update(ev appEvent, connected []bool) ([]svgScreen, error) {
+	fn := a.hooks[ev.kind]
 	if fn == nil {
 		return nil, nil
 	}
 	args := []goja.Value{a.state}
-	if i >= 0 {
-		args = append(args, a.player(i), a.vm.ToValue(id), a.vm.ToValue(x), a.vm.ToValue(y))
+	if ev.i >= 0 {
+		args = append(args, a.player(ev.i), a.vm.ToValue(ev.id), a.vm.ToValue(ev.x), a.vm.ToValue(ev.y))
 	}
 	a.effects = nil
 	a.allowEffects = true
@@ -455,6 +468,10 @@ func appDevices(raw any) ([]string, error) {
 		seen[strings.ToLower(id)] = true
 	}
 	return ids, nil
+}
+
+func (b *bridge) runSavedApp(ctx context.Context, id, name string) (object, error) {
+	return b.runApp(ctx, object{"devices": id, "load": name})
 }
 
 func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
@@ -594,7 +611,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	}
 	inst.ctx, inst.cancel = context.WithCancel(b.root)
 	now := time.Now()
-	if inst.tick != nil && a.TickMS != 0 {
+	if inst.hooks["tick"] != nil && a.TickMS != 0 {
 		inst.remaining = a.MaxTicks
 		inst.nextTick = now.Add(time.Duration(a.TickMS) * time.Millisecond)
 	}
@@ -691,23 +708,23 @@ func (h *wsHub) tickApps(now time.Time) {
 			continue
 		}
 		seen[a] = true
-		if h.updateApp(a, -1, "", 0, 0, now) {
+		if h.updateApp(a, appEvent{kind: "tick", i: -1, now: now}) {
 			a.remaining--
 			a.nextTick = now.Add(time.Duration(a.spec.TickMS) * time.Millisecond)
 		}
 	}
 }
 
-func (h *wsHub) updateApp(a *appInstance, i int, id string, x, y int, now time.Time) bool {
-	if id == exitNode {
-		h.closeApp(a, now)
+func (h *wsHub) updateApp(a *appInstance, ev appEvent) bool {
+	if ev.kind == "tap" && ev.id == exitNode {
+		h.closeApp(a, ev.now)
 		return true
 	}
-	if i >= 0 && a.tap == nil || i < 0 && a.tick == nil || len(a.events) >= 32 {
+	if a.hooks[ev.kind] == nil || len(a.events) >= 32 {
 		return false
 	}
-	a.events = append(a.events, appEvent{i, x, y, id, now})
-	if i < 0 {
+	a.events = append(a.events, ev)
+	if ev.i < 0 {
 		a.tickQueued = true
 	}
 	if !a.running {
@@ -731,9 +748,9 @@ func (h *wsHub) runAppEvents(a *appInstance) {
 			connected[i] = d != nil && h.active(d)
 		}
 		h.mu.Unlock()
-		views, err := a.update(ev.i, ev.id, ev.x, ev.y, connected[:len(a.devices)])
+		views, err := a.update(ev, connected[:len(a.devices)])
 		if err == nil {
-			h.storeAppEffects(a)
+			err = h.storeAppEffects(a)
 		}
 		h.mu.Lock()
 		if ev.i < 0 {
@@ -746,23 +763,26 @@ func (h *wsHub) runAppEvents(a *appInstance) {
 	a.running, a.events = false, nil
 }
 
-func (h *wsHub) storeAppEffects(a *appInstance) {
-	if h.b.db == nil {
-		return
-	}
+func (h *wsHub) storeAppEffects(a *appInstance) error {
 	for _, e := range a.effects {
 		if e.kind == "exit" || a.ctx.Err() != nil {
-			return
+			return nil
 		}
 		if e.kind == "store" {
+			if h.b.db == nil {
+				return errors.New("App storage unavailable")
+			}
 			ctx, cancel := context.WithTimeout(a.ctx, 200*time.Millisecond)
 			_, err := h.b.db.setMemory(ctx, memoryWrite{a.scope, e.text, string(e.value)}, nil)
 			cancel()
-			if err == nil {
-				a.memory[e.text] = e.value
+			if err != nil {
+				log.Printf("EchoEar could not persist app %q key %q: %v", a.spec.Name, e.text, err)
+				return fmt.Errorf("Could not save app key %q", e.text)
 			}
+			a.memory[e.text] = e.value
 		}
 	}
+	return nil
 }
 
 func (h *wsHub) commitAppEvent(a *appInstance, ev appEvent, views []svgScreen, err error) {

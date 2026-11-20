@@ -1243,18 +1243,30 @@ function xy(e) {
 }
 screen.addEventListener("pointerdown", e => {
   if (e.button !== 0 || pointer != null || !rev) return;
-  pointer = e.pointerId;
-  screen.setPointerCapture(pointer);
+  const target = e.target.closest("[data-id]")?.dataset.id;
+  pointer = {id:e.pointerId, target, x:e.clientX, y:e.clientY, last:-Infinity, dragged:false};
+  screen.setPointerCapture(e.pointerId);
+});
+screen.addEventListener("pointermove", e => {
+  if (pointer?.id !== e.pointerId) return;
+  pointer.dragged ||= Math.hypot(e.clientX - pointer.x, e.clientY - pointer.y) >= 4;
+  if (!pointer.dragged || e.timeStamp - pointer.last < 50) return;
+  pointer.last = e.timeStamp;
+  send({ev:"drag",id:pointer.target,...xy(e)});
 });
 screen.addEventListener("pointerup", e => {
-  if (pointer !== e.pointerId) return;
+  if (pointer?.id !== e.pointerId) return;
+  const dragged = pointer.dragged || Math.hypot(e.clientX - pointer.x, e.clientY - pointer.y) >= 4;
+  const id = pointer.target;
   pointer = null;
   if (view.virtual) audioReady();
-  send({ev:"tap",...xy(e)});
+  const point = xy(e);
+  send({ev:"up",id,...point});
+  if (!dragged) send({ev:"tap",...point});
 });
-screen.addEventListener("pointercancel", e => {
-  if (pointer === e.pointerId) pointer = null;
-});
+for (const ev of ["pointercancel", "lostpointercapture"]) {
+  screen.addEventListener(ev, e => { if (pointer?.id === e.pointerId) pointer = null; });
+}
 screen.addEventListener("keydown", e => {
   const control = e.target.closest("[data-id][role=button]");
   if (!control || (e.key !== " " && e.key !== "Enter")) return;

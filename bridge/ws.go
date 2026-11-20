@@ -1070,7 +1070,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		if ev.Event == "text" && ev.DeviceID != "" {
 			d = h.devices[strings.ToLower(ev.DeviceID)]
 		}
-		if ev.Event != "tap" && ev.Event != "text" && ev.Event != "head" {
+		if ev.Event != "tap" && ev.Event != "drag" && ev.Event != "up" && ev.Event != "text" && ev.Event != "head" {
 			return
 		}
 	}
@@ -1091,6 +1091,10 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 	case "tap":
 		h.pointer(d, ev, now, c == d.client && c.role == "device")
+	case "drag", "up":
+		if c.role == "web" && d.displayApp != nil && d.app == d.displayApp && !d.asleep {
+			h.pointer(d, ev, now, false)
+		}
 	case "head":
 		switch ev.Action {
 		case "pet":
@@ -1178,7 +1182,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	if d.displayApp != nil {
 		if d.app == d.displayApp {
 			if i := slices.Index(d.app.devices, d); i >= 0 {
-				h.updateApp(d.app, i, key, ev.X, ev.Y, now)
+				h.updateApp(d.app, appEvent{kind: ev.Event, i: i, id: key, x: ev.X, y: ev.Y, now: now})
 			}
 		}
 		return

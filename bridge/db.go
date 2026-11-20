@@ -110,6 +110,9 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoic
 	if err := d.addV2Columns(ctx); err != nil {
 		return nil, fmt.Errorf("migrate EchoEar v2 columns: %w", err)
 	}
+	if err := d.addTimerAppColumn(ctx); err != nil {
+		return nil, fmt.Errorf("migrate EchoEar timer apps: %w", err)
+	}
 	if err := d.migrateFaceSVG(ctx); err != nil {
 		return nil, fmt.Errorf("migrate EchoEar face SVG: %w", err)
 	}
@@ -128,25 +131,35 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoic
 }
 
 func (d *bridgeDB) addV2Columns(ctx context.Context) error {
+	return d.migrateColumns(ctx, "migrated_v2_columns",
+		`ALTER TABLE cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE saved_cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE timers ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'`)
+}
+
+func (d *bridgeDB) addTimerAppColumn(ctx context.Context) error {
+	return d.migrateColumns(ctx, "migrated_timer_app",
+		`ALTER TABLE timers ADD COLUMN app_name TEXT NOT NULL DEFAULT ''`)
+}
+
+func (d *bridgeDB) migrateColumns(ctx context.Context, marker string, statements ...string) error {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var done string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='migrated_v2_columns'`).Scan(&done)
+	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, marker).Scan(&done)
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	for _, q := range []string{
-		`ALTER TABLE cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE saved_cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE timers ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'`,
-		`INSERT INTO meta VALUES ('migrated_v2_columns','1')`,
-	} {
+	for _, q := range statements {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?,'1')`, marker); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

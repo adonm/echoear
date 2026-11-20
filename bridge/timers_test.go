@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"maps"
@@ -96,6 +97,69 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 	actTimer(t, base, object{"op": "cancel", "device_id": id, "id": timer["id"]}, false)
 	if got := apiObjects(t, base+"/api/timers?device_id="+id, "timers"); len(got) != 0 {
 		t.Fatal(got)
+	}
+}
+
+func TestTimerLaunchesSavedApp(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.timers = newTimerManager(b)
+		t.Cleanup(b.timers.close)
+	})
+	const id, name = "echoear-scheduled", "stretch"
+	dev, web := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
+	dev.hello(t, id, "Cake")
+	web.json(t, object{"ev": "hello", "role": "web"})
+	web.json(t, object{"ev": "watch", "device_id": id})
+	web.until(t, hasWS("svg", "cat-ring"))
+	set := object{"op": "set", "device_id": id, "in_seconds": 1, "app": name}
+	if out := actTimer(t, base, set, true); !strings.Contains(str(out["error"]), "App not found") {
+		t.Fatal(out)
+	}
+	if err := b.saveApp(t.Context(), savedApp{Name: name, Title: "Stretch", Kind: "app",
+		Code: `function render(){return '<svg><text x="80" y="180">Stretch now</text></svg>';}`}); err != nil {
+		t.Fatal(err)
+	}
+	if out := actTimer(t, base, set, false); out["timer"].(object)["app"] != name {
+		t.Fatal(out)
+	}
+	dev.until(t, hasWS("chime", `"kind":"intercom"`))
+	web.until(t, hasWS("svg", "Stretch now"))
+	if a := toolTest(t, base, "inspect", object{"device_id": id}, false)["active_app"].(object); a["name"] != name {
+		t.Fatal(a)
+	}
+}
+
+func TestTimerAppMigrationPreservesExistingTimer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "echoear.db")
+	raw, err := sql.Open("turso", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, stmt := range schema {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := (&bridgeDB{DB: raw}).addV2Columns(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO timers (id,device_id,label,say,chime,created_at,fire_at,notes_json)
+		VALUES ('old','echoear-old','Keep me','','tap','2026-01-01T00:00:00Z','2026-01-01T01:00:00Z','["C5:80"]')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		db := testDB(t, path, "")
+		got, err := scanTimer(db.QueryRow("SELECT " + timerColumns + " FROM timers WHERE id='old'"))
+		if err != nil || got.Label != "Keep me" || got.AppName != "" || len(got.Notes) != 1 || got.Notes[0] != "C5:80" {
+			t.Fatalf("legacy timer changed: %+v (%v)", got, err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

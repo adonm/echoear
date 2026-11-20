@@ -542,11 +542,7 @@ func TestNoSpeakToolAndFinalVoiceIsPersisted(t *testing.T) {
 	c.json(t, object{"ev": "text", "text": "Say something."})
 	w.until(t, chatFrame("Say something."))
 	w.until(t, chatFrame("Done."))
-	eventually(t, func() bool {
-		b.ws.mu.Lock()
-		defer b.ws.mu.Unlock()
-		return !b.ws.devices[id].busy
-	})
+	c.until(t, hasWS("tts", `"state":"end"`))
 	if synthesis.Load() != before+1 {
 		t.Fatal("the final prose was not synthesized exactly once")
 	}

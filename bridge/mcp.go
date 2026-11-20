@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
 	"net/url"
@@ -188,6 +189,7 @@ var mcpTools = func() []object {
 		return object{"name": name, "description": description, "inputSchema": in}
 	}
 	notes := object{"anyOf": []object{text, array(text)}, "description": "PITCH:MS separated by spaces or an array, e.g. C5:150 E5:150"}
+	chimes := append([]string{"tap", "think", "intercom", "celebrate"}, slices.Sorted(maps.Keys(sfxPresets))...)
 	return []object{
 		tool("inspect", "Read the live cat and its editable face_svg, clock, peers, screen, app, timers, memory keys, and saved cats/apps. Omit device_id for discovery.",
 			schema(object{"device_id": text})),
@@ -195,9 +197,9 @@ var mcpTools = func() []object {
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"load": text, "save_as": text, "tick_ms": number, "max_ticks": number, "exit": flag}, "devices")),
 		tool("act", "Send a spoken intercom, play a melody/chime, change device controls, set/cancel a timer, or design/load a cat.",
-			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"), "notes": notes, "chime": enum("tap", "think", "intercom", "celebrate"),
+			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"), "notes": notes, "chime": enum(chimes...),
 				"volume": object{"type": "integer", "minimum": 0, "maximum": 100, "description": "Set manual volume"}, "auto_volume": flag, "sleep": flag,
-				"timer": schema(object{"op": enum("set", "cancel"), "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag}, "op"),
+				"timer": schema(object{"op": enum("set", "cancel"), "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag, "app": text}, "op"),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
 					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"}, "slug": text, "configured": flag}, "op")}, "to")),
 		tool("store", "Read/write persistent JSON in a device, shared, game:<name>, or app:<name> scope. expected_version is atomic; zero means no key exists.",
@@ -380,8 +382,12 @@ func (b *bridge) act(ctx context.Context, args object) (object, error) {
 	out := object{"ok": true, "to": to}
 	var pcm []byte
 	kind := str(args["chime"])
-	if raw, ok := args["chime"]; ok && !validChime(str(raw)) {
-		return nil, fieldError("chime", "unknown kind")
+	if _, ok := args["chime"]; ok && !validChime(kind) {
+		var err error
+		pcm, err = sfxPCM(kind)
+		if err != nil {
+			return nil, fieldError("chime", "unknown kind")
+		}
 	}
 	if raw, ok := args["notes"]; ok {
 		_, p, err := melodyInput(raw, "notes")

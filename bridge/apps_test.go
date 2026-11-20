@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"image"
 	"slices"
@@ -40,7 +42,7 @@ func TestAppVMLeavesHubUnlockedAndCannotPublishAfterExit(t *testing.T) {
 		h.mu.Unlock()
 		synctest.Wait()
 		h.mu.Lock()
-		h.updateApp(a, 0, "", 180, 180, time.Now())
+		h.updateApp(a, appEvent{kind: "tap", x: 180, y: 180, now: time.Now()})
 		h.mu.Unlock()
 		synctest.Wait()
 		select {
@@ -85,6 +87,8 @@ func TestAppSandboxAndErrors(t *testing.T) {
 		{`function render(){ throw {toString(){for(;;){}}} }`, "JS exception"},
 		{"\nfunction render(){ \n throw new Error('broken line');\n}", "app.js:3:"},
 		{`function render(){return require("fs")}`, "require is not defined"},
+		{`function init(){storeSet("score",1)} function render(){return "<svg/>"}`, "only available"},
+		{`function render(){storeSet("score",1); return "<svg/>"}`, "only available"},
 	} {
 		start := time.Now()
 		_, _, err := initApp(savedApp{Code: tc.code}, players, nil, nil)
@@ -103,7 +107,7 @@ func TestAppSandboxAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.update(0, "spot", 180, 180, nil); err == nil || !strings.Contains(err.Error(), "timeout") {
+	if _, err := app.update(appEvent{kind: "tap", id: "spot", x: 180, y: 180}, nil); err == nil || !strings.Contains(err.Error(), "timeout") {
 		t.Fatal(err)
 	}
 	if _, err := app.screens(nil); err != nil {
@@ -125,8 +129,8 @@ func TestWhackAMonsterOnV2Board(t *testing.T) {
 	web.json(t, object{"ev": "watch", "device_id": id})
 	web.until(t, hasWS("svg", "cat-ring"))
 	const code = `app={
-	init(ctx){ return {n:0,x:100}; },
-	render(s,p){ return '<svg viewBox="0 0 360 360"><rect width="360" height="360" fill="black"/><circle data-id="monster" cx="'+s.x+'" cy="180" r="30" fill="lime"/><text x="180" y="100" fill="white">Score '+s.n+'</text></svg>'; },
+	init(ctx){ return {n:storeGet("score") ?? 0,x:100}; },
+	render(s,p){ return '<svg viewBox="0 0 360 360"><rect width="360" height="360" fill="black"/><circle data-id="monster" cx="'+s.x+'" cy="180" r="30" fill="lime"/><text x="180" y="100" fill="white">Score '+s.n+' / saved '+(storeGet("score") ?? 0)+'</text></svg>'; },
 	onTap(s,p,id){ if(id==="monster"){ s.n++; storeSet("score",s.n); if(storeGet("score")!==s.n)throw "store did not read its write"; play("C5:40 E5:40"); } },
 	onTick(s){ s.x+=50; return s; }
 }`
@@ -159,9 +163,110 @@ func TestWhackAMonsterOnV2Board(t *testing.T) {
 		t.Fatalf("saved %+v (%v)", app, err)
 	}
 	testRequest(t, "POST", base+"/api/apps/run", "unit", object{"device_id": id, "name": "monster"}, 200)
+	web.until(t, hasWS("svg", "Score 1 / saved 1"))
 	testRequest(t, "DELETE", base+"/api/apps/monster", "unit", nil, 204)
 	if apps := testObject(t, testRequest(t, "GET", base+"/api/apps", "unit", nil, 200))["apps"].([]any); len(apps) != 0 {
 		t.Fatal(apps)
+	}
+}
+
+func TestBrowserAppDragAndUp(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-slider"
+	board, web := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
+	board.helloV2(t, id, "Cake")
+	web.json(t, object{"ev": "hello", "role": "web"})
+	web.json(t, object{"ev": "watch", "device_id": id})
+	web.until(t, hasWS("svg", "cat-ring"))
+	const code = `
+	function init(){ return {text:"Ready"}; }
+	function render(s){ return '<svg><circle data-id="thumb" cx="180" cy="180" r="20"/><text x="50" y="90">'+s.text+'</text></svg>'; }
+	function onDrag(s,p,id,x,y){ s.text="Drag "+p.index+" "+id+" "+x+","+y; }
+	function onUp(s,p,id,x,y){ storeSet("end",x); return {text:s.text+" Up "+id+" "+storeGet("end")+","+y}; }`
+	toolTest(t, base, "run_app", object{"devices": id, "code": code, "save_as": "slider"}, false)
+	web.until(t, hasWS("svg", "Ready"))
+	web.json(t, object{"ev": "drag", "id": "thumb", "x": 210, "y": 170})
+	web.until(t, hasWS("svg", "Drag 0 thumb 210,170"))
+	web.json(t, object{"ev": "up", "id": "thumb", "x": 220, "y": 171})
+	web.until(t, hasWS("svg", "Drag 0 thumb 210,170 Up thumb 220,171"))
+	mem := toolTest(t, base, "store", object{"op": "get", "scope": "app:slider", "key": "end"}, false)
+	if mem["value"] != json.Number("220") {
+		t.Fatal(mem)
+	}
+}
+
+func TestAppAndActNamedSFX(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-sfx"
+	dev := testConnectWS(t, base, "unit", false)
+	dev.helloV2(t, id, "Cake")
+	const code = `
+	let index=0;
+	function render(){ return '<svg><circle data-id="sound" cx="180" cy="180" r="40"/></svg>'; }
+	function onTap(){ const sounds=["boing","pop","win","buzz","ding","whoosh"]; sfx(sounds[index++]); }`
+	toolTest(t, base, "run_app", object{"devices": id, "code": code}, false)
+	dev.until(t, isDisplay)
+	expectAudio := func(t *testing.T, want []byte) {
+		t.Helper()
+		var got []byte
+		frame := dev.until(t, func(f wsFrame) bool {
+			if f.op == wsBinary && len(f.data) > 1 && f.data[0] == pcmPrefix {
+				got = append(got, f.data[1:]...)
+			}
+			return hasWS("tts", `"state":"end"`)(f)
+		})
+		if !bytes.Equal(got, want) {
+			t.Fatalf("sent %d PCM bytes, want %d matching bytes", len(got), len(want))
+		}
+		dev.json(t, object{"ev": "tts_ack", "state": "done", "audio": testObject(t, frame.data)["audio"]})
+	}
+	for _, name := range []string{"boing", "pop", "win", "buzz", "ding", "whoosh"} {
+		t.Run(name, func(t *testing.T) {
+			pcm, err := sfxPCM(name)
+			if err != nil || len(pcm) == 0 || len(pcm)%2 != 0 || len(pcm) >= 2*16000*800/1000 {
+				t.Fatalf("invalid 16 kHz PCM length: %d (%v)", len(pcm), err)
+			}
+			var peak int
+			for offset := 0; offset < len(pcm); offset += 2 {
+				v := int(int16(binary.LittleEndian.Uint16(pcm[offset:])))
+				peak = max(peak, v, -v)
+			}
+			if peak < 1000 {
+				t.Fatalf("near-silent PCM: peak %d", peak)
+			}
+			toolTest(t, base, "act", object{"to": id, "chime": name}, false)
+			expectAudio(t, pcm)
+			dev.json(t, object{"ev": "tap", "x": 180, "y": 180})
+			expectAudio(t, pcm)
+		})
+	}
+	toolTest(t, base, "act", object{"to": id, "chime": "unknown"}, true)
+	a, _, err := initApp(savedApp{Code: `function render(){return "<svg/>"} function onUp(){sfxAll("pop");}`},
+		[]appPlayer{{id: id}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.update(appEvent{kind: "up"}, nil); err != nil || len(a.effects) != 1 || !a.effects[0].all {
+		t.Fatalf("sfxAll did not broadcast: %v", err)
+	}
+}
+
+func TestAppReportsStoreWriteFailure(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "echoear-storage-full"
+	const code = `function render(){return "<svg/>"} function onTap(){storeSet("overflow",true);}`
+	dev := testConnectWS(t, base, "unit", false)
+	dev.helloV2(t, id, "Cake")
+	if _, err := b.db.Exec(`WITH RECURSIVE keys(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM keys WHERE n<64)
+		INSERT INTO memory (scope,key,value_json,updated_at) SELECT 'app:full', 'k'||n, '0', 0 FROM keys`); err != nil {
+		t.Fatal(err)
+	}
+	toolTest(t, base, "run_app", object{"devices": id, "code": code, "save_as": "full"}, false)
+	dev.until(t, isDisplay)
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 180})
+	dev.until(t, hasWS("error", "Could not save app key"))
+	if a := toolTest(t, base, "inspect", object{"device_id": id}, false)["active_app"]; a != nil {
+		t.Fatal("app stayed active after a failed write")
 	}
 }
 
@@ -204,7 +309,7 @@ func TestTicTacToePersonalizedAndAuthoritative(t *testing.T) {
 	requireView(1, "Waiting...")
 	apply := func(index int, id string) {
 		t.Helper()
-		views, err = a.update(index, id, 150, 150, nil)
+		views, err = a.update(appEvent{kind: "tap", i: index, id: id, x: 150, y: 150}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
