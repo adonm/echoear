@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,7 +62,7 @@ func (c *fileCache[T]) get(force bool) (value T, err error) {
 type upstream struct {
 	name   string
 	client *http.Client
-	config *fileCache[endpoint]
+	config interface{ get(bool) (endpoint, error) }
 }
 
 func hexEndpoint(raw []byte) (endpoint, error) {
@@ -76,31 +74,6 @@ func hexEndpoint(raw []byte) (endpoint, error) {
 		return endpoint{}, errors.New("invalid Hex service configuration")
 	}
 	return endpoint{fmt.Sprintf("http://127.0.0.1:%d", info.Port), "Bearer " + info.Token}, nil
-}
-
-func openCodeEndpoint(raw []byte) (endpoint, error) {
-	var info struct{ URL, Password string }
-	if json.Unmarshal(raw, &info) != nil || info.Password == "" {
-		return endpoint{}, errors.New("invalid OpenCode service configuration")
-	}
-	u, err := url.Parse(info.URL)
-	if err != nil || u.Scheme != "http" {
-		return endpoint{}, errors.New("invalid OpenCode service URL")
-	}
-	host := "127.0.0.1"
-	switch u.Hostname() {
-	case "localhost", "127.0.0.1", "0.0.0.0":
-	case "::", "::1":
-		host = "::1"
-	default:
-		return endpoint{}, errors.New("not a local OpenCode service URL")
-	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil || port < 1 || port > 65535 {
-		return endpoint{}, errors.New("invalid OpenCode service port")
-	}
-	return endpoint{"http://" + net.JoinHostPort(host, u.Port()),
-		"Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+info.Password))}, nil
 }
 
 type upstreamStatus struct {
@@ -132,7 +105,9 @@ func (u upstream) request(ctx context.Context, method, path, kind, accept string
 		if err != nil {
 			return nil, u.unavailable(err)
 		}
-		req.Header.Set("Authorization", dst.auth)
+		if dst.auth != "" {
+			req.Header.Set("Authorization", dst.auth)
+		}
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}

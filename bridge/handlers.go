@@ -27,6 +27,7 @@ type bridge struct {
 	peers     peers
 	hex       hexClient
 	oc        *openCode
+	pairPort  int
 	worker    *synthWorker
 	voices    deviceVoices
 	clips     speechClips
@@ -712,6 +713,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return b.ota.serve(w, path == "/ota/version.json")
 		}
 	case http.MethodPost:
+		if path == "/api/opencode/pair" {
+			return b.pairOpenCode(r)
+		}
 		if id, ok := voiceDevice(path); ok {
 			return b.voiceAPI(r, id)
 		}

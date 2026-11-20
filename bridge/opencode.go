@@ -5,18 +5,69 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"hash/fnv"
+	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const turnTimeout = 90 * time.Second
+
+type fixedEndpoint endpoint
+
+func (e fixedEndpoint) get(bool) (endpoint, error) { return endpoint(e), nil }
+
+func openCodeUpstream(client *http.Client, state, base, password string) (upstream, error) {
+	if base == "" {
+		return upstream{"OpenCode", client, &fileCache[endpoint]{
+			path: filepath.Join(state, "opencode/service.json"), read: openCodeEndpoint,
+		}}, nil
+	}
+	dst, err := localOpenCodeEndpoint(base, password)
+	return upstream{"OpenCode", client, fixedEndpoint(dst)}, err
+}
+
+func openCodeEndpoint(raw []byte) (endpoint, error) {
+	var info struct{ URL, Password string }
+	if json.Unmarshal(raw, &info) != nil || info.Password == "" {
+		return endpoint{}, errors.New("invalid OpenCode service configuration")
+	}
+	return localOpenCodeEndpoint(info.URL, info.Password)
+}
+
+func localOpenCodeEndpoint(base, password string) (endpoint, error) {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.ForceQuery || u.RawQuery != "" ||
+		u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return endpoint{}, errors.New("invalid OpenCode service URL")
+	}
+	host := "127.0.0.1"
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "0.0.0.0":
+	case "::", "::1":
+		host = "::1"
+	default:
+		return endpoint{}, errors.New("not a local OpenCode service URL")
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return endpoint{}, errors.New("invalid OpenCode service port")
+	}
+	dst := endpoint{base: "http://" + net.JoinHostPort(host, u.Port())}
+	if password != "" {
+		dst.auth = "Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+password))
+	}
+	return dst, nil
+}
 
 type ocEventData struct {
 	SessionID          string `json:"sessionID"`

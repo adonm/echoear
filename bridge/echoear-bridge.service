@@ -1,10 +1,10 @@
 [Unit]
 Description=EchoEar LAN voice and OTA bridge
-Wants=network-online.target hex.service
-After=network-online.target hex.service
+Wants=network-online.target hex.service echoear-opencode.service
+After=network-online.target hex.service echoear-opencode.service
 
 [Service]
-EnvironmentFile=%E/echoear/bridge.env
+EnvironmentFile=@ENV_FILE@
 Environment="XDG_DATA_HOME=@DATA_HOME@"
 Environment="ECHOEAR_TTS_PYTHON=@TTS_PYTHON@"
 Environment="ECHOEAR_TTS_WORKER=@REPO_DIR@/bridge/tts_worker.py"

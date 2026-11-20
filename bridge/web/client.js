@@ -77,6 +77,9 @@ function stop() {
   disconnect();
   $("workspace").hidden = true;
   $("sidebar-toggle").hidden = true;
+  $("opencode-pairing").hidden = true;
+  $("pair-links").replaceChildren();
+  say("pair-note", "");
   say("link-state", "Not connected");
 }
 
@@ -102,6 +105,7 @@ async function authorize(token) {
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
     $("sidebar-toggle").hidden = !!scope;
+    $("opencode-pairing").hidden = !!scope;
     $("credentials").close();
     $("token").value = "";
     renderSidebar();
@@ -496,6 +500,53 @@ function safeShareURL(link) {
   } catch { return ""; }
 }
 
+$("pair-opencode").onclick = async e => {
+  const current = app, button = e.currentTarget, list = $("pair-links");
+  if (!current || current.scope) return;
+  button.disabled = true;
+  list.replaceChildren();
+  say("pair-note", "Creating one-time link…");
+  try {
+    const result = await api(current, "/api/opencode/pair", {method:"POST"});
+    if (app !== current) return;
+    if (!result.ok || !Array.isArray(result.links) || !result.links.length) throw new Error();
+    const links = result.links.map(({label, url}) => {
+      const target = new URL(url);
+      if (target.protocol !== "http:" || target.username || target.password || target.search || target.hash ||
+          !/^\/auth\/connect\/[A-Za-z0-9_-]+$/.test(target.pathname)) throw new Error();
+      const group = node("div", "pair-link");
+      const field = node("input");
+      field.type = "text";
+      field.value = target.href;
+      field.readOnly = true;
+      field.spellcheck = false;
+      field.setAttribute("aria-label", `${label} pairing link`);
+      const actions = node("div", "row wrap");
+      const copy = node("button", "quiet", "Copy");
+      copy.type = "button";
+      copy.onclick = async () => {
+        const copied = await copyField(field);
+        if (app === current && list.contains(field)) {
+          say("pair-note", copied ? "Pairing link copied." : "Copy the selected link with your keyboard.");
+        }
+      };
+      const open = node("a", "button quiet", "Open ↗");
+      open.href = target.href;
+      open.target = "_blank";
+      open.rel = "noopener noreferrer";
+      actions.append(copy, open);
+      group.append(field, actions);
+      return group;
+    });
+    list.replaceChildren(...links);
+    say("pair-note", "Use a link once before it expires.");
+  } catch {
+    if (app === current) say("pair-note", "Could not pair OpenCode. Check the dedicated service and your LAN connection.");
+  } finally {
+    button.disabled = false;
+  }
+};
+
 $("create-cat").onclick = async e => {
   const current = app, button = e.currentTarget;
   button.disabled = true;
@@ -570,17 +621,20 @@ $("delete-cancel").onclick = () => {
   renderTunnel();
   $("delete-cat").focus();
 };
-$("copy").onclick = async () => {
-  const field = $("share-url"), value = field.value;
-  let copied = false;
+async function copyField(field) {
   try {
-    await navigator.clipboard.writeText(value);
-    copied = true;
+    await navigator.clipboard.writeText(field.value);
+    return true;
   } catch {
     field.focus();
     field.select();
-    try { copied = document.execCommand("copy"); } catch {}
+    try { return document.execCommand("copy"); } catch { return false; }
   }
+}
+
+$("copy").onclick = async () => {
+  const field = $("share-url"), value = field.value;
+  const copied = await copyField(field);
   if (field.value !== value) return;
   say("copy", copied ? "Copied!" : "Copy Share Link");
   say("tunnel-note", copied ? "Share link copied." : "Copy the selected link with your keyboard.");

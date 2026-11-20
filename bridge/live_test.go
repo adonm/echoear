@@ -108,13 +108,32 @@ func liveConfig(t *testing.T, home string) map[string]string {
 		}
 		out[key] = env(key, value)
 	}
-	for _, key := range []string{"ECHOEAR_BRIDGE_TOKEN", "ECHOEAR_BRIDGE_PORT", "ECHOEAR_OPENCODE_AGENT", "ECHOEAR_OPENCODE_MODEL", "ECHOEAR_TTS_MODEL", "ECHOEAR_TTS_PYTHON"} {
+	for _, key := range []string{"ECHOEAR_BRIDGE_TOKEN", "ECHOEAR_BRIDGE_PORT", "ECHOEAR_OPENCODE_AGENT",
+		"ECHOEAR_OPENCODE_MODEL", "ECHOEAR_OPENCODE_URL", "ECHOEAR_OPENCODE_PASSWORD", "ECHOEAR_OPENCODE_DIR",
+		"ECHOEAR_TTS_MODEL", "ECHOEAR_TTS_PYTHON"} {
 		out[key] = env(key, out[key])
 	}
 	if !tokenRE.MatchString(out["ECHOEAR_BRIDGE_TOKEN"]) {
 		t.Fatal("missing live bridge token")
 	}
 	return out
+}
+
+func liveOpenCode(t *testing.T, client *http.Client, home string, conf map[string]string) upstream {
+	t.Helper()
+	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
+	api, err := openCodeUpstream(client, state, conf["ECHOEAR_OPENCODE_URL"], conf["ECHOEAR_OPENCODE_PASSWORD"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
+func liveOpenCodeDir(home string, conf map[string]string) string {
+	if dir := conf["ECHOEAR_OPENCODE_DIR"]; dir != "" {
+		return dir
+	}
+	return filepath.Join(env("XDG_DATA_HOME", filepath.Join(home, ".local/share")), "echoear/opencode/workspace")
 }
 
 func liveHealthy(t *testing.T, c liveClient) {
@@ -215,6 +234,8 @@ func liveIsolated(t *testing.T, home, data string, conf map[string]string, token
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+root, "ECHOEAR_BRIDGE_TOKEN="+token, "ECHOEAR_BRIDGE_HOST=127.0.0.1",
 		"ECHOEAR_BRIDGE_PORT=0", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_TTS_WORKER="+worker,
 		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"], "ECHOEAR_OPENCODE_MODEL="+conf["ECHOEAR_OPENCODE_MODEL"],
+		"ECHOEAR_OPENCODE_URL="+conf["ECHOEAR_OPENCODE_URL"], "ECHOEAR_OPENCODE_PASSWORD="+conf["ECHOEAR_OPENCODE_PASSWORD"],
+		"ECHOEAR_OPENCODE_DIR="+liveOpenCodeDir(home, conf), "ECHOEAR_OPENCODE_PAIR_PORT=0",
 		"ECHOEAR_TTS_MODEL="+conf["ECHOEAR_TTS_MODEL"],
 		"ECHOEAR_TTS_PYTHON="+env("ECHOEAR_TTS_PYTHON", filepath.Join(home, ".local/share/echoear/tts-venv/bin/python")))
 	if conf["ECHOEAR_TTS_PYTHON"] != "" {
@@ -271,9 +292,6 @@ func TestLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := env("XDG_DATA_HOME", filepath.Join(home, ".local/share"))
-	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
-	oc := upstream{"OpenCode", pooledClient(),
-		&fileCache[endpoint]{path: filepath.Join(state, "opencode/service.json"), read: openCodeEndpoint}}
 	conf := liveConfig(t, home)
 	if conf["ECHOEAR_OPENCODE_AGENT"] == "" {
 		conf["ECHOEAR_OPENCODE_AGENT"] = "echoear"
@@ -288,6 +306,7 @@ func TestLive(t *testing.T) {
 	client := pooledClient()
 	client.Timeout = 115 * time.Second
 	defer client.CloseIdleConnections()
+	oc := liveOpenCode(t, client, home, conf)
 	port := conf["ECHOEAR_BRIDGE_PORT"]
 	if port == "" {
 		port = "8765"
@@ -407,7 +426,15 @@ func TestLive(t *testing.T) {
 		}
 	})
 	t.Run("Intercom", func(t *testing.T) {
-		iso := liveIsolated(t, home, data, conf, run, client)
+		// The mock peer is only visible to this bridge, not the dedicated
+		// server's MCP proxy. Deny tools to exercise the legacy text path.
+		legacyConf := maps.Clone(conf)
+		legacyConf["ECHOEAR_OPENCODE_AGENT"] = "build"
+		legacySettings, err := openCodeSettings("build", conf["ECHOEAR_OPENCODE_MODEL"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		iso := liveIsolated(t, home, data, legacyConf, run, client)
 		type deliveryPart struct {
 			path string
 			raw  []byte
@@ -471,14 +498,15 @@ func TestLive(t *testing.T) {
 		t.Logf("fast_path_intercom_ms=%d tts_first_ms=%d", elapsed, fast.TTSFirstMS)
 		start = time.Now()
 		ai := liveJSON[answer](t, iso, "/api/text", object{"device_id": sender,
-			"text": "Send MockPeer a short dinosaur joke! This isolated legacy client has no tool access to MockPeer. Use the legacy fenced echoear-message JSON with to and text, not tools."},
+			"text": "Reply using exactly this legacy intercom payload:\n```echoear-message\n" +
+				`{"to":"MockPeer","text":"Why did the dinosaur cross the road? Because chickens hadn't evolved yet!"}` + "\n```"},
 			nil, "", nil)
 		if ai.SentTo == nil || !slices.Equal(*ai.SentTo, []string{target}) || strings.Contains(ai.Reply, "```") {
 			t.Fatal("AI echoear-message was not delivered or leaked into reply")
 		}
 		checkDelivery()
 		t.Logf("ai_intercom_ms=%d opencode_ms=%d tts_first_ms=%d", time.Since(start).Milliseconds(), ai.OpenCodeMS, ai.TTSFirstMS)
-		assertLiveActor(t, oc, ai.SessionID, settings)
+		assertLiveActor(t, oc, ai.SessionID, legacySettings)
 		prompt, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+ai.SessionID+"/message?order=desc&limit=1&type=user", nil)
 		if err != nil || len(prompt) != 1 || !strings.HasPrefix(prompt[0].Text,
 			"[Cake ("+sender+") · hardware · typed]\n") {

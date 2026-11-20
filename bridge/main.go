@@ -55,13 +55,29 @@ func run() error {
 	}
 	data := env("XDG_DATA_HOME", filepath.Join(home, ".local/share"))
 	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
+	local := filepath.Join(data, "echoear")
+	ocURL, ocPassword := os.Getenv("ECHOEAR_OPENCODE_URL"), os.Getenv("ECHOEAR_OPENCODE_PASSWORD")
+	ocAPI, err := openCodeUpstream(pooledClient(), state, ocURL, ocPassword)
+	if err != nil {
+		return err
+	}
+	pairPort, err := strconv.Atoi(env("ECHOEAR_OPENCODE_PAIR_PORT", "0"))
+	if err != nil || pairPort < 0 || pairPort > 65535 || pairPort != 0 && (ocURL == "" || ocPassword == "") {
+		return errors.New("ECHOEAR_OPENCODE_PAIR_PORT requires a valid port and a dedicated OpenCode URL and password")
+	}
+	ocDir := env("ECHOEAR_OPENCODE_DIR", filepath.Join(local, "opencode/workspace"))
+	syscall.Umask(0o077)
+	if !filepath.IsAbs(ocDir) {
+		return errors.New("ECHOEAR_OPENCODE_DIR must be an absolute path")
+	}
+	if err := os.MkdirAll(ocDir, 0o700); err != nil {
+		return err
+	}
 	workerPath, err := filepath.Abs(env("ECHOEAR_TTS_WORKER", "tts_worker.py"))
 	if err != nil {
 		return err
 	}
 	project := filepath.Dir(workerPath)
-	local := filepath.Join(data, "echoear")
-	syscall.Umask(0o077)
 	if err := os.MkdirAll(local, 0o700); err != nil {
 		return err
 	}
@@ -93,9 +109,7 @@ func run() error {
 		}()
 		defer func() { finish(); <-done }()
 	}
-	oc := newOpenCode(root, upstream{"OpenCode", pooledClient(),
-		&fileCache[endpoint]{path: filepath.Join(state, "opencode/service.json"), read: openCodeEndpoint}},
-		db, project, settings)
+	oc := newOpenCode(root, ocAPI, db, ocDir, settings)
 	hex := hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: filepath.Join(data, "hex/local-api.json"), read: hexEndpoint}},
 		&fileCache[string]{path: filepath.Join(data, "hex/settings.json"), read: hexQuery}}
 	models := filepath.Join(local, "tts-models")
@@ -106,7 +120,7 @@ func run() error {
 	python := env("ECHOEAR_TTS_PYTHON", filepath.Join(home, ".local/share/echoear/tts-venv/bin/python"))
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
-		hex: hex, oc: oc, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
+		hex: hex, oc: oc, pairPort: pairPort, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
 		voices:  deviceVoiceStore(db, fallbackVoice),
 		virtual: virtualStore(db), history: &chatHistory{db},
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}

@@ -7,7 +7,7 @@ config=${XDG_CONFIG_HOME:-$HOME/.config}
 data_home=${XDG_DATA_HOME:-$HOME/.local/share}
 data=$data_home/echoear
 units=$config/systemd/user
-agents=$config/opencode/agents
+oc_root=$data/opencode
 env_file=$config/echoear/bridge.env
 pin_gpu=false
 case "$*" in
@@ -77,29 +77,75 @@ chmod 700 -- "$build_tmp"
 mv -f -- "$build_tmp" "$bridge_bin"
 trap - EXIT
 
-mkdir -p -- "$agents" "$config/echoear" "$units/hex.service.d"
-agent=$agents/echoear.md
-if [[ ! "$agent" -ef "$REPO_DIR/agents/echoear.md" ]]; then
-    if [[ -e "$agent" || -L "$agent" ]]; then
-        printf 'Move the existing %s aside before running setup.\n' "$agent" >&2
+mkdir -p -- "$oc_root"/{config/opencode/agents,data/opencode,state,cache,workspace} \
+    "$config/echoear" "$units/hex.service.d"
+link_file() {
+    local source=$1 destination=$2
+    if [[ "$destination" -ef "$source" ]]; then
+        return
+    fi
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        printf 'Move the existing %s aside before running setup.\n' "$destination" >&2
         exit 1
     fi
-    ln -s -- "$REPO_DIR/agents/echoear.md" "$agent"
+    ln -s -- "$source" "$destination"
+}
+link_file "$REPO_DIR/agents/echoear.md" "$oc_root/config/opencode/agents/echoear.md"
+if [[ -f "$data_home/opencode/auth.json" ]]; then
+    link_file "$data_home/opencode/auth.json" "$oc_root/data/opencode/auth.json"
 fi
 
-if [[ ! -e "$env_file" ]]; then
-    token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
-    ( set -o noclobber
-      printf 'ECHOEAR_BRIDGE_HOST=0.0.0.0\nECHOEAR_BRIDGE_PORT=8765\nECHOEAR_BRIDGE_TOKEN=%s\n' "$token" > "$env_file"
-    )
-fi
-chmod 600 -- "$env_file"
+python3 - "$env_file" "$oc_root" "$bridge_bin" <<'PY'
+import json
+import os
+import re
+import secrets
+import sys
+import tempfile
+from pathlib import Path
+
+env_file, root, bridge = sys.argv[1:]
+config = Path(root, "config/opencode/opencode.jsonc")
+config.write_text(json.dumps({
+    "$schema": "https://opencode.ai/config.json",
+    "default_agent": "echoear",
+    "mcp": {"servers": {"echoear": {"type": "local", "command": [bridge, "mcp"]}}},
+}, indent=2) + "\n")
+
+path = Path(env_file)
+old = path.read_text() if path.exists() else (
+    "ECHOEAR_BRIDGE_HOST=0.0.0.0\nECHOEAR_BRIDGE_PORT=8765\n"
+    f"ECHOEAR_BRIDGE_TOKEN={secrets.token_hex(32)}\n"
+)
+prior = re.findall(r"^ECHOEAR_OPENCODE_PASSWORD=([a-f0-9]{64})$", old, re.M)
+password = prior[-1] if prior else secrets.token_hex(32)
+settings = {
+    "ECHOEAR_OPENCODE_URL": "http://127.0.0.1:49375",
+    "ECHOEAR_OPENCODE_PASSWORD": password,
+    "OPENCODE_SERVER_PASSWORD": password,
+    "ECHOEAR_OPENCODE_PAIR_PORT": "49376",
+}
+kept = [line for line in old.splitlines(keepends=True)
+        if line.strip().partition("=")[0].rstrip() not in settings]
+text = "".join(kept)
+if text and not text.endswith("\n"):
+    text += "\n"
+text += "".join(f"{key}={value}\n" for key, value in settings.items())
+with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+    try:
+        f.write(text)
+        f.close()
+        os.replace(f.name, path)
+    finally:
+        Path(f.name).unlink(missing_ok=True)
+PY
 
 hex_path=
 if [[ -z $(systemctl --user show hex.service --property=FragmentPath --value) ]]; then
     hex_path=$(type -P hex)
 fi
-python3 - "$REPO_DIR" "$data_home" "$tts_python" "$bridge_bin" "$units" "$hex_path" <<'PY'
+python3 - "$REPO_DIR" "$data_home" "$tts_python" "$bridge_bin" "$units" "$hex_path" \
+    "$(type -P opencode)" "$env_file" "$oc_root" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -109,13 +155,25 @@ def escape(value):
         "\\": "\\\\", '"': '\\"', "%": "%%", "\n": "\\n", "\r": "\\r", "\t": "\\t",
     }))
 
-repo, data, python, binary, directory, hex_path = sys.argv[1:]
+repo, data, python, binary, directory, hex_path, opencode, env_file, oc_root = sys.argv[1:]
 units = Path(directory)
-template = Path(repo, "bridge/echoear-bridge.service").read_text()
-bridge = units / "echoear-bridge.service"
-paths = {"REPO_DIR": repo, "DATA_HOME": data, "BRIDGE_BIN": binary, "TTS_PYTHON": python}
-bridge.write_text(re.sub(r"@([A-Z_]+)@", lambda m: escape(paths[m[1]]), template))
-bridge.chmod(0o644)
+paths = {"REPO_DIR": repo, "DATA_HOME": data, "BRIDGE_BIN": binary, "TTS_PYTHON": python,
+         "OPENCODE_BIN": opencode, "ENV_FILE": env_file}
+for name in ("echoear-bridge.service", "echoear-opencode.service",
+             "echoear-opencode-lan.socket", "echoear-opencode-lan.service"):
+    template = Path(repo, "bridge", name).read_text()
+    rendered = re.sub(r"@([A-Z_]+)@", lambda m: escape(paths[m[1]]), template)
+    if name == "echoear-opencode.service":
+        if Path(oc_root) != Path.home() / ".local/share/echoear/opencode":
+            rendered = rendered.replace("%h/.local/share/echoear/opencode", escape(oc_root))
+            rendered = rendered.replace(f"WorkingDirectory={escape(oc_root)}/workspace",
+                                        f'WorkingDirectory="{escape(oc_root)}/workspace"')
+        if Path(env_file) != Path.home() / ".config/echoear/bridge.env":
+            rendered = rendered.replace("EnvironmentFile=%h/.config/echoear/bridge.env",
+                                        f"EnvironmentFile={escape(env_file)}")
+    path = units / name
+    path.write_text(rendered)
+    path.chmod(0o644)
 
 if hex_path:
     (units / "hex.service").write_text(f"""[Unit]
@@ -139,7 +197,7 @@ if "$pin_gpu"; then
 fi
 
 systemctl --user daemon-reload
-systemctl --user enable hex.service echoear-bridge.service
+systemctl --user enable hex.service echoear-opencode.service echoear-opencode-lan.socket echoear-bridge.service
 systemctl --user restart hex.service
 if [[ "$(hex settings get transcription_device)" != gpu ]]; then
     hex settings set transcription_device gpu
@@ -152,14 +210,57 @@ fi
 if [[ "$(hex settings get transcription.model)" != "$model" ]]; then
     hex model use "$model"
 fi
-systemctl --user restart echoear-bridge.service
-if [[ ! -e "$config/opencode/opencode.json" && ! -e "$config/opencode/opencode.jsonc" ]]; then
-    ( set -o noclobber
-      printf '{\n  "%s": "https://opencode.ai/config.json"\n}\n' "\$schema" > "$config/opencode/opencode.jsonc"
-    )
-fi
-opencode mcp add echoear --global -- "$bridge_bin" mcp
-opencode api get /api/info >/dev/null
+systemctl --user restart echoear-opencode.service echoear-bridge.service
+systemctl --user start echoear-opencode-lan.socket
+
+# V2 stores current logins in its DB; auth.json only seeds legacy logins.
+python3 - "$env_file" "$oc_root" "$(type -P opencode)" <<'PY'
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+env_file, root, opencode = sys.argv[1:]
+settings = dict(re.findall(r"^\s*(ECHOEAR_OPENCODE_\w+)\s*=([^\n]*)", Path(env_file).read_text(), re.M))
+url = settings["ECHOEAR_OPENCODE_URL"]
+password = settings["ECHOEAR_OPENCODE_PASSWORD"]
+model = settings.get("ECHOEAR_OPENCODE_MODEL", "opencode/gemini-4-hydrogen#low").strip().strip("'\"")
+provider = model.split("/", 1)[0]
+if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", provider):
+    sys.exit("Invalid provider in ECHOEAR_OPENCODE_MODEL")
+
+auth = base64.b64encode(f"opencode:{password}".encode()).decode()
+request = urllib.request.Request(f"{url}/api/info", headers={"Authorization": f"Basic {auth}"})
+client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+deadline = time.monotonic() + 10
+while True:
+    try:
+        with client.open(request, timeout=1):
+            break
+    except OSError:
+        if time.monotonic() >= deadline:
+            sys.exit("Dedicated OpenCode API did not become ready with Basic auth")
+        time.sleep(0.2)
+
+marker = Path(root, "state", f"imported-provider-{provider}")
+if not marker.exists():
+    try:
+        credentials = subprocess.run([opencode, "auth", "export", provider], check=True,
+                                     capture_output=True, timeout=20).stdout
+        if json.loads(credentials):
+            subprocess.run([opencode, "--server", url, "auth", "import"], input=credentials,
+                           env={**os.environ, "OPENCODE_SERVER_PASSWORD": password}, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            marker.touch()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        sys.exit("Could not import the configured provider's OpenCode credentials")
+PY
+
 printf '%s\n' 'Default voices: Heart (af_heart); Mint uses Fable (bm_fable).'
 printf '%s\n' 'EchoEar MCP includes control for volume and sleep on connected devices.'
 printf 'Configure firmware/sdkconfig.local as shown in README.md. The bridge token is in %s.\n' "$env_file"

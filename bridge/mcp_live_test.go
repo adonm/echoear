@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
@@ -53,19 +52,39 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	sock := testConnectWS(t, c.base, c.token, true)
 	sock.json(t, object{"ev": "hello", "role": "web", "device_id": id})
 	sock.until(t, hasWS("svg", "cat-ring"))
-	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
-	api := upstream{"OpenCode", client, &fileCache[endpoint]{path: filepath.Join(state, "opencode/service.json"), read: openCodeEndpoint}}
-	mcp, err := ocData[[]struct {
+	api := liveOpenCode(t, client, home, config)
+	type serverInfo struct {
 		Name   string
 		Status struct{ Status string }
-	}](t.Context(), api, http.MethodGet, "/api/mcp", nil)
-	if err != nil || !slices.ContainsFunc(mcp, func(server struct {
-		Name   string
-		Status struct{ Status string }
-	}) bool {
-		return server.Name == "echoear" && server.Status.Status == "connected"
-	}) {
-		t.Fatalf("OpenCode echoear MCP server is not connected: %v", err)
+	}
+	// A location's first API request can return before MCP autoconnect finishes.
+	ready, cancelReady := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelReady()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	var mcp []serverInfo
+	for {
+		mcp, err = ocData[[]serverInfo](ready, api, http.MethodGet, "/api/mcp", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.ContainsFunc(mcp, func(server serverInfo) bool {
+			return server.Name == "echoear" && server.Status.Status == "connected"
+		}) {
+			break
+		}
+		select {
+		case <-ready.Done():
+			t.Fatalf("OpenCode echoear MCP server did not connect: %+v", mcp)
+		case <-tick.C:
+		}
+	}
+	if config["ECHOEAR_OPENCODE_URL"] != "" {
+		type plugin struct{ Source struct{ Type string } }
+		plugins, err := ocData[[]plugin](t.Context(), api, http.MethodGet, "/api/plugin", nil)
+		if err != nil || len(mcp) != 1 || slices.ContainsFunc(plugins, func(p plugin) bool { return p.Source.Type != "builtin" }) {
+			t.Fatalf("expected only EchoEar MCP and bundled plugins: %v", err)
+		}
 	}
 	model := config["ECHOEAR_OPENCODE_MODEL"]
 	if model == "" {
@@ -79,11 +98,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	defer cancel()
 	prefix := "echoear-live-mcp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	liveSessions(t, api, prefix)
-	project, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	o := newOpenCode(root, api, testDB(t, ":memory:", ""), project, settings)
+	o := newOpenCode(root, api, testDB(t, ":memory:", ""), liveOpenCodeDir(home, config), settings)
 	prompt := turnPrompt(peer{DeviceID: id, Character: character}, false, "typed",
 		"Run a live screen and controls check. Use Code Mode execute to call tools.echoear.inspect({device_id:'"+id+
 			"'}), tools.echoear.store({op:'list',scope:'"+id+"'}), tools.echoear.act({to:'"+id+

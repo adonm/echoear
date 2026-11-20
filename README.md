@@ -5,7 +5,7 @@ EchoEar turns an ESP-VoCat v1.2 into a tap-to-talk tutor with interactive diagra
 ```text
 EchoEar <-- /ws: RGB565 frames, taps, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
                                               |-- Hex      (speech to text)
-                                              |-- OpenCode (reply deltas over SSE)
+                                              |-- OpenCode :49375 (loopback, reply deltas over SSE)
                                               `-- Kokoro   (persistent FP32 worker)
 ```
 
@@ -26,10 +26,9 @@ face offline. The bridge runs app logic and renders the display; `/app` uses nat
 
    Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup builds
    the Go bridge, installs Hex's `parakeet_unified_en` and FP32 `kokoro-v1.0.onnx`,
-    links the [EchoEar agent](agents/echoear.md), registers its local MCP server,
-    and starts both services. The default model is
-    `opencode/gemini-4-hydrogen#low`; set `ECHOEAR_OPENCODE_MODEL` in
-    `bridge.env` to override it.
+   and starts Hex, the bridge, and a dedicated OpenCode service. The default
+   model is `opencode/gemini-4-hydrogen#low`; set `ECHOEAR_OPENCODE_MODEL` in
+   `bridge.env` to override it.
 
 2. Create the private firmware config once:
 
@@ -110,13 +109,31 @@ conversation as the LAN dashboard, with mic, screen, and intercom to online
 EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
 other cats' chats. Treat the link as a password and use **Close Tunnel** to revoke it.
 
-## OpenCode MCP
+## Dedicated OpenCode
 
-`scripts/setup-host.sh` uses `opencode mcp add --global` to register
-`mcp.servers.echoear` as a local server in `~/.config/opencode/opencode.jsonc`
-(or `$XDG_CONFIG_HOME/opencode/opencode.jsonc`). It reuses an existing
-`opencode.json` if OpenCode selects it and preserves unrelated settings.
-`opencode mcp list` shows whether `echoear` is connected.
+`echoear-opencode.service` listens at `127.0.0.1:49375` with Basic auth.
+Setup generates its password in the private `bridge.env` and gives it separate
+configuration, session data, cache, state, and workspace under
+`~/.local/share/echoear/opencode/` (or `$XDG_DATA_HOME`). It links the EchoEar
+agent and legacy `auth.json`, and imports the configured model provider's
+current V2 credentials once through OpenCode's CLI. It does not share your
+session database or load personal plugins, MCP servers, or coding `AGENTS.md`.
+Setup does not edit personal OpenCode configuration. If upgrading, remove the
+old `mcp.servers.echoear` entry and EchoEar agent symlink from your personal config.
+Without `ECHOEAR_OPENCODE_URL`, the bridge still discovers the shared service
+through `service.json`. `ECHOEAR_OPENCODE_DIR` overrides the dedicated workspace.
+
+Click **Pair OpenCode** in the LAN dashboard's Devices sidebar to create a
+short-lived, single-use link. The link opens the dedicated server via the
+`echoear-opencode-lan.socket` TCP forwarder on port `49376`. It does not pair
+with your personal OpenCode or work through cat share links. Keep ports `8765`
+and `49376` on a trusted LAN; neither uses TLS. Pair only trusted clients: a
+paired client gets access to the dedicated OpenCode server, not just cat chat.
+To turn off LAN OpenCode access, stop both forwarder units, disable
+`echoear-opencode-lan.socket`, remove `ECHOEAR_OPENCODE_PAIR_PORT` from `bridge.env`,
+and restart the bridge.
+
+### EchoEar MCP
 
 OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy

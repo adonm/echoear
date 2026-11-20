@@ -55,7 +55,7 @@ h1 span { color: var(--sun); }
 .sidebar { max-height: max(32rem, calc(100dvh - 6.4rem)); overflow: auto; padding: 1rem .85rem; }
 .device-group + .device-group { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .eyebrow + h2 { margin-top: .22rem; }
-.device-list, #token-form, #share, #tunnel-controls { display: grid; gap: .45rem; }
+.device-list, #token-form, #share, #tunnel-controls, .pair-link { display: grid; gap: .45rem; }
 .device-list { margin-top: .65rem; }
 .device {
   display: grid;
@@ -201,7 +201,7 @@ input:not([type="radio"], [type="range"]), select {
   color: var(--text);
 }
 select { font-size: .8rem; }
-form input:not([type="radio"]), #share-url { width: 100%; }
+form input:not([type="radio"]), #share-url, .pair-link input { width: 100%; }
 form.row input, input[type="range"] { flex: 1; }
 input[type="range"] { min-width: 4rem; accent-color: var(--mint); }
 dialog {
