@@ -233,10 +233,8 @@ func (b *bridge) startNewCatSession(ctx context.Context, who peer) error {
 		b.ws.stopCatTurns(who.DeviceID)
 	}
 	return run(ctx, func() error {
-		if b.ws != nil {
-			b.ws.mu.Lock()
-			defer b.ws.mu.Unlock()
-		}
+		b.catMu.Lock()
+		defer b.catMu.Unlock()
 		cat, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), "reset_blank", nil)
 		if err != nil {
 			return err
@@ -245,6 +243,8 @@ func (b *bridge) startNewCatSession(ctx context.Context, who peer) error {
 			return err
 		}
 		if b.ws != nil {
+			b.ws.mu.Lock()
+			defer b.ws.mu.Unlock()
 			if d := b.ws.devices[strings.ToLower(who.DeviceID)]; d != nil {
 				b.ws.stopCatTurn(d)
 			}

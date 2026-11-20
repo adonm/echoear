@@ -149,7 +149,7 @@ func (b *bridge) publicVirtual(v virtualClient) object {
 	}
 	cat := b.catFor(peer{DeviceID: v.ID, Character: v.Character})
 	out := object{"id": v.ID, "character": cat.Name, "cat": cat.catLook, "theme": v.Theme, "created_at": v.CreatedAt,
-		"online": connected, "ws_connected": connected, "voice": b.voices.get(v.ID, v.Theme)}
+		"online": connected, "ws_connected": connected, "voice": b.voices.resolve(cat.Voice, v.Theme)}
 	if details := b.tunnels.info(v.ID); details != nil {
 		out["tunnel"] = details
 	}
@@ -169,7 +169,7 @@ func (b *bridge) deviceList() ([]object, error) {
 }
 
 func (b *bridge) deviceEntries(full bool) ([]object, error) {
-	others, err := b.peerSnapshot("")
+	others, err := b.peers.snapshot("")
 	if err != nil {
 		return nil, err
 	}
@@ -177,46 +177,83 @@ func (b *bridge) deviceEntries(full bool) ([]object, error) {
 	if err != nil {
 		return nil, err
 	}
-	list := publicPeers(others)
-	seen := make(map[string]bool, len(others))
-	for _, entry := range list {
-		seen[str(entry["device_id"])] = true
+	peers := make(map[string]peer, len(others)+len(clients))
+	for _, p := range others {
+		peers[strings.ToLower(p.DeviceID)] = p
+	}
+	if h := b.ws; h != nil {
+		h.mu.Lock()
+		for id, d := range h.devices {
+			if h.active(d) {
+				peers[id] = d.who
+			}
+		}
+		h.mu.Unlock()
 	}
 	for id, v := range clients {
-		if !seen[id] {
-			list = append(list, object{"device_id": id, "character": v.Character, "online": false})
-		}
+		peers[id] = peer{DeviceID: id, Character: v.Character}
 	}
-	for _, entry := range list {
-		id := str(entry["device_id"])
-		who := peer{DeviceID: id, Character: str(entry["character"])}
-		entry["kind"], entry["theme"] = "physical", b.voiceTheme(who)
-		if phoneID.MatchString(id) || virtualID.MatchString(id) {
-			entry["kind"] = "virtual"
-			delete(entry, "ip")
-		}
-		if v, ok := clients[id]; ok {
-			who.Character, entry["theme"] = v.Character, v.Theme
-		}
-		cat := b.catFor(who)
-		entry["character"], entry["cat"] = cat.Name, cat.catLook
-		entry["voice"] = b.voices.get(id, str(entry["theme"]))
-		if full {
-			cat.Voice = str(entry["voice"])
-			entry["cat"] = cat
-		} else if details := b.tunnels.info(id); details != nil {
-			entry["tunnel"] = details
-		}
-		if b.ws != nil {
-			b.ws.deviceStatus(entry, id, full)
-		} else {
-			entry["auto_volume"], entry["volume"] = b.volumePrefs(id)
-			entry["sleeping"], entry["ws_connected"], entry["mode"] = false, false, "offline"
-		}
-		if entry["kind"] == "virtual" {
-			entry["online"] = entry["ws_connected"] == true
-		}
+	list := make([]object, 0, len(peers))
+	for id, p := range peers {
+		list = append(list, b.deviceEntry(p, clients[id], full))
 	}
 	slices.SortFunc(list, func(a, b object) int { return strings.Compare(str(a["device_id"]), str(b["device_id"])) })
 	return list, nil
+}
+
+func (b *bridge) findDevice(id string) (peer, virtualClient, error) {
+	if v, ok := b.virtualByID(id); ok {
+		return peer{DeviceID: v.ID, Character: v.Character}, v, nil
+	}
+	if !virtualID.MatchString(strings.ToLower(id)) {
+		if h := b.ws; h != nil {
+			h.mu.Lock()
+			if d := h.devices[strings.ToLower(id)]; d != nil && d.who.DeviceID == id && h.active(d) {
+				p := d.who
+				h.mu.Unlock()
+				return p, virtualClient{}, nil
+			}
+			h.mu.Unlock()
+		}
+		if b.peers.store != nil {
+			p, ok, err := b.peers.get(id)
+			if err != nil {
+				return peer{}, virtualClient{}, err
+			}
+			if ok {
+				return p, virtualClient{}, nil
+			}
+		}
+	}
+	return peer{}, virtualClient{}, problem(404, "Device not found")
+}
+
+func (b *bridge) deviceEntry(who peer, v virtualClient, full bool) object {
+	id := who.DeviceID
+	entry := publicPeer(who)
+	entry["kind"], entry["theme"] = "physical", deviceTheme(who.Character)
+	if webDeviceID(strings.ToLower(id)) {
+		entry["kind"] = "virtual"
+		delete(entry, "ip")
+	}
+	if v.ID != "" {
+		entry["theme"] = v.Theme
+		delete(entry, "port")
+		delete(entry, "last_seen")
+	}
+	cat := b.catFor(who)
+	cat.Voice = b.voices.resolve(cat.Voice, str(entry["theme"]))
+	entry["character"], entry["cat"], entry["voice"] = cat.Name, cat.catLook, cat.Voice
+	if full {
+		entry["cat"] = cat
+	} else if details := b.tunnels.info(id); details != nil {
+		entry["tunnel"] = details
+	}
+	if b.ws != nil {
+		b.ws.deviceStatus(entry, id, full)
+	} else {
+		entry["auto_volume"], entry["volume"] = b.volumePrefs(id)
+		entry["sleeping"], entry["ws_connected"], entry["mode"] = false, false, "offline"
+	}
+	return entry
 }

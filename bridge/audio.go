@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -216,30 +217,99 @@ func sentences(text string, final, boundary bool) (out []string) {
 func SplitSentences(text string) []string { return sentences(plainText(text), true, true) }
 
 type sentenceExtractor struct {
-	raw     string
-	emitted int
-	halted  bool
+	text              strings.Builder
+	start, clause     int
+	punct             byte
+	closers, space    bool
+	ticks, seen       int
+	utf8Tail          string
+	hasLetter, halted bool
 }
 
-func (s *sentenceExtractor) add(delta string) []string {
-	if s.halted {
+func (s *sentenceExtractor) boundary(out []string) []string {
+	if s.punct == 0 {
+		return out
+	}
+	punct := s.punct
+	s.punct, s.closers = 0, false
+	text := s.text.String()
+	clause := text[s.clause:]
+	if punct == '.' {
+		// Only the final abbreviation or initial and its word boundary matter.
+		tail := clause[max(0, len(clause)-6):]
+		if abbrev.MatchString(tail) || initials.MatchString(tail) {
+			return out
+		}
+	}
+	s.clause = len(text)
+	if punct != '.' {
+		n := 0
+		for _, r := range clause {
+			if alphaNum(r) {
+				n++
+			}
+		}
+		if n < 20 {
+			return out
+		}
+	}
+	out = append(out, strings.TrimSpace(text[s.start:]))
+	s.start = len(text)
+	return out
+}
+
+func (s *sentenceExtractor) add(delta string) (out []string) {
+	if s.halted || delta == "" {
 		return nil
 	}
-	s.raw += delta
-	if len(s.raw) > 8*1024 {
-		s.halted = true
-		return nil
+	// Process only new bytes. An unfinished UTF-8 rune is the only input
+	// carried over; punctuation stays pending until its right boundary.
+	const capBytes = 8 * 1024
+	used := min(len(delta), capBytes-s.seen)
+	s.seen += used
+	text := s.utf8Tail + delta[:used]
+	s.utf8Tail = ""
+	for len(text) != 0 {
+		if !utf8.FullRuneInString(text) {
+			s.utf8Tail = text
+			break
+		}
+		r, n := utf8.DecodeRuneInString(text)
+		text = text[n:]
+		if r == '`' {
+			s.ticks++
+			if s.ticks == 3 {
+				s.halted = true
+				return s.boundary(out)
+			}
+		} else {
+			s.ticks = 0
+		}
+		if strings.ContainsRune("*_`#", r) {
+			continue
+		}
+		if unicode.IsSpace(r) {
+			out = s.boundary(out)
+			s.space = s.text.Len() != 0
+			continue
+		}
+		if s.space {
+			s.text.WriteByte(' ')
+			s.space = false
+		}
+		switch {
+		case strings.ContainsRune(".!?", r):
+			if s.punct == 0 || s.closers {
+				s.punct, s.closers = byte(r), false
+			}
+		case s.punct != 0 && strings.ContainsRune("\"'”’)]", r):
+			s.closers = true
+		default:
+			s.punct, s.closers = 0, false
+		}
+		s.text.WriteRune(r)
+		s.hasLetter = s.hasLetter || alphaNum(r)
 	}
-	if i := strings.Index(s.raw, "```"); i != -1 {
-		s.raw, s.halted = s.raw[:i], true
-	}
-	// A period at the end of a delta may still become a decimal or abbreviation.
-	boundary := s.halted || len(s.raw) != len(strings.TrimRightFunc(s.raw, unicode.IsSpace))
-	all := sentences(plainText(s.raw), false, boundary)
-	if len(all) <= s.emitted {
-		return nil
-	}
-	next := all[s.emitted:]
-	s.emitted = len(all)
-	return next
+	s.halted = s.seen == capBytes
+	return out
 }

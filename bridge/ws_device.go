@@ -430,8 +430,10 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: who,
 		firmware: shortText(ev.Firmware, 24, false), screen: screen, board: board,
 		theme: v.Theme, pct: -1, last: now, moodAt: now, announcing: true}
+	h.b.catMu.Lock()
+	defer h.b.catMu.Unlock()
 	d.cat = h.b.catFor(d.who)
-	d.voice = h.b.voices.get(d.who.DeviceID, d.voiceTheme())
+	d.voice = h.b.voices.resolve(d.cat.Voice, d.voiceTheme())
 	d.autoVol, d.vol = h.b.volumePrefs(d.key)
 	if ev.Role == "device" {
 		d.telemetry.HasBattery = new(board == "esp-vocat")
@@ -765,8 +767,8 @@ func (d *wsDevice) volumeFrame(persist bool) object {
 }
 
 func (h *wsHub) saveVoice(id, voice string) error {
-	h.settingsMu.Lock()
-	defer h.settingsMu.Unlock()
+	h.b.catMu.Lock()
+	defer h.b.catMu.Unlock()
 	if err := h.b.voices.save(id, voice); err != nil {
 		return err
 	}

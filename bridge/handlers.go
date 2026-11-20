@@ -38,6 +38,7 @@ type bridge struct {
 	history   *chatHistory
 	timers    *timerManager
 	diag      diagnostics
+	catMu     sync.Mutex // Serializes cat and voice writes through hub publication.
 	catTitles sync.Mutex
 }
 
@@ -269,17 +270,19 @@ func (b *bridge) relay(ctx context.Context, sender peer, others []peer, target, 
 }
 
 func (b *bridge) turn(ctx context.Context, sender peer, text string) (answer, error) {
-	others, err := b.peerSnapshot(sender.DeviceID)
-	if err != nil {
-		return answer{}, err
-	}
 	const source = "typed"
 	if traceFrom(ctx) == nil {
 		ctx = b.traceTurn(ctx, sender.DeviceID, b.catFor(sender).Name, source, time.Now())
 	}
-	if direct := directMessage(others, text); direct != nil {
-		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
-		return b.relay(ctx, sender, others, direct.target, direct.text)
+	if body := directBody(text); body != "" {
+		others, err := b.peerSnapshot(sender.DeviceID)
+		if err != nil {
+			return answer{}, err
+		}
+		if direct := directMessage(others, body); direct != nil {
+			b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
+			return b.relay(ctx, sender, others, direct.target, direct.text)
+		}
 	}
 	options := turnOptions{source: source}
 	gen, err := b.generateReply(ctx, b.root, sender, text, options)

@@ -199,6 +199,9 @@ func (w *synthWorker) run(ctx context.Context) {
 }
 
 func (w *synthWorker) synthesize(ctx context.Context, voice, text string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	req := ttsRequest{ctx, voice, text, make(chan ttsResult, 1)}
 	select {
 	case w.requests <- req:

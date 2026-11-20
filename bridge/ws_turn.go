@@ -275,15 +275,21 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 	if traceFrom(ctx) == nil {
 		ctx = h.b.traceTurn(ctx, d.who.DeviceID, h.b.catFor(d.who).Name, source, time.Now())
 	}
-	others, err := h.peerSnapshot(d.who.DeviceID)
-	if err != nil || ctx.Err() != nil {
-		h.turnError(d, id, "Could not find nearby cats.")
+	if ctx.Err() != nil {
+		h.finishTurn(d, id, nil, nil)
 		return
 	}
-	if direct := directMessage(others, text); direct != nil {
-		h.b.chat(d.who.DeviceID, newChat("user", "You", text, source), true)
-		h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
-		return
+	if body := directBody(text); body != "" {
+		others, err := h.peerSnapshot(d.who.DeviceID)
+		if err != nil || ctx.Err() != nil {
+			h.turnError(d, id, "Could not find nearby cats.")
+			return
+		}
+		if direct := directMessage(others, body); direct != nil {
+			h.b.chat(d.who.DeviceID, newChat("user", "You", text, source), true)
+			h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
+			return
+		}
 	}
 	if h.b.oc == nil {
 		h.turnError(d, id, "Chat is not ready yet.")

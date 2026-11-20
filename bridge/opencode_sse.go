@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 )
 
 type ocEventData struct {
@@ -242,16 +241,14 @@ type streamedText struct {
 	onFirst   func()
 	messageID string
 	parts     map[string]string
-	byOrdinal map[int]string
+	byOrdinal map[int]*strings.Builder
 	ordinal   int
 	havePart  bool
 }
 
 func (t *streamedText) add(delta string) []string {
 	out := t.sentenceExtractor.add(delta)
-	if t.onFirst != nil && strings.ContainsFunc(plainText(t.raw), func(r rune) bool {
-		return unicode.IsLetter(r) || unicode.IsNumber(r)
-	}) {
+	if t.onFirst != nil && t.hasLetter {
 		t.onFirst()
 		t.onFirst = nil
 	}
@@ -300,13 +297,22 @@ func (t *streamedText) addEvent(event ocEvent) []string {
 			return nil
 		}
 		if t.byOrdinal == nil {
-			t.byOrdinal = map[int]string{}
+			t.byOrdinal = map[int]*strings.Builder{}
 		}
 		t.ordinal, t.havePart = d.Ordinal, true
-		t.byOrdinal[d.Ordinal] += d.Delta
+		part := t.byOrdinal[d.Ordinal]
+		if part == nil {
+			part = new(strings.Builder)
+			t.byOrdinal[d.Ordinal] = part
+		}
+		part.WriteString(d.Delta)
 		return t.add(d.Delta)
 	case "session.text.ended":
-		if tail, ok := strings.CutPrefix(d.Text, t.byOrdinal[d.Ordinal]); ok && (!t.havePart || d.Ordinal == t.ordinal) {
+		var prior string
+		if part := t.byOrdinal[d.Ordinal]; part != nil {
+			prior = part.String()
+		}
+		if tail, ok := strings.CutPrefix(d.Text, prior); ok && (!t.havePart || d.Ordinal == t.ordinal) {
 			return t.add(tail + "\n")
 		}
 		t.halted = true // The authoritative final message may differ from the deltas.

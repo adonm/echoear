@@ -73,12 +73,16 @@ func (v deviceVoices) defaultFor(theme string) string {
 
 func (v deviceVoices) get(id, theme string) string {
 	id = strings.ToLower(id)
+	var voice string
 	if v.store != nil {
-		var voice string
 		_ = v.db.QueryRow("SELECT "+catVoiceSQL, id, id).Scan(&voice)
-		if v.allowed(voice) {
-			return voice
-		}
+	}
+	return v.resolve(voice, theme)
+}
+
+func (v deviceVoices) resolve(voice, theme string) string {
+	if v.allowed(voice) {
+		return voice
 	}
 	return v.defaultFor(theme)
 }
@@ -162,10 +166,14 @@ func (p peers) snapshot(sender string) ([]peer, error) {
 func publicPeers(others []peer) []object {
 	out := make([]object, 0, len(others))
 	for _, p := range others {
-		out = append(out, object{"device_id": p.DeviceID, "character": p.Character, "ip": p.IP,
-			"port": p.Port, "last_seen": p.LastSeen, "online": false})
+		out = append(out, publicPeer(p))
 	}
 	return out
+}
+
+func publicPeer(p peer) object {
+	return object{"device_id": p.DeviceID, "character": p.Character, "ip": p.IP,
+		"port": p.Port, "last_seen": p.LastSeen, "online": false}
 }
 
 type intercomMessage struct{ target, text string }
@@ -199,13 +207,19 @@ func targets(others []peer, target string) []peer {
 	return characters
 }
 
-func directMessage(others []peer, text string) *intercomMessage {
+func directBody(text string) string {
 	text = strings.TrimSpace(text)
 	loc := directRE.FindStringIndex(text)
 	if loc == nil {
+		return ""
+	}
+	return text[loc[1]:]
+}
+
+func directMessage(others []peer, text string) *intercomMessage {
+	if text == "" {
 		return nil
 	}
-	text = text[loc[1]:]
 	names := append(make([]string, 0, len(broadcastNames)+len(others)*2), broadcastNames...)
 	for _, p := range others {
 		names = append(names, p.Character, p.DeviceID)

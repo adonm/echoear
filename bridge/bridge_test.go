@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestTurnPromptIdentifiesDeviceAndInput(t *testing.T) {
@@ -49,6 +50,45 @@ func TestSentencesAndFence(t *testing.T) {
 	want[1] = "Ooh, awesome question! What made it spiral in circles?"
 	if !s.halted || !slices.Equal(streamed, want) {
 		t.Fatal(streamed)
+	}
+}
+
+func TestSentenceExtractorFragmentation(t *testing.T) {
+	for _, text := range []string{
+		"**Whoa!** Dr. Lee found a 3.2-inch shell. Ooh, awesome question! What made it spiral? ",
+		"\t A. B. Wood and Prof. Façade saw it…\u2002Then it returned.\u00a0“Really?” No way. ",
+		"What happened at St. James? “Time to see the world!” she said. “Wait.”...? unfinished",
+		"`inline` and ``more`` markup. Yes.```svg\n This is never read. ```",
+		"NotMr. NotProf. e.g. a note. A.B. This can finish. _",
+	} {
+		raw, _, fence := strings.Cut(text, "```")
+		unmarked := strings.NewReplacer("*", "", "_", "", "`", "", "#", "").Replace(raw)
+		want := sentences(plainText(raw), false, fence || unmarked != strings.TrimRightFunc(unmarked, unicode.IsSpace))
+		for size := 1; size <= len(text); size++ {
+			var extractor sentenceExtractor
+			var got []string
+			for i := 0; i < len(text); i += size {
+				got = append(got, extractor.add(text[i:min(i+size, len(text))])...)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("%q in %d-byte chunks: got %q, want %q", text, size, got, want)
+			}
+		}
+	}
+}
+
+func BenchmarkSentenceExtractor(b *testing.B) {
+	text := strings.Repeat("**Whoa!** Dr. Lee found a 3.2-inch shell. Ooh, awesome question! What made it spiral? ", 25)
+	for name, size := range map[string]int{"single": len(text), "fragmented": 5} {
+		b.Run(name, func(b *testing.B) {
+			b.SetBytes(int64(len(text)))
+			for b.Loop() {
+				var extractor sentenceExtractor
+				for i := 0; i < len(text); i += size {
+					extractor.add(text[i:min(i+size, len(text))])
+				}
+			}
+		})
 	}
 }
 
@@ -189,13 +229,13 @@ func TestStateAndDirectMessage(t *testing.T) {
 		t.Fatalf("bad peer snapshot %+v %v", others, err)
 	}
 	for _, cmd := range []string{"Hey EchoEar, tell MINT: dinner is ready!", "Tell Mint — dinner is ready!", "Send echoear-mint, dinner is ready!"} {
-		m := directMessage(others, cmd)
+		m := directMessage(others, directBody(cmd))
 		if m == nil || m.text != "dinner is ready!" || len(targets(others, m.target)) != 1 {
 			t.Fatalf("didn't match direct relay: %s", cmd)
 		}
 	}
 	for _, phrase := range []string{"a joke", "a short dinosaur story", "a space fact", "about the Moon", "a riddle", "a quiz"} {
-		if directMessage(others, "Send Mint "+phrase) != nil {
+		if directMessage(others, directBody("Send Mint "+phrase)) != nil {
 			t.Fatalf("bypassed composition: %s", phrase)
 		}
 	}

@@ -390,6 +390,10 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		entry.SceneTitle = t.Label
 		b.chat(t.DeviceID, entry, true)
 	}
+	var pcm []byte
+	if !t.WakeAgent {
+		pcm, _ = synthesizeMelody(t.Notes)
+	}
 	h := b.ws
 	h.mu.Lock()
 	d := h.devices[strings.ToLower(t.DeviceID)]
@@ -417,7 +421,6 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 			return
 		}
 		h.wake(d, now)
-		pcm, _ := synthesizeMelody(t.Notes)
 		if len(pcm) != 0 && t.Say == "" {
 			h.playPCM(d, pcm)
 		} else if len(pcm) == 0 {

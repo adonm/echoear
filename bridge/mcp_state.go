@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -100,11 +101,21 @@ func (b *bridge) mcpState(ctx context.Context, args object) (object, error) {
 }
 
 func (b *bridge) mcpDeviceState(out object, id string, include []string) error {
-	list, err := b.deviceEntries(true)
-	if err != nil {
-		return err
-	}
 	wantDevices, wantCats := slices.Contains(include, "devices"), slices.Contains(include, "cats")
+	var list []object
+	if wantDevices || wantCats {
+		var err error
+		list, err = b.deviceEntries(true)
+		if err != nil {
+			return err
+		}
+	} else if id != "" {
+		p, v, err := b.findDevice(id)
+		if err != nil {
+			return err
+		}
+		list = []object{b.deviceEntry(p, v, true)}
+	}
 	devices, cats := object{}, object{}
 	for _, entry := range list {
 		key := str(entry["device_id"])
@@ -122,7 +133,7 @@ func (b *bridge) mcpDeviceState(out object, id string, include []string) error {
 		if wantCats {
 			cats[key] = entry["cat"]
 		}
-		if key == id {
+		if strings.EqualFold(key, id) {
 			out["me"] = object{"device": p, "cat": entry["cat"], "active_app": p["active_app"]}
 		}
 	}

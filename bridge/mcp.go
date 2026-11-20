@@ -214,24 +214,11 @@ var mcpTools = func() []object {
 }()
 
 func (b *bridge) lookupDevice(id string) (peer, error) {
-	if v, ok := b.virtualByID(id); ok {
-		who := peer{DeviceID: v.ID, Character: v.Character}
-		who.Character = b.catFor(who).Name
-		return who, nil
+	p, _, err := b.findDevice(id)
+	if err == nil {
+		p.Character = b.catFor(p).Name
 	}
-	if virtualID.MatchString(strings.ToLower(id)) {
-		return peer{}, problem(404, "Device not found")
-	}
-	others, err := b.peerSnapshot("")
-	if err != nil {
-		return peer{}, err
-	}
-	for _, p := range others {
-		if p.DeviceID == id {
-			return p, nil
-		}
-	}
-	return peer{}, problem(404, "Device not found")
+	return p, err
 }
 
 func (h *wsHub) deviceStatus(entry object, id string, full bool) {
@@ -242,7 +229,7 @@ func (h *wsHub) deviceStatus(entry object, id string, full bool) {
 	h.mu.Lock()
 	if d := h.devices[key]; d != nil && h.active(d) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
-		entry["character"], entry["cat"] = d.cat.Name, d.cat.catLook
+		entry["character"], entry["cat"], entry["voice"] = d.cat.Name, d.cat.catLook, d.voice
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, d.rev, d.firmware
 		entry["auto_volume"], entry["sleeping"] = d.autoVol, d.asleep
 		if d.board != "" {

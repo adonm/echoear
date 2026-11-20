@@ -464,16 +464,20 @@ func (b *bridge) catTool(ctx context.Context, args object) (object, error) {
 	if err != nil {
 		return nil, err
 	}
-	if b.ws != nil {
-		b.ws.mu.Lock()
-	}
-	c, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), op, args)
-	if b.ws != nil {
-		if err == nil && op != "get" {
-			b.ws.catChanged(id, c, profilesChanged)
+	id = who.DeviceID
+	c, err := func() (catState, error) {
+		if op != "get" {
+			b.catMu.Lock()
+			defer b.catMu.Unlock()
 		}
-		b.ws.mu.Unlock()
-	}
+		c, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), op, args)
+		if b.ws != nil && err == nil && op != "get" {
+			b.ws.mu.Lock()
+			b.ws.catChanged(id, c, profilesChanged)
+			b.ws.mu.Unlock()
+		}
+		return c, err
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -521,16 +525,17 @@ func (b *bridge) reassignCats(ctx context.Context, args object) (object, error) 
 	if err != nil {
 		return nil, err
 	}
+	fromID, toID = from.DeviceID, to.DeviceID
 	apply := func() error {
-		if b.ws != nil {
-			b.ws.mu.Lock()
-			defer b.ws.mu.Unlock()
-		}
+		b.catMu.Lock()
+		defer b.catMu.Unlock()
 		nextFrom, nextTo, archived, err := b.transferCats(ctx, from, to, mode)
 		if err != nil {
 			return err
 		}
 		if b.ws != nil {
+			b.ws.mu.Lock()
+			defer b.ws.mu.Unlock()
 			for _, id := range []string{fromID, toID} {
 				if d := b.ws.devices[strings.ToLower(id)]; d != nil && b.ws.active(d) {
 					b.ws.stopCatTurn(d)
@@ -538,6 +543,7 @@ func (b *bridge) reassignCats(ctx context.Context, args object) (object, error) 
 			}
 			b.ws.catChanged(fromID, nextFrom, false)
 			b.ws.catChanged(toID, nextTo, archived)
+			b.ws.catsReassigned(fromID, toID)
 		}
 		return nil
 	}
@@ -560,11 +566,6 @@ func (b *bridge) reassignCats(ctx context.Context, args object) (object, error) 
 	}
 	if err != nil {
 		return nil, err
-	}
-	if b.ws != nil {
-		b.ws.mu.Lock()
-		b.ws.catsReassigned(fromID, toID)
-		b.ws.mu.Unlock()
 	}
 	return object{"ok": true, "mode": mode, "from_device_id": fromID, "to_device_id": toID}, nil
 }
