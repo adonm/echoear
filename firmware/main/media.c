@@ -31,8 +31,8 @@ static QueueHandle_t jobs;
 static SemaphoreHandle_t lock;
 static StreamBufferHandle_t tts;
 static StaticStreamBuffer_t tts_control;
-static bool recording, http_speech;
-static atomic_bool stream_open, stream_ended, speech_busy, stop_recording, cancel_recording, interrupted;
+static bool http_speech;
+static atomic_bool recording, stream_open, stream_ended, speech_busy, stop_recording, cancel_recording, interrupted;
 
 static bool submit(const job_t *job)
 {
@@ -73,6 +73,11 @@ bool media_record_start(const char *target)
 void media_record_stop(void)
 {
     atomic_store(&stop_recording, true);
+}
+
+bool media_is_recording(void)
+{
+    return atomic_load(&recording);
 }
 
 static void prepare_playback(void)

@@ -1,5 +1,6 @@
 #include "ota_server.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,12 +17,12 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "media.h"
 #include "power.h"
 #include "sdkconfig.h"
+#include "telemetry.h"
 #include "wifi.h"
 #include "ws_client.h"
 
@@ -96,8 +97,7 @@ static esp_err_t status_get(httpd_req_t *request)
 {
     char ip[WIFI_IP_LEN];
     wifi_get_ip(ip);
-    wifi_ap_record_t ap;
-    int rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+    telemetry_t hw = telemetry_read();
     const esp_partition_t *running = esp_ota_get_running_partition();
     battery_status_t battery = battery_status();
     char pct[12] = "null", mv[16] = "null";
@@ -105,18 +105,22 @@ static esp_err_t status_get(httpd_req_t *request)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char json[544];
-    snprintf(json, sizeof(json),
+    char json[640];
+    int len = snprintf(json, sizeof(json),
              "{\"device\":\"%s\",\"character\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
-             "\"free_heap\":%zu,\"free_psram\":%zu,\"firmware\":\"%s\",\"running_partition\":\"%s\","
+             "\"free_heap\":%zu,\"min_free_heap\":%zu,\"free_psram\":%zu,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
+             "\"firmware\":\"%s\",\"running_partition\":\"%s\","
              "\"board\":\"" BOARD_NAME "\",\"width\":%d,\"height\":%d,\"has_battery\":%s,"
              "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s}",
-             device_id, wifi_character(), device_mac, ip, rssi,
-             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label,
+             device_id, wifi_character(), device_mac, ip, hw.wifi_rssi,
+             hw.free_heap, hw.min_free_heap, hw.free_psram, hw.uptime_s, hw.cpu_pct,
+             esp_app_get_description()->version, running->label,
              FRAME_WIDTH, FRAME_HEIGHT, BOARD_HAS_BATTERY ? "true" : "false",
              audio_get_volume(), pct, mv, BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null",
              display_is_sleeping() ? "true" : "false", ws_client_connected() ? "true" : "false");
+    if (len < 0 || (size_t)len >= sizeof(json)) {
+        return text_response(request, "500 Internal Server Error", "Status response too large\n");
+    }
     return json_response(request, json);
 }
 

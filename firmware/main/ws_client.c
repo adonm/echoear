@@ -1,5 +1,6 @@
 #include "ws_client.h"
 
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,17 +13,21 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_transport_ssl.h"
+#include "esp_transport_tcp.h"
+#include "esp_transport_ws.h"
 #include "esp_websocket_client.h"
-#include "esp_wifi.h"
 #include "frame.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 #include "media.h"
 #include "power.h"
 #include "sdkconfig.h"
+#include "telemetry.h"
 #include "wifi.h"
 
-enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 30000 };
+enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000 };
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
@@ -41,6 +46,7 @@ typedef struct {
 
 static const char *TAG = "ws";
 static esp_websocket_client_handle_t client;
+static esp_transport_handle_t ws_transport;
 static TaskHandle_t service;
 static QueueHandle_t inputs;
 static uint8_t *rx_buffer;
@@ -48,6 +54,7 @@ static fragment_t rx;
 static bool tts_accepted;
 static atomic_bool wifi_online, finished;
 static atomic_uint socket_session, ready_session;
+static atomic_int socket_fd = -1;
 static uint32_t next_session;
 static int reconnect_ms = 1000;
 
@@ -62,14 +69,18 @@ bool ws_client_connected(void)
     return atomic_load(&wifi_online) && session && atomic_load(&ready_session) == session;
 }
 
-static bool send_wire(uint32_t session, const void *data, int len, bool binary, bool hello)
+static bool send_wire(uint32_t session, const void *data, int len, bool binary, bool hello, TickType_t timeout)
 {
     if (!atomic_load(&wifi_online) || !session || session != ws_client_session() ||
         (!hello && session != atomic_load(&ready_session))) return false;
-    TickType_t timeout = pdMS_TO_TICKS(500);
     int written = binary ? esp_websocket_client_send_bin(client, data, len, timeout)
                          : esp_websocket_client_send_text(client, data, len, timeout);
     return written == len;
+}
+
+static bool send_ready(uint32_t session, const void *data, int len, bool binary)
+{
+    return send_wire(session, data, len, binary, false, pdMS_TO_TICKS(500));
 }
 
 static cJSON *event_json(const char *event)
@@ -86,7 +97,7 @@ static bool send_json(uint32_t session, cJSON *json)
 {
     char buffer[512];
     bool sent = json && cJSON_PrintPreallocated(json, buffer, sizeof(buffer), false) &&
-                send_wire(session, buffer, strlen(buffer), false, false);
+                send_ready(session, buffer, strlen(buffer), false);
     cJSON_Delete(json);
     return sent;
 }
@@ -124,7 +135,7 @@ bool ws_client_rec_pcm(uint32_t session, const int16_t *pcm, size_t samples)
     if (!samples || samples > AUDIO_RECORD_CHUNK_SAMPLES) return false;
     size_t bytes = samples * sizeof(*pcm);
     memcpy(packet + 1, pcm, bytes);
-    return send_wire(session, packet, bytes + 1, true, false);
+    return send_ready(session, packet, bytes + 1, true);
 }
 
 void ws_client_rec_end(uint32_t session, const char *target, bool cancelled)
@@ -141,7 +152,7 @@ void ws_client_tts_ack(uint32_t session, bool interrupted)
 {
     const char *text = interrupted ? "{\"ev\":\"tts_ack\",\"state\":\"interrupted\"}"
                                    : "{\"ev\":\"tts_ack\",\"state\":\"done\"}";
-    send_wire(session, text, strlen(text), false, false);
+    send_ready(session, text, strlen(text), false);
 }
 
 static void send_input(const input_t *input)
@@ -165,31 +176,51 @@ static void send_input(const input_t *input)
     else cJSON_Delete(json);
 }
 
-static bool telemetry(uint32_t session, bool hello)
+static bool socket_writable(void)
 {
+    int fd = atomic_load(&socket_fd);
+    if (fd < LWIP_SOCKET_OFFSET || fd >= LWIP_SELECT_MAXNFDS) return false;
+    fd_set writable, errors;
+    FD_ZERO(&writable);
+    FD_ZERO(&errors);
+    FD_SET(fd, &writable);
+    FD_SET(fd, &errors);
+    struct timeval zero = { 0 };
+    return lwip_select(fd + 1, NULL, &writable, &errors, &zero) > 0 &&
+           FD_ISSET(fd, &writable) && !FD_ISSET(fd, &errors);
+}
+
+static bool send_telemetry(uint32_t session, bool hello)
+{
+    if (!hello && media_is_recording()) return false;
+    telemetry_t hw = telemetry_read();
     battery_status_t battery = battery_status();
     char pct[12] = "null", mv[16] = "null";
     if (battery.pct >= 0) {
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char extra[240];
+    char extra[240] = "";
     if (hello) {
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
-        snprintf(extra, sizeof(extra), "\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
-                 "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
-                 "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\"",
-                 device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT);
-    } else {
-        wifi_ap_record_t ap;
-        snprintf(extra, sizeof(extra), "\"rssi\":%d", esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0);
+        int len = snprintf(extra, sizeof(extra), ",\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
+                           "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
+                           "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\"",
+                           device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT);
+        if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
-    char text[440];
-    int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\",%s,\"battery_pct\":%s,\"battery_mv\":%s,"
-                       "\"charging\":%s,\"volume\":%d}", hello ? "hello" : "status", extra, pct, mv,
+    char text[512];
+    int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\"%s,\"free_heap\":%zu,\"min_free_heap\":%zu,"
+                       "\"free_psram\":%zu,\"wifi_rssi\":%d,\"rssi\":%d,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
+                       "\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"volume\":%d}",
+                       hello ? "hello" : "status", extra, hw.free_heap, hw.min_free_heap, hw.free_psram,
+                       hw.wifi_rssi, hw.wifi_rssi, hw.uptime_s, hw.cpu_pct, pct, mv,
                        BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null", audio_get_volume());
-    return len > 0 && (size_t)len < sizeof(text) && send_wire(session, text, len, false, hello);
+    if (len <= 0 || (size_t)len >= sizeof(text)) return false;
+    // Preflight backpressure: the driver's zero-timeout transport failure can close the link.
+    if (!hello && (!socket_writable() || media_is_recording())) return false;
+    return send_wire(session, text, len, false, hello, hello ? pdMS_TO_TICKS(500) : 0);
 }
 
 static const char *field(const cJSON *msg, const char *key)
@@ -329,6 +360,7 @@ static void receive_frame(const esp_websocket_event_data_t *event)
 static void drop_link(void)
 {
     if (atomic_exchange(&socket_session, 0)) {
+        atomic_store(&socket_fd, -1);
         atomic_store(&ready_session, 0);
         media_link_lost();
         display_set_link(false);
@@ -345,6 +377,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         esp_websocket_client_set_reconnect_timeout(client, reconnect_ms);
         display_set_link(true);
         if (++next_session == 0) ++next_session;
+        atomic_store(&socket_fd, esp_transport_get_socket(ws_transport));
         atomic_store(&socket_session, next_session);
         if (!atomic_load(&wifi_online)) drop_link();
         xTaskNotifyGive(service);
@@ -382,13 +415,13 @@ static void service_task(void *arg)
         uint32_t session = ws_client_session();
         int64_t now = esp_timer_get_time() / 1000;
         if (session && session != atomic_load(&ready_session)) {
-            if (telemetry(session, true) && session == ws_client_session()) {
+            if (send_telemetry(session, true) && session == ws_client_session()) {
                 atomic_store(&ready_session, session);
                 after_status = now + STATUS_MS;
                 ESP_LOGI(TAG, "Bridge connected");
             }
         } else if (session && now >= after_status) {
-            telemetry(session, false);
+            send_telemetry(session, false);
             after_status = now + STATUS_MS;
         }
         input_t input;
@@ -406,6 +439,7 @@ void ws_client_network_changed(bool online)
 esp_err_t ws_client_init(void)
 {
     static char url[sizeof(CONFIG_ECHOEAR_BRIDGE_URL) + 5];
+    static const char headers[] = "X-EchoEar-Token: " CONFIG_ECHOEAR_BRIDGE_TOKEN "\r\n";
     const char *base = CONFIG_ECHOEAR_BRIDGE_URL, *host, *scheme;
     if (!strncmp(base, "http://", 7)) {
         host = base + 7;
@@ -419,9 +453,21 @@ esp_err_t ws_client_init(void)
     size_t length = strcspn(host, "/?#@");
     if (!length || (host[length] && strcmp(host + length, "/"))) return ESP_ERR_INVALID_ARG;
     snprintf(url, sizeof(url), "%s://%.*s/ws", scheme, (int)length, host);
+
+    // Own the transport so heartbeat preflight can see the connected socket.
+    bool tls = !strcmp(scheme, "wss");
+    esp_transport_handle_t parent = tls ? esp_transport_ssl_init() : esp_transport_tcp_init();
+    if (!parent) goto fail;
+    if (tls) esp_transport_ssl_crt_bundle_attach(parent, esp_crt_bundle_attach);
+    ws_transport = esp_transport_ws_init(parent);
+    if (!ws_transport) goto fail;
+    esp_transport_set_default_port(ws_transport, tls ? 443 : 80);
+    const esp_transport_ws_config_t ws_config = {
+        .ws_path = "/ws", .headers = headers, .propagate_control_frames = true,
+    };
+    if (esp_transport_ws_set_config(ws_transport, &ws_config) != ESP_OK) goto fail;
     const esp_websocket_client_config_t config = {
-        .uri = url, .headers = "X-EchoEar-Token: " CONFIG_ECHOEAR_BRIDGE_TOKEN "\r\n",
-        .crt_bundle_attach = esp_crt_bundle_attach, .enable_close_reconnect = true,
+        .uri = url, .ext_transport = ws_transport, .enable_close_reconnect = true,
         .reconnect_timeout_ms = 1000, .network_timeout_ms = 5000, .buffer_size = 4096, .task_stack = 6144,
     };
     rx_buffer = heap_caps_malloc(FRAME_PACKET_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -434,9 +480,12 @@ esp_err_t ws_client_init(void)
 
 fail:
     if (client) esp_websocket_client_destroy(client);
+    if (ws_transport) esp_transport_destroy(ws_transport);
+    if (parent) esp_transport_destroy(parent);
     if (inputs) vQueueDelete(inputs);
     free(rx_buffer);
     client = NULL;
+    ws_transport = NULL;
     inputs = NULL;
     rx_buffer = NULL;
     return ESP_ERR_NO_MEM;
