@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -479,6 +480,71 @@ func (o *openCode) ensureSession(ctx context.Context, device, character string) 
 	return created.ID, nil
 }
 
+func sessionMatchesDevice(title, deviceID string) bool {
+	name, ok := strings.CutPrefix(title, "EchoEar: ")
+	if !ok || deviceID == "" {
+		return false
+	}
+	if strings.EqualFold(name, deviceID) {
+		return true
+	}
+	if id, ok := strings.CutPrefix(name, "scope-"); ok && strings.EqualFold(id, deviceID) {
+		return true
+	}
+	if name, ok := strings.CutSuffix(name, ")"); ok {
+		if i := strings.LastIndex(name, " ("); i >= 0 {
+			return strings.EqualFold(name[i+2:], deviceID)
+		}
+	}
+	return false
+}
+
+func (o *openCode) ListDeviceSessions(ctx context.Context, deviceID, activeSID string) ([]string, error) {
+	type session struct {
+		ID, Title string
+		Time      struct{ Created int64 }
+	}
+	type page struct {
+		Data   []session
+		Cursor struct{ Next string }
+	}
+	var matches []session
+	seenIDs, seenCursors := make(map[string]bool), make(map[string]bool)
+	params := url.Values{"limit": {"200"}}
+	for range 5 {
+		var result page
+		if err := o.jsonCall(ctx, http.MethodGet, "/api/session?"+params.Encode(), nil, &result); err != nil {
+			if activeSID != "" {
+				return []string{activeSID}, nil
+			}
+			return nil, err
+		}
+		for _, s := range result.Data {
+			if sessionIDRE.MatchString(s.ID) && !seenIDs[s.ID] && (s.ID == activeSID || sessionMatchesDevice(s.Title, deviceID)) {
+				matches = append(matches, s)
+				seenIDs[s.ID] = true
+			}
+		}
+		next := result.Cursor.Next
+		if next == "" || seenCursors[next] {
+			break
+		}
+		seenCursors[next] = true
+		params.Set("cursor", next)
+	}
+	slices.SortFunc(matches, func(a, b session) int {
+		return cmp.Or(cmp.Compare(a.Time.Created, b.Time.Created), strings.Compare(a.ID, b.ID))
+	})
+	ids := make([]string, 0, len(matches))
+	for _, s := range matches {
+		ids = append(ids, s.ID)
+	}
+	if activeSID != "" && !seenIDs[activeSID] {
+		ids = append(ids, activeSID)
+	}
+	return ids, nil
+}
+
 type ocMessage struct {
 	ID, Type, Finish, Outcome string
 	Text                      string
@@ -562,16 +628,17 @@ func (o *openCode) GetSessionMessages(ctx context.Context, sid string) ([]chatEn
 		Data   []ocMessage
 		Cursor struct{ Next string }
 	}
+	const messageLimit = 500
 	params := url.Values{"order": {"asc"}, "limit": {"50"}}
 	entries := []chatEntry{}
 	source := "text"
 	seen := make(map[string]bool)
-	for count := 0; count < chatLimit; {
+	for count := 0; count < messageLimit; {
 		var result page
 		if err := o.jsonCall(ctx, http.MethodGet, "/api/session/"+sid+"/message?"+params.Encode(), nil, &result); err != nil {
 			return nil, err
 		}
-		for _, message := range result.Data[:min(len(result.Data), chatLimit-count)] {
+		for _, message := range result.Data[:min(len(result.Data), messageLimit-count)] {
 			count++
 			if message.Type == "user" {
 				source = "text"

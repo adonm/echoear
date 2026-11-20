@@ -160,6 +160,7 @@ label, legend { font-size: .8rem; color: var(--muted); }
 .messages { display: flex; flex-direction: column; align-items: flex-start; gap: .6rem; list-style: none; margin: 0; padding: 0; }
 .empty-chat { padding: 1rem 0; color: var(--muted); text-align: center; font-size: .88rem; }
 .day { align-self: center; padding: .2rem; color: var(--muted); font-size: .72rem; }
+.chat-divider { align-self: center; margin-block: .25rem; text-align: center; }
 .bubble {
   width: fit-content;
   max-width: min(92%, 37rem);

@@ -596,6 +596,11 @@ function command(msg) {
 const dayFormat = new Intl.DateTimeFormat(undefined, {dateStyle:"medium"});
 const timeFormat = new Intl.DateTimeFormat(undefined, {hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
 function bubble(entry) {
+  if (entry.role === "system") {
+    const item = node("li", "pill chat-divider", entry.text);
+    item.dataset.entry = entry.id;
+    return item;
+  }
   const role = ["assistant", "user", "intercom"].includes(entry.role) ? entry.role : "assistant";
   const item = node("li", `bubble ${role}`);
   item.dataset.entry = entry.id;
@@ -662,8 +667,11 @@ async function loadHistory({replace = true} = {}) {
   try {
     const {messages} = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/messages`, {signal:loading.signal});
     if (view !== cat || cat.loading !== loading) return;
-    const merged = replace ? new Map() : new Map(cat.entries);
+    const merged = new Map();
     for (const entry of messages) if (entry.id) merged.set(entry.id, entry);
+    if (!replace) {
+      for (const [id, entry] of cat.entries) if (!merged.has(id)) merged.set(id, entry);
+    }
     for (const [id, entry] of live) merged.set(id, entry);
     cat.entries = merged;
   } catch {
@@ -689,8 +697,6 @@ $("reset").onclick = async () => {
     await api(current, "/api/reset", {method:"POST", body:{device_id:cat.id}});
     if (view !== cat) return;
     cat.resetting = false;
-    cat.entries.clear();
-    renderTranscript(true);
     say("chat-note", "New chat started.");
     loadHistory();
   } catch {

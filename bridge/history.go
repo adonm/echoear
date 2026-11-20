@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const chatLimit = 200
+const localChatLimit = 200
 
 type chatEntry struct {
 	ID          string    `json:"id"`
@@ -45,7 +45,7 @@ func loadChatHistory(path string) *chatHistory {
 			h.entries, h.path = make(map[string][]chatEntry), ""
 		}
 		for id, entries := range h.entries {
-			h.entries[id] = entries[max(0, len(entries)-chatLimit):]
+			h.entries[id] = entries[max(0, len(entries)-localChatLimit):]
 		}
 	} else if !os.IsNotExist(err) {
 		log.Print("EchoEar chat event file is unreadable; using in-memory history")
@@ -58,7 +58,7 @@ func (h *chatHistory) add(id string, entry chatEntry) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	all := append(h.entries[id], entry)
-	h.entries[id] = all[max(0, len(all)-chatLimit):]
+	h.entries[id] = all[max(0, len(all)-localChatLimit):]
 	if h.path != "" && writeMap(h.path, h.entries) != nil {
 		log.Print("EchoEar could not persist chat events")
 	}
@@ -96,32 +96,60 @@ func (b *bridge) messages(ctx context.Context, id string) (any, error) {
 		return nil, err
 	}
 	entries := []chatEntry{}
+	seen := make(map[string]bool)
 	if b.oc != nil {
-		sid, err := b.oc.get(id)
+		activeSID, err := b.oc.get(id)
 		if err != nil {
 			return nil, err
 		}
-		if sid != "" {
+		sessions, err := b.oc.ListDeviceSessions(ctx, id, activeSID)
+		if err != nil {
+			return nil, err
+		}
+		for _, sid := range sessions {
 			messages, err := b.oc.GetSessionMessages(ctx, sid)
-			var status *upstreamStatus
-			if err != nil && !(errors.As(err, &status) && status.code == 404) {
+			if err != nil {
+				var status *upstreamStatus
+				if errors.As(err, &status) && status.code == http.StatusNotFound {
+					continue // The session was removed after it was listed.
+				}
 				return nil, err
 			}
-			for i := range messages {
-				if messages[i].Role == "assistant" {
-					messages[i].Sender = who.Character
+			unique := messages[:0]
+			for _, message := range messages {
+				if seen[message.ID] {
+					continue
 				}
+				seen[message.ID] = true
+				if message.Role == "assistant" {
+					message.Sender = who.Character
+				}
+				unique = append(unique, message)
 			}
-			entries = append(entries, messages...)
+			if len(unique) == 0 {
+				continue
+			}
+			if len(entries) > 0 {
+				divider := chatEntry{ID: "divider-" + sid, Role: "system", Sender: "System",
+					Text: "Started a new chat", Source: "system", Timestamp: unique[0].Timestamp}
+				entries = append(entries, divider)
+				seen[divider.ID] = true
+			}
+			entries = append(entries, unique...)
 		}
 	}
 	if b.history != nil {
 		b.history.mu.Lock()
-		entries = append(entries, b.history.entries[id]...)
+		for _, entry := range b.history.entries[id] {
+			if !seen[entry.ID] {
+				entries = append(entries, entry)
+				seen[entry.ID] = true
+			}
+		}
 		b.history.mu.Unlock()
 	}
 	slices.SortStableFunc(entries, func(a, b chatEntry) int { return a.Timestamp.Compare(b.Timestamp) })
-	return object{"device_id": id, "messages": entries[max(0, len(entries)-chatLimit):]}, nil
+	return object{"device_id": id, "messages": entries}, nil
 }
 
 func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {

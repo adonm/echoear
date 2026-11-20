@@ -108,6 +108,10 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	oc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/session":
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"data":[]}`)
+				return
+			}
 			creates.Add(1)
 			var input ocSettings
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || !slices.Equal(input.Permissions, settings.Permissions) {
@@ -338,11 +342,52 @@ func TestVirtualCatSessionAliasMigration(t *testing.T) {
 
 func TestChatHistoryPaginationAndMerge(t *testing.T) {
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/session/ses_test/message" {
+		q := r.URL.Query()
+		sendPage := func(data []object, next any) {
+			_ = json.NewEncoder(w).Encode(object{"data": data, "cursor": object{"next": next}})
+		}
+		switch r.URL.Path {
+		case "/api/session":
+			if q.Get("limit") != "200" {
+				t.Error("unexpected session page size", q)
+			}
+			switch q.Get("cursor") {
+			case "":
+				sendPage([]object{
+					{"id": "ses_latest", "title": "EchoEar: Cake (ECHOEAR-HISTORY)", "time": object{"created": 300}},
+					{"id": "ses_other", "title": "EchoEar: echoear-history2", "time": object{"created": 100}},
+					{"id": "ses_active", "title": "Manually renamed", "time": object{"created": 300}},
+				}, "session+next=")
+			case "session+next=":
+				sendPage([]object{
+					{"id": "ses_empty", "title": "EchoEar: scope-echoear-history", "time": object{"created": 200}},
+					{"id": "ses_oldest", "title": "EchoEar: echoear-history", "time": object{"created": 100}},
+				}, nil)
+			default:
+				t.Error("unexpected session cursor", q)
+			}
+			return
+		case "/api/session/ses_empty/message":
+			sendPage([]object{{"id": "msg_idle", "type": "idle"}}, nil)
+			return
+		case "/api/session/ses_active/message":
+			sendPage([]object{
+				{"id": "msg_active", "type": "user", "text": "Continuing.", "time": object{"created": 4000}},
+				{"id": "msg2", "type": "user", "text": "Duplicate.", "time": object{"created": 4100}},
+			}, nil)
+			return
+		case "/api/session/ses_latest/message":
+			sendPage([]object{{"id": "msg_latest", "type": "user", "text": "Latest.", "time": object{"created": 5000}}}, nil)
+			return
+		case "/api/session/ses_other/message":
+			t.Error("requested messages for a different device")
+			http.NotFound(w, r)
+			return
+		case "/api/session/ses_oldest/message":
+		default:
 			http.NotFound(w, r)
 			return
 		}
-		q := r.URL.Query()
 		if q.Get("limit") != "50" {
 			t.Error("unexpected page size", q)
 		}
@@ -369,7 +414,7 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 		default:
 			t.Error("unexpected opaque cursor", q)
 		}
-		_ = json.NewEncoder(w).Encode(object{"data": data, "cursor": object{"next": next}})
+		sendPage(data, next)
 	}))
 	defer upstreamServer.Close()
 	_, base := wsHarness(t, func(b *bridge, dir string) {
@@ -380,22 +425,43 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 		}
 		b.oc = newOpenCode(b.root, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: file, read: openCodeEndpoint}},
 			filepath.Join(dir, "sessions.json"), dir, ocSettings{})
-		if err := b.oc.save("echoear-history", "ses_test"); err != nil {
+		if err := b.oc.save("echoear-history", "ses_active"); err != nil {
 			t.Fatal(err)
 		}
 		entry := newChat("intercom", "Mint", "Dinner is ready!", "intercom")
+		entry.ID = "bridge-dinner"
 		entry.Timestamp = time.Unix(2, 0).UTC()
 		b.history.add("echoear-history", entry)
+		b.history.add("echoear-history", entry)
+		b.history.add("echoear-history", chatEntry{ID: "msg2", Role: "assistant", Text: "Local duplicate."})
 	})
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, "echoear-history", "Cake")
 	raw := testRequest(t, "GET", base+"/api/devices/echoear-history/messages", "unit", nil, 200)
-	data := testObject(t, raw)
-	messages := data["messages"].([]any)
-	if len(messages) != 3 || messages[0].(object)["text"] != "Why is the sky blue?" || messages[0].(object)["source"] != "voice" ||
-		messages[1].(object)["text"] != "Dinner is ready!" || messages[2].(object)["text"] != "Air scatters blue light." ||
-		messages[2].(object)["scene_title"] != "Blue sky" || messages[2].(object)["tool_summary"] != "Showed a scene" {
+	var data struct{ Messages []chatEntry }
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, message := range data.Messages {
+		ids = append(ids, message.ID)
+	}
+	if want := []string{"msg1", "bridge-dinner", "msg2", "divider-ses_active", "msg_active", "divider-ses_latest", "msg_latest"}; !slices.Equal(ids, want) {
+		t.Fatalf("message order = %v, want %v", ids, want)
+	}
+	messages := data.Messages
+	if messages[0].Text != "Why is the sky blue?" || messages[0].Source != "voice" ||
+		messages[1].Role != "intercom" || messages[1].Text != "Dinner is ready!" ||
+		messages[2].Sender != "Cake" || messages[2].Text != "Air scatters blue light." ||
+		messages[2].SceneTitle != "Blue sky" || messages[2].ToolSummary != "Showed a scene" {
 		t.Fatal(string(raw))
+	}
+	for _, i := range []int{3, 5} {
+		divider := messages[i]
+		if divider.Role != "system" || divider.Sender != "System" || divider.Source != "system" ||
+			divider.Text != "Started a new chat" || !divider.Timestamp.Equal(messages[i+1].Timestamp) {
+			t.Errorf("invalid new chat divider: %+v", divider)
+		}
 	}
 }
 
