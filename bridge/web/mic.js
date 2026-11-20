@@ -1,12 +1,15 @@
-const frameSamples = 320; // 20 ms at 16 kHz.
+const vadSamples = 320; // 20 ms at 16 kHz.
+const callSamples = 640; // 40 ms at 16 kHz.
 
 class EchoMic extends AudioWorkletProcessor {
-  constructor() {
+  constructor({processorOptions} = {}) {
     super();
+    this.call = processorOptions?.mode === "call";
+    this.packetBytes = 1 + 2 * (this.call ? callSamples : vadSamples);
     this.ratio = sampleRate / 16000;
     this.left = this.ratio;
     this.sum = 0;
-    this.packet = new Uint8Array(1 + 2 * frameSamples);
+    this.packet = new Uint8Array(this.packetBytes);
     this.buffer = new DataView(this.packet.buffer);
     this.used = 1;
     this.live = true;
@@ -16,7 +19,7 @@ class EchoMic extends AudioWorkletProcessor {
     this.threshold = 0;
     this.voiced = 0;
     this.quiet = 0;
-    this.port.onmessage = () => this.finish("end");
+    this.port.onmessage = () => { if (!this.call) this.finish("end"); };
   }
   finish(message) {
     if (!this.live) return;
@@ -33,7 +36,7 @@ class EchoMic extends AudioWorkletProcessor {
     }
   }
   frame() {
-    const rms = Math.sqrt(this.energy / frameSamples);
+    const rms = Math.sqrt(this.energy / vadSamples);
     this.energy = 0;
     this.frames++;
     if (this.frames <= 10) {
@@ -56,7 +59,7 @@ class EchoMic extends AudioWorkletProcessor {
     this.packet[0] = 1;
     const frame = this.used === this.packet.length ? this.packet.buffer : this.packet.buffer.slice(0, this.used);
     this.port.postMessage(frame, [frame]);
-    this.packet = new Uint8Array(1 + 2 * frameSamples);
+    this.packet = new Uint8Array(this.packetBytes);
     this.buffer = new DataView(this.packet.buffer);
     this.used = 1;
   }
@@ -77,10 +80,10 @@ class EchoMic extends AudioWorkletProcessor {
           const sample = Math.max(-1, Math.min(1, this.sum / this.ratio));
           this.buffer.setInt16(this.used, Math.round(sample * (sample < 0 ? 32768 : 32767)), true);
           this.used += 2;
-          this.energy += sample * sample;
+          if (!this.call) this.energy += sample * sample;
           if (this.used === this.packet.length) {
             this.send();
-            this.frame();
+            if (!this.call) this.frame();
             if (!this.live) return false;
           }
           this.left = this.ratio;

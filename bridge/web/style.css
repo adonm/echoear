@@ -110,6 +110,8 @@ h1 span { color: var(--sun); }
 .eyebrow + h2 { margin-top: .22rem; }
 .device-list, #token-form, #share, #tunnel-controls, .pair-link { display: grid; gap: .45rem; }
 .device-list { margin-top: .65rem; }
+.device-row { display: flex; gap: .4rem; }
+.device-row .device { flex: 1; min-width: 0; }
 .device {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

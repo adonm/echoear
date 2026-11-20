@@ -3,7 +3,7 @@ import {audioReady, setVolume, volume} from "./audio.js";
 import {loadHistory} from "./chat.js";
 import {$, colors, getLocal, isLive, node, persisted, say, setLocal, wide} from "./dom.js";
 import {loadSavedCats} from "./library.js";
-import {renderCurrent, select} from "./live.js";
+import {canStartCall, renderCurrent, select, startPeerCall} from "./live.js";
 import {state} from "./state.js";
 
 let phone = getLocal("echoear-phone");
@@ -67,17 +67,22 @@ wide.addEventListener("change", e => {
 
 const rowParts = new WeakMap();
 function deviceRow(d) {
+  const row = node("div", "device-row");
+  row.dataset.id = d.device_id;
   const button = node("button", "device");
   button.type = "button";
-  button.dataset.id = d.device_id;
+  const call = node("button", "quiet peer-call", "Call");
+  call.type = "button";
+  call.onclick = () => startPeerCall(row.dataset.id);
   const name = node("span", "device-name"), status = node("span", "pill device-state");
   const meta = node("span", "device-meta"), badge = node("span", "pill tunnel-badge", "HTTPS Tunnel");
   const dot = node("span", "cat-dot");
   dot.setAttribute("aria-hidden", "true");
   button.append(dot, name, status, meta, badge);
-  rowParts.set(button, {name, status, meta, badge});
+  row.append(button, call);
+  rowParts.set(row, {button, call, name, status, meta, badge});
   button.onclick = () => {
-    const selected = state.app.devices.find(cat => cat.device_id === button.dataset.id);
+    const selected = state.app.devices.find(cat => cat.device_id === row.dataset.id);
     if (selected) {
       select(selected);
       if (selected.kind !== "virtual" && !wide.matches) {
@@ -87,7 +92,7 @@ function deviceRow(d) {
       }
     }
   };
-  return button;
+  return row;
 }
 
 function renderDevices() {
@@ -95,14 +100,17 @@ function renderDevices() {
   for (const [id, virtual] of [["physical", false], ["virtual", true]]) {
     const nav = $(id);
     const list = state.app.devices.filter(d => virtual ? persisted(d) : d.kind !== "virtual");
-    const rows = new Map([...nav.querySelectorAll("button")].map(b => [b.dataset.id, b]));
+    const rows = new Map([...nav.children].filter(row => row.dataset.id).map(row => [row.dataset.id, row]));
     nav.querySelector("p")?.remove();
     for (const d of list) {
-      const button = rows.get(d.device_id) ?? deviceRow(d);
+      const row = rows.get(d.device_id) ?? deviceRow(d);
       rows.delete(d.device_id);
+      const {button, call, name, status, meta, badge} = rowParts.get(row);
       colors(button, d.cat);
       button.setAttribute("aria-pressed", String(state.view?.id === d.device_id));
-      const {name, status, meta, badge} = rowParts.get(button);
+      call.hidden = !state.view?.virtual || !isLive(d) || !d.caps?.call || state.view.id === d.device_id;
+      call.disabled = !canStartCall();
+      call.setAttribute("aria-label", `Call ${d.character}`);
       if (name.textContent !== d.character) name.textContent = d.character;
       status.dataset.status = isLive(d) ? "live" : d.online ? "http" : "off";
       status.textContent = isLive(d) ? "Live WS" : "Offline";
@@ -113,7 +121,7 @@ function renderDevices() {
       ].filter(Boolean).join(" · ");
       meta.hidden = !meta.textContent;
       badge.hidden = !d.tunnel?.active;
-      if (!button.isConnected) nav.append(button);
+      if (!row.isConnected) nav.append(row);
     }
     for (const stale of rows.values()) stale.remove();
     if (!list.length) nav.append(node("p", "small", virtual ? "No saved Virtual Cats." : "No EchoEars found."));
@@ -125,16 +133,25 @@ function renderDevices() {
   renderReassign();
 }
 
+let callTargets = new Set();
+function renderCallTarget() {
+  $("call-target").disabled = !canStartCall() || !callTargets.has($("target").value);
+}
+$("target").onchange = renderCallTarget;
+$("call-target").onclick = () => startPeerCall($("target").value);
+
 function renderTargets(devices) {
   const target = $("target");
   const choices = devices.filter(d => d.online && d.device_id !== state.view?.id);
+  callTargets = new Set(choices.filter(d => d.caps?.call).map(d => d.device_id));
   const values = choices.map(d => `${d.device_id}:${d.character}`).join("\n");
   if (target.dataset.choices !== values) {
     const prior = target.value;
-    target.replaceChildren(new Option("Ask my cat", ""), ...choices.map(d => new Option(`Intercom: ${d.character}`, d.device_id)));
+    target.replaceChildren(new Option("Ask my cat", ""), ...choices.map(d => new Option(d.character, d.device_id)));
     target.value = choices.some(d => d.device_id === prior) ? prior : "";
     target.dataset.choices = values;
   }
+  renderCallTarget();
 }
 
 const preferredCat = devices => devices.find(d => d.kind !== "virtual" && isLive(d))
@@ -410,4 +427,5 @@ async function saveVolume(body) {
   }
 }
 
-export {applyVolume, copyField, loadVoiceCatalog, refreshDevices, refreshTunnel, renderDevices, renderSidebar, renderTargets, renderVoice, renderVolume};
+export {applyVolume, copyField, loadVoiceCatalog, refreshDevices, refreshTunnel, renderCallTarget, renderDevices,
+  renderSidebar, renderTargets, renderVoice, renderVolume};

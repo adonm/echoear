@@ -1,6 +1,6 @@
-import {audioReady, chime, endMic, handleTTS, micStopping, playPCM, setVolume, startMic, stopSound} from "./audio.js";
+import {audioReady, canCaptureMic, chime, endMic, handleCall, handleTTS, micStopping, playPCM, setVolume, startMic, stopCall} from "./audio.js";
 import {loadHistory, receiveChat, resetTranscript} from "./chat.js";
-import {applyVolume, refreshDevices, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
+import {applyVolume, refreshDevices, renderCallTarget, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
 import {$, colors, isLive, nodes, say, screen, svgNS} from "./dom.js";
 import {loadSaved, loadSavedCats, loadTimers} from "./library.js";
 import {clearPhotos, stagePhotos} from "./photos.js";
@@ -65,19 +65,33 @@ function renderCurrent() {
   renderVolume();
   renderVoice(d, state.view?.voicePending);
   $("phone-controls").hidden = !state.view?.virtual;
-  const micAvailable = window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
-  $("talk").disabled = !active || !micAvailable || micStopping();
+  const micAvailable = canCaptureMic();
+  const busyCall = inCall();
+  $("talk").disabled = !active || !micAvailable || micStopping() || busyCall;
   $("sound").disabled = !active;
   $("mic-help").hidden = !state.view?.virtual || micAvailable;
   say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
     "Mic needs localhost or an HTTPS opentunnel.xyz link");
-  $("text").disabled = !d || state.view.virtual && !active;
+  $("text").disabled = !d || state.view.virtual && (!active || busyCall);
   $("text").placeholder = d?.cat?.configured === false ? "Say hi to design your cat…" : "Say something to your cat…";
   $("send").disabled = $("text").disabled || !!state.view?.sending || !!state.view?.resetting;
   $("share-photo").disabled = !d || !!state.view?.sharingPhoto || state.view?.virtual && !active;
   $("reset").hidden = !!state.app?.scope;
   $("reset").disabled = !d || state.view.virtual && !active || !!state.view?.resetting || !!state.view?.sending;
   $("refresh").disabled = !d || state.view.quick && !active || !!state.view?.loading || !!state.view?.resetting;
+  renderCallTarget();
+}
+
+function inCall() { return state.view?.mode === "call" || state.view?.mode === "calling"; }
+
+function canStartCall() {
+  return state.view?.virtual && state.rev > 0 && state.ws?.readyState === WebSocket.OPEN && !inCall() && canCaptureMic();
+}
+
+function startPeerCall(target) {
+  if (!target || !canStartCall()) return;
+  audioReady();
+  send({ev:"call",target});
 }
 
 function disconnect() {
@@ -86,7 +100,7 @@ function disconnect() {
   state.ws = null;
   old?.close();
   endMic(true, false);
-  stopSound();
+  stopCall();
   clearScene();
   state.watched = null;
 }
@@ -109,7 +123,8 @@ function connect(attempt = 0) {
     if (state.ws !== socket) return;
     loadTimers();
     loadSavedCats();
-    send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web"}
+    send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",
+      caps:{call:true,drag:true}}
       : {ev:"hello",role:"web"});
   };
   socket.onmessage = e => {
@@ -142,7 +157,7 @@ function syncWatch(live) {
   }
 }
 
-const modeLabel = {idle:"Idle", thinking:"Thinking", listening:"Listening", speaking:"Speaking", sleepy:"Sleepy"};
+const modeLabel = {idle:"Idle", thinking:"Thinking", listening:"Listening", speaking:"Speaking", sleepy:"Sleepy", calling:"Ringing", call:"In call"};
 
 function updateCat({device_id, character, cat, voice}) {
   const fields = {character, cat, voice};
@@ -218,6 +233,7 @@ function command(msg) {
         say("link-state", state.app.scope ? "Private live cat" : "LAN dashboard");
         updateStatus(state.view.virtual ? `${state.view.device.character} · Live Virtual Cat` : `Mirroring ${state.view.device.character}`);
         loadHistory({replace:false});
+        if (state.view.virtual) renderDevices();
       }
       renderCurrent();
       break;
@@ -229,6 +245,7 @@ function command(msg) {
       if (state.view.virtual) {
         state.view.mode = msg.mode;
         renderCurrent();
+        renderDevices();
       }
       break;
     case "volume":
@@ -245,6 +262,17 @@ function command(msg) {
       break;
     case "tts":
       if (state.view.virtual) handleTTS(msg);
+      break;
+    case "call":
+      if (state.view.virtual) {
+        if (msg.state === "start") say("chat-note", "Voice call connected.");
+        handleCall(msg);
+        if (msg.state === "end") {
+          const text = {"declined":"Call declined.", "no answer":"No answer.", "disconnected":"Peer disconnected.",
+            "audio unavailable":"Call ended: audio unavailable. Check microphone permissions."};
+          say("chat-note", text[msg.reason] || "Call ended.");
+        }
+      }
       break;
     case "error":
       say("chat-note", "The bridge couldn’t complete the live action.");
@@ -294,4 +322,4 @@ screen.addEventListener("keydown", e => {
   send({ev:"tap",id:control.dataset.id,...xy({clientX:x+width/2,clientY:y+height/2})});
 });
 
-export {disconnect, renderCurrent, select, updateCat};
+export {canStartCall, disconnect, renderCurrent, select, startPeerCall, updateCat};

@@ -6,7 +6,7 @@ const {runInNewContext} = require("node:vm");
 
 const source = readFileSync(join(__dirname, "../web/mic.js"), "utf8");
 
-function worklet(sampleRate) {
+function worklet(sampleRate, mode) {
   const messages = [];
   let Mic;
   runInNewContext(source, {
@@ -16,7 +16,7 @@ function worklet(sampleRate) {
     },
     registerProcessor: (_, processor) => { Mic = processor; },
   });
-  const mic = new Mic();
+  const mic = new Mic({processorOptions:{mode}});
   function frames(count, level, live = true) {
     const frame = new Float32Array(sampleRate / 50).fill(level);
     for (let i = 0; i < count; i++) {
@@ -83,4 +83,21 @@ test("manual flush sends the partial PCM packet before ending", () => {
   ended("end", 2);
   assert.equal(messages[0].byteLength, 641);
   assert.equal(messages[1].byteLength, 85);
+});
+
+test("call mic sends continuous 40 ms PCM without VAD or a duration limit", () => {
+  const {mic, frames, messages} = worklet(44100, "call");
+  frames(10, .125);
+  frames(3000, 0); // Well past the normal silence and duration limits.
+  mic.port.onmessage({data:"flush"}); // Call packets are never partially flushed.
+  frames(1, -.25);
+  assert.equal(messages.length, 1505);
+  frames(1, -.25);
+  assert.equal(messages.length, 1506);
+  for (const packet of messages) {
+    assert.equal(packet.byteLength, 1281);
+    assert.equal(new Uint8Array(packet)[0], 1);
+  }
+  assert.equal(new DataView(messages[0]).getInt16(1, true), 4096);
+  assert.equal(new DataView(messages.at(-1)).getInt16(1279, true), -8192);
 });
