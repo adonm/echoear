@@ -4,6 +4,7 @@ umask 077
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 config=${XDG_CONFIG_HOME:-$HOME/.config}
+data=${XDG_DATA_HOME:-$HOME/.local/share}/echoear
 units=$config/systemd/user
 agents=$config/opencode/agents
 env_file=$config/echoear/bridge.env
@@ -18,10 +19,48 @@ case "$*" in
     *) printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0]' >&2; exit 2 ;;
 esac
 
-for cmd in hex opencode python3 systemctl; do
+for cmd in curl hex opencode python3 sha256sum systemctl; do
     command -v "$cmd" >/dev/null || { echo "Install $cmd before running setup." >&2; exit 1; }
 done
 systemctl --user show-environment >/dev/null
+
+uv=${UV_BIN:-uv}
+if [[ ! ${UV_BIN:-} ]]; then
+    # The mise shim may not be active in a noninteractive shell.
+    for candidate in "$HOME"/.local/share/mise/installs/uv/latest/uv-*/uv; do
+        if [[ -x "$candidate" ]]; then
+            uv=$candidate
+            break
+        fi
+    done
+fi
+command -v "$uv" >/dev/null || { echo 'Install uv or set UV_BIN before running setup.' >&2; exit 1; }
+
+tts_python="$data/tts-venv/bin/python"
+mkdir -p -- "$data/tts-models"
+if [[ ! -x "$tts_python" ]]; then
+    "$uv" venv --python 3.13 "$data/tts-venv"
+fi
+"$uv" pip install --python "$tts_python" 'kokoro-onnx==0.6.1' 'scipy>=1.15,<2'
+
+download_tts_model() {
+    local name=$1 checksum=$2 destination="$data/tts-models/$1" temporary
+    if [[ -f "$destination" ]] && printf '%s  %s\n' "$checksum" "$destination" | sha256sum --check --status; then
+        return
+    fi
+    temporary=$(mktemp "$destination.XXXXXXXX")
+    if curl --fail --silent --show-error --location \
+        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/$name" \
+        --output "$temporary" && printf '%s  %s\n' "$checksum" "$temporary" | sha256sum --check --status; then
+        mv -f -- "$temporary" "$destination"
+    else
+        rm -f -- "$temporary"
+        printf 'Failed to download and verify %s\n' "$name" >&2
+        return 1
+    fi
+}
+download_tts_model kokoro-v1.0.onnx beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a
+download_tts_model voices-v1.0.bin bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
 
 mkdir -p -- "$agents" "$config/echoear" "$units/hex.service.d"
 agent=$agents/echoear.md
@@ -41,15 +80,17 @@ if [[ ! -e "$env_file" ]]; then
 fi
 chmod 600 -- "$env_file"
 
-python3 - "$REPO_DIR" "$units/echoear-bridge.service" <<'PY'
+python3 - "$REPO_DIR" "$tts_python" "$units/echoear-bridge.service" <<'PY'
 import sys
 from pathlib import Path
 
-repo, destination = sys.argv[1:]
-escaped = repo.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+def escape(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+
+repo, python, destination = sys.argv[1:]
 template = Path(repo, "bridge/echoear-bridge.service").read_text()
 unit = Path(destination)
-unit.write_text(template.replace("@REPO_DIR@", escaped))
+unit.write_text(template.replace("@REPO_DIR@", escape(repo)).replace("@TTS_PYTHON@", escape(python)))
 unit.chmod(0o644)
 PY
 

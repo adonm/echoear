@@ -10,14 +10,19 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
+import sys
 import tempfile
 import threading
 import time
 import wave
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
+
+from tts import MAX_TEXT, SAMPLE_RATE, Speech, plain_text
 
 DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
@@ -26,7 +31,7 @@ DEVICE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 SESSION_ID = re.compile(r"ses[A-Za-z0-9_-]{1,128}")
 MAX_AUDIO = 2 * 1024 * 1024
 MAX_JSON = 16 * 1024
-MAX_SCREEN_BYTES = 4000
+MAX_SCREEN_BYTES = 6000
 COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 SCREEN_FENCE = re.compile(
     r"^[ \t]*```echoear-screen[ \t]*(?:\r?\n|\Z)(.*?)(^[ \t]*```[ \t]*\r?$|\Z)",
@@ -38,6 +43,7 @@ SHAPE_FIELDS = {
     "line": (("x1", "y1", "x2", "y2"), ("w",)),
     "arc": (("x", "y", "r", "a1", "a2"), ("w",)),
     "text": (("x", "y"), ()),
+    "btn": (("x", "y", "w", "h"), ("r",)),
 }
 
 
@@ -187,13 +193,16 @@ def screen_shape(value):
             result[key] = number
         elif key in required:
             return None
-    if kind == "text":
+    if kind in ("text", "btn"):
         label = screen_text(value.get("s"), 32)
         if not label:
             return None
         result["s"] = label
     if kind in ("circle", "rect") and type(value.get("fill")) is bool:
         result["fill"] = value["fill"]
+    for key in ("tap", "ask"):
+        if action := screen_text(plain_text(value.get(key)), 120):
+            result[key] = action
     return result
 
 
@@ -323,7 +332,25 @@ class Bridge(ThreadingHTTPServer):
         self.token = token.encode()
         self.firmware = ota_dir / "echoear.bin"
         self.sessions = sessions
+        self.speech = None
+        self.audio = OrderedDict()
+        self.audio_lock = threading.Lock()
         super().__init__(address, Handler)
+
+    def cache_pcm(self, pcm):
+        audio_id = secrets.token_urlsafe(18)
+        with self.audio_lock:
+            self.audio[audio_id] = pcm
+            if len(self.audio) > 16:
+                self.audio.popitem(last=False)
+        return f"/api/audio/{audio_id}"
+
+    def cached_pcm(self, audio_id):
+        with self.audio_lock:
+            pcm = self.audio.get(audio_id)
+            if pcm is not None:
+                self.audio.move_to_end(audio_id)
+            return pcm
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -334,9 +361,11 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def send_json(self, status, result):
-        body = json_bytes(result)
+        self.send_bytes(status, json_bytes(result), "application/json")
+
+    def send_bytes(self, status, body, content_type):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -393,7 +422,8 @@ class Handler(BaseHTTPRequestHandler):
         transcript = transcribe(audio)
         result = {"transcript": transcript, "hex_ms": elapsed_ms(start)}
         if not transcript:
-            return dict(result, reply="", screen=None, session_id=self.server.sessions.get(device), opencode_ms=0)
+            return dict(result, reply="", screen=None, session_id=self.server.sessions.get(device),
+                        opencode_ms=0, **self.audio_fields(""))
         return dict(result, **self.text(device, transcript))
 
     def text(self, device, text):
@@ -405,7 +435,33 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, TypeError, ValueError):
             raise Error(502, "OpenCode returned an invalid response") from None
         reply, screen = split_screen(reply)
-        return {"reply": reply, "screen": screen, "session_id": sid, "opencode_ms": elapsed_ms(start)}
+        return dict(reply=reply, screen=screen, session_id=sid, opencode_ms=elapsed_ms(start),
+                    **self.audio_fields(reply))
+
+    def speech_pcm(self, text):
+        clean = plain_text(text)
+        if len(clean) > MAX_TEXT or not any(c.isalnum() for c in clean):
+            raise Error(400, f"Expected spoken text of 1–{MAX_TEXT} characters")
+        if self.server.speech is None:
+            raise Error(503, "TTS unavailable")
+        try:
+            return self.server.speech.synthesize(clean)
+        except Exception as error:
+            print(f"EchoEar TTS synthesis failed: {type(error).__name__}", file=sys.stderr, flush=True)
+            raise Error(502, "TTS synthesis failed") from None
+
+    def audio_fields(self, reply):
+        result = dict(audio_url=None, audio_bytes=0, sample_rate=SAMPLE_RATE, tts_ms=0)
+        if reply:
+            start = time.monotonic_ns()
+            try:
+                pcm = self.speech_pcm(reply)
+                result.update(audio_url=self.server.cache_pcm(pcm), audio_bytes=len(pcm))
+            except Error as error:
+                if error.status != 502:  # Inference failures are already logged.
+                    print(f"EchoEar could not attach TTS audio: {error}", file=sys.stderr, flush=True)
+            result["tts_ms"] = elapsed_ms(start)
+        return result
 
     def ota(self, manifest):
         try:
@@ -444,14 +500,24 @@ class Handler(BaseHTTPRequestHandler):
                     raise Error(401, "Unauthorized")
             if self.command == "GET":
                 if path == "/health":
+                    speech = self.server.speech
                     return self.send_json(200, dict(
-                        ok=True, hex=reachable("Hex", "/health"), opencode=reachable("OpenCode", "/api/info")
+                        ok=True, hex=reachable("Hex", "/health"), opencode=reachable("OpenCode", "/api/info"),
+                        tts=speech is not None, tts_engine=speech.engine if speech else "unavailable",
                     ))
                 if path in ("/ota/version.json", "/ota/latest.bin"):
                     return self.ota(path.endswith(".json"))
+                if path.startswith("/api/audio/"):
+                    pcm = self.server.cached_pcm(path.removeprefix("/api/audio/"))
+                    if pcm is None:
+                        raise Error(404, "Audio not found")
+                    return self.send_bytes(200, pcm, "audio/pcm")
             if self.command == "POST":
                 if path == "/api/voice":
                     return self.send_json(200, self.voice())
+                if path == "/api/tts":
+                    pcm = self.speech_pcm(self.json_body().get("text"))
+                    return self.send_bytes(200, pcm, "audio/pcm")
                 if path in ("/api/text", "/api/reset"):
                     body = self.json_body()
                     device = self.device(body.get("device_id", self.headers.get("X-Device-Id", "echoear")))
@@ -485,6 +551,14 @@ def main():
     address = (os.environ.get("ECHOEAR_BRIDGE_HOST", "0.0.0.0"), int(os.environ.get("ECHOEAR_BRIDGE_PORT", "8765")))
     ota_dir = Path(os.environ.get("ECHOEAR_OTA_DIR", PROJECT.parent / "firmware/build"))
     with Bridge(address, token, ota_dir, Sessions(DATA / "echoear/sessions.json", agent, model)) as bridge:
+        try:
+            start = time.monotonic_ns()
+            speech = Speech(DATA / "echoear/tts-models")
+            speech.synthesize("Hello! Let's find something fun to learn.")
+            bridge.speech = speech
+            print(f"EchoEar TTS ready: {speech.engine}/{speech.voice} ({elapsed_ms(start)} ms startup)", flush=True)
+        except Exception as error:
+            print(f"EchoEar TTS unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
         print(f"EchoEar bridge listening on {bridge.server_address[0]}:{bridge.server_address[1]}", flush=True)
         bridge.serve_forever()
 

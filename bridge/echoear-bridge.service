@@ -5,7 +5,7 @@ After=network-online.target hex.service
 
 [Service]
 EnvironmentFile=%E/echoear/bridge.env
-ExecStart=/usr/bin/python3 "@REPO_DIR@/bridge/server.py"
+ExecStart=/bin/sh -c 'python=$$1; test -x "$$python" || python=/usr/bin/python3; exec "$$python" "$$2"' -- "@TTS_PYTHON@" "@REPO_DIR@/bridge/server.py"
 Restart=on-failure
 UMask=0077
 NoNewPrivileges=true
