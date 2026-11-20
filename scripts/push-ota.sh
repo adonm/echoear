@@ -21,10 +21,27 @@ fi
 
 env_file="${XDG_CONFIG_HOME:-$HOME/.config}/echoear/bridge.env"
 if [[ -z ${ECHOEAR_BRIDGE_TOKEN:-} && -r "$env_file" ]]; then
-    # shellcheck source=/dev/null
-    source "$env_file"
+    ECHOEAR_BRIDGE_TOKEN=$(python3 - "$env_file" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+value = ""
+for line in Path(sys.argv[1]).read_text().splitlines():
+    name, sep, raw = line.partition("=")
+    if sep and name.strip() == "ECHOEAR_BRIDGE_TOKEN":
+        value = raw
+try:
+    parts = shlex.split(value)
+except ValueError:
+    raise SystemExit("Invalid bridge token assignment") from None
+if len(parts) > 1:
+    raise SystemExit("Invalid bridge token assignment")
+print(parts[0] if parts else "")
+PY
+    )
 fi
-if [[ -z ${ECHOEAR_BRIDGE_TOKEN:-} ]]; then
+if [[ ! ${ECHOEAR_BRIDGE_TOKEN:-} =~ ^[[:graph:]]+$ ]]; then
     echo "Set ECHOEAR_BRIDGE_TOKEN or add it to $env_file." >&2
     exit 1
 fi
@@ -34,8 +51,11 @@ fi
 image="$scripts/../firmware/build/echoear.bin"
 [[ -s "$image" ]] || { echo "Firmware image not found: $image" >&2; exit 1; }
 base="http://$host"
+running_partition() {
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["running_partition"])'
+}
 before=$(curl --noproxy '*' -fsS --max-time 5 "$base/status")
-slot=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["running_partition"])' <<<"$before")
+slot=$(running_partition <<<"$before")
 
 # Pass the header via stdin so the token is not an argument in the process list.
 printf 'X-EchoEar-Token: %s\n' "$ECHOEAR_BRIDGE_TOKEN" |
@@ -44,7 +64,7 @@ printf 'X-EchoEar-Token: %s\n' "$ECHOEAR_BRIDGE_TOKEN" |
 
 for (( attempt=0; attempt<45; attempt++ )); do
     if status=$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "$base/status" 2>/dev/null) &&
-        current=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["running_partition"])' <<<"$status") &&
+        current=$(running_partition <<<"$status") &&
         [[ "$current" != "$slot" && "$current" =~ ^ota_[01]$ ]]; then
         printf '%s\n' "$status"
         exit 0

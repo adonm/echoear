@@ -80,36 +80,39 @@ if [[ ! -e "$env_file" ]]; then
 fi
 chmod 600 -- "$env_file"
 
-python3 - "$REPO_DIR" "$tts_python" "$units/echoear-bridge.service" <<'PY'
+hex_path=
+if [[ -z $(systemctl --user show hex.service --property=FragmentPath --value) ]]; then
+    hex_path=$(type -P hex)
+fi
+python3 - "$REPO_DIR" "$tts_python" "$units" "$hex_path" <<'PY'
 import sys
 from pathlib import Path
 
 def escape(value):
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    return value.translate(str.maketrans({
+        "\\": "\\\\", '"': '\\"', "%": "%%", "$": "$$", "\n": "\\n", "\r": "\\r", "\t": "\\t",
+    }))
 
-repo, python, destination = sys.argv[1:]
+repo, python, directory, hex_path = sys.argv[1:]
+units = Path(directory)
 template = Path(repo, "bridge/echoear-bridge.service").read_text()
-unit = Path(destination)
-unit.write_text(template.replace("@REPO_DIR@", escape(repo)).replace("@TTS_PYTHON@", escape(python)))
-unit.chmod(0o644)
-PY
+bridge = units / "echoear-bridge.service"
+bridge.write_text(template.replace("@REPO_DIR@", escape(repo)).replace("@TTS_PYTHON@", escape(python)))
+bridge.chmod(0o644)
 
-# Reuse the installed Hex unit, or provision a minimal one for binary-only installs.
-if [[ -z $(systemctl --user show hex.service --property=FragmentPath --value) ]]; then
-    hex_path=$(type -P hex)
-    cat > "$units/hex.service" <<EOF
-[Unit]
+if hex_path:
+    (units / "hex.service").write_text(f"""[Unit]
 Description=Anomaly Hex
 
 [Service]
 Type=notify
-ExecStart=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1].replace("%", "%%").replace("$", "$$"), ensure_ascii=False))' "$hex_path") service
+ExecStart="{escape(hex_path)}" service
 Restart=on-failure
 
 [Install]
 WantedBy=default.target
-EOF
-fi
+""")
+PY
 hex_changed=false
 if "$pin_gpu"; then
     source="$REPO_DIR/config/systemd/10-vulkan-rx6600.conf"
@@ -140,6 +143,4 @@ if [[ "$(hex settings get transcription.model)" != "$model" ]]; then
 fi
 opencode api get /api/info >/dev/null
 systemctl --user restart echoear-bridge.service
-printf '%s\n' 'Copy firmware/sdkconfig.local.example to firmware/sdkconfig.local.' \
-    'Set Wi-Fi credentials and the LAN bridge URL in firmware/sdkconfig.local.'
-printf 'Copy ECHOEAR_BRIDGE_TOKEN from %s to firmware/sdkconfig.local. Keep it private.\n' "$env_file"
+printf 'Configure firmware/sdkconfig.local as shown in README.md. The bridge token is in %s.\n' "$env_file"

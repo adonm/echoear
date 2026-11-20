@@ -1,8 +1,3 @@
-/firmware/sdkconfig
-/firmware/sdkconfig.old
-/firmware/sdkconfig.local
-/firmware/build/
-/firmware/managed_components/
 /bridge.env
 
 __pycache__/

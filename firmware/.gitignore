@@ -3,9 +3,3 @@
 /sdkconfig
 /sdkconfig.old
 /sdkconfig.local
-
-__pycache__/
-*.pyc
-.venv/
-.pytest_cache/
-*.log
