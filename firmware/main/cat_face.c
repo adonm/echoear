@@ -6,15 +6,20 @@ typedef struct {
     const char *name;
     uint32_t face;
     uint32_t marking;
-    uint32_t pink;
     uint32_t accent;
 } palette_t;
 
 static const palette_t palettes[] = {
-    [MINT] = { "Mint", 0x7be3c6, 0x2cb5a0, 0xff7a90, 0xffd166 },
-    [PLUM] = { "Plum", 0xd8c7ff, 0x9f7aea, 0xff9eb5, 0xdcb5ff },
-    [SUNNY] = { "Sunny", 0xfcd34d, 0xea580c, 0xfb7185, 0xffbb6e },
-    [CAKE] = { "Cake", 0xfff3d1, 0xf59e0b, 0xff85a1, 0xfacc15 },
+    [MINT] = { "Mint", 0x7be3c6, 0x228e81, 0xffd166 },
+    [PLUM] = { "Plum", 0xd8c7ff, 0x9f7aea, 0xdcb5ff },
+    [SUNNY] = { "Sunny", 0xfcd34d, 0xea580c, 0xffbb6e },
+    [CAKE] = { "Cake", 0xfff3d1, 0xf59e0b, 0xfacc15 },
+};
+
+enum {
+    LEFT_EYE_X = 112, RIGHT_EYE_X = 248, EYE_Y = 142,
+    MAX_EYE_W = 40, MAX_EYE_H = 44, GAZE_SHIFT = 4,
+    MOUTH_X = 140, MOUTH_Y = 189, MOUTH_W = 80, MOUTH_H = 40,
 };
 
 typedef struct {
@@ -31,7 +36,6 @@ static uint32_t face_start;
 static int gaze;
 static bool blink;
 static bool talking;
-static unsigned bounce;
 static bool sleeping;
 static int battery_pct = -1;
 static bool charging;
@@ -65,43 +69,20 @@ static void bean(brush_t b, int x, int y, int w, int h, uint32_t color, unsigned
     block(b, x, y, w, h, LV_RADIUS_CIRCLE, color, border);
 }
 
-static void ring(brush_t b, int inset, unsigned width, uint32_t color)
+static void ring(brush_t b)
 {
+    const int inset = 7;
+    const uint32_t color = mood == UI_RECORDING ? 0xff5964 : mood == UI_BUSY ? 0xf59e0b :
+                           mood == UI_SPEAKING ? 0x0284c7 : CAT_INK;
     lv_draw_rect_dsc_t shape;
     lv_draw_rect_dsc_init(&shape);
     shape.radius = LV_RADIUS_CIRCLE;
     shape.bg_opa = LV_OPA_TRANSP;
     shape.border_color = lv_color_hex(color);
-    shape.border_width = width;
-    shape.border_opa = LV_OPA_COVER;
+    shape.border_width = mood == UI_IDLE ? 3 : 5;
+    shape.border_opa = mood == UI_IDLE ? LV_OPA_50 : LV_OPA_80;
     const lv_area_t area = { b.x + inset, b.y + inset, b.x + 359 - inset, b.y + 359 - inset };
     lv_draw_rect(b.layer, &shape, &area);
-}
-
-static void triangle(brush_t b, lv_point_t a, lv_point_t c, lv_point_t d, uint32_t color)
-{
-    lv_draw_triangle_dsc_t tri;
-    lv_draw_triangle_dsc_init(&tri);
-    tri.p[0] = (lv_point_precise_t){ b.x + a.x, b.y + a.y };
-    tri.p[1] = (lv_point_precise_t){ b.x + c.x, b.y + c.y };
-    tri.p[2] = (lv_point_precise_t){ b.x + d.x, b.y + d.y };
-    tri.color = lv_color_hex(color);
-    lv_draw_triangle(b.layer, &tri);
-}
-
-static void diamond(brush_t b, int x, int y, int w, int h, uint32_t color)
-{
-    const lv_point_t left = { x - w, y }, right = { x + w, y };
-    triangle(b, left, (lv_point_t){ x, y - h }, right, color);
-    triangle(b, left, right, (lv_point_t){ x, y + h }, color);
-}
-
-static void sparkle(brush_t b, int x, int y, int radius, uint32_t color)
-{
-    diamond(b, x, y, 4, radius + 2, CAT_INK);
-    diamond(b, x, y, radius + 2, 4, CAT_INK);
-    diamond(b, x, y, 3, radius, color);
-    diamond(b, x, y, radius, 3, color);
 }
 
 static void stroke(brush_t b, int x1, int y1, int x2, int y2, unsigned width)
@@ -134,72 +115,40 @@ static void markings(brush_t b, const palette_t *p)
 {
     switch (character) {
     case CAKE:
-        bean(b, 141, 28, 17, 30, p->marking, 3);
-        bean(b, 170, 25, 20, 41, p->marking, 3);
-        bean(b, 202, 28, 17, 30, p->marking, 3);
-        block(b, 210, 103, 71, 68, 24, p->marking, 3);
+        bean(b, 147, 66, 14, 24, p->marking, 0);
+        bean(b, 173, 61, 14, 33, p->marking, 0);
+        bean(b, 199, 66, 14, 24, p->marking, 0);
         break;
     case MINT:
-        diamond(b, 180, 52, 20, 21, CAT_INK);
-        diamond(b, 180, 52, 15, 16, p->marking);
-        block(b, 176, 48, 8, 8, 0, p->accent, 0);
-        block(b, 153, 216, 21, 15, 0, p->pink, 3);
-        block(b, 186, 216, 21, 15, 0, p->pink, 3);
-        block(b, 172, 219, 16, 10, 0, p->pink, 3);
+        bean(b, 156, 72, 48, 12, p->marking, 0);
         break;
     case PLUM:
-        bean(b, 156, 33, 42, 42, CAT_INK, 0);
-        bean(b, 159, 36, 36, 36, p->marking, 0);
-        bean(b, 172, 29, 34, 34, p->face, 0);
-        sparkle(b, 123, 182, 6, p->accent);
-        sparkle(b, 237, 182, 6, p->accent);
+        bean(b, 162, 61, 36, 36, p->marking, 0);
+        bean(b, 175, 55, 32, 32, p->face, 0);
         break;
     case SUNNY:
-        diamond(b, 180, 52, 25, 24, CAT_INK);
-        diamond(b, 180, 52, 20, 19, p->marking);
-        bean(b, 168, 40, 24, 24, p->accent, 3);
-        for (int i = 0; i < 3; ++i) {
-            bean(b, 108 + i * 9, 202 - i * 3, 4, 4, CAT_INK, 0);
-            bean(b, 248 - i * 9, 202 - i * 3, 4, 4, CAT_INK, 0);
-        }
+        bean(b, 164, 62, 32, 32, p->marking, 0);
         break;
     }
 }
 
 static void eyes(brush_t b)
 {
-    if (sleeping) {
-        curve(b, 116, 137, 19, 0, 180, CAT_INK, 5);
-        curve(b, 244, 137, 19, 0, 180, CAT_INK, 5);
-        return;
-    }
-    if (mood == UI_BUSY) {
-        bean(b, 93, 112, 46, 46, 0xfffdf4, 4);
-        bean(b, 112 + (bounce ? 4 : 0), 124, 10, 10, CAT_INK, 0);
-        stroke(b, 230, 138, 245, 132, 6);
-        stroke(b, 245, 132, 257, 136, 6);
-        return;
-    }
     for (int i = 0; i < 2; ++i) {
-        int x = i ? 244 : 116;
-        if (mood == UI_SPEAKING) {
-            curve(b, x, 143, 19, 205, 335, CAT_INK, 5);
-        } else if (blink) {
-            bean(b, x - 14, 136, 28, 6, CAT_INK, 0);
+        int x = i ? RIGHT_EYE_X : LEFT_EYE_X;
+        if (sleeping) {
+            curve(b, x, EYE_Y - 4, 21, 0, 180, CAT_INK, 7);
+        } else if (mood == UI_SPEAKING) {
+            curve(b, x, EYE_Y + 5, 22, 205, 335, CAT_INK, 7);
+        } else if (mood == UI_BUSY ? i != 0 : blink) {
+            bean(b, x - 17, EYE_Y - 4, 34, 8, CAT_INK, 0);
         } else {
-            int width = mood == UI_RECORDING ? 32 : 26;
-            int height = mood == UI_RECORDING ? 35 : 30;
-            bean(b, x + gaze - width / 2, 138 - height / 2, width, height, CAT_INK, 0);
-            bean(b, x + gaze - 6, 129, 5, 5, 0xfffdf4, 0);
+            int width = mood == UI_RECORDING ? MAX_EYE_W : 34;
+            int height = mood == UI_RECORDING ? MAX_EYE_H : 38;
+            int shift = mood == UI_BUSY ? 0 : gaze;
+            bean(b, x + shift - width / 2, EYE_Y - height / 2, width, height, CAT_INK, 0);
         }
     }
-}
-
-static void sleep_z(brush_t b, int x, int y, int size)
-{
-    stroke(b, x, y, x + size, y, 3);
-    stroke(b, x + size, y, x, y + size, 3);
-    stroke(b, x, y + size, x + size, y + size, 3);
 }
 
 static void battery(brush_t b)
@@ -221,25 +170,19 @@ static void battery(brush_t b)
     }
 }
 
-static void mouth(brush_t b, uint32_t pink)
+static void mouth(brush_t b)
 {
     if (mood == UI_RECORDING) {
-        bean(b, 167, 176, 26, 32, 0x7f1d3a, 4);
-        bean(b, 175, 194, 10, 7, pink, 0);
+        bean(b, 163, 191, 34, 34, CAT_INK, 0);
     } else if (mood == UI_BUSY) {
-        stroke(b, 163, 182, 172, 178, 5);
-        stroke(b, 172, 178, 184, 185, 5);
-        stroke(b, 184, 185, 196, 179, 5);
+        stroke(b, 166, 204, 194, 200, 6);
     } else if (mood == UI_SPEAKING && talking) {
-        // A flat top over the rounded lower bowl gives the open smile its D shape.
-        bean(b, 155, 174, 50, 33, CAT_INK, 0);
-        block(b, 155, 174, 50, 15, 4, CAT_INK, 0);
-        bean(b, 159, 178, 42, 25, 0x7a1c3c, 0);
-        block(b, 159, 178, 42, 10, 1, 0x7a1c3c, 0);
-        bean(b, 170, 194, 20, 8, pink, 0);
+        bean(b, MOUTH_X, MOUTH_Y, MOUTH_W, MOUTH_H, CAT_INK, 0);
+        block(b, MOUTH_X, MOUTH_Y, MOUTH_W, MOUTH_H / 2, 5, CAT_INK, 0);
+        bean(b, 164, 214, 32, 9, 0xf47e92, 0);
     } else {
-        curve(b, 167, 174, 13, 0, 165, CAT_INK, 5);
-        curve(b, 193, 174, 13, 15, 180, CAT_INK, 5);
+        curve(b, 163, 193, 21, 0, 165, CAT_INK, 7);
+        curve(b, 197, 193, 21, 15, 180, CAT_INK, 7);
     }
 }
 
@@ -248,37 +191,16 @@ static void draw_face(lv_event_t *event)
     lv_area_t area;
     lv_obj_get_coords(face, &area);
     const brush_t b = { lv_event_get_layer(event), area.x1, area.y1 };
-    const palette_t *p = &palettes[character];
-    ring(b, 6, 5, CAT_INK);
-    if (mood != UI_IDLE) {
-        uint32_t accent = mood == UI_RECORDING ? 0xff5964 : mood == UI_BUSY ? 0xfacc15 : 0x38d6f4;
-        ring(b, 13, 7, accent);
-    }
-    triangle(b, (lv_point_t){72, 56}, (lv_point_t){85, 108}, (lv_point_t){130, 77}, CAT_INK);
-    triangle(b, (lv_point_t){79, 64}, (lv_point_t){88, 100}, (lv_point_t){120, 78}, p->pink);
-    triangle(b, (lv_point_t){288, 56}, (lv_point_t){275, 108}, (lv_point_t){230, 77}, CAT_INK);
-    triangle(b, (lv_point_t){281, 64}, (lv_point_t){272, 100}, (lv_point_t){240, 78}, p->pink);
-    bean(b, 84, 169, 31, 31, p->pink, 0);
-    bean(b, 245, 169, 31, 31, p->pink, 0);
-    stroke(b, 49, 176, 84, 184, 4);
-    stroke(b, 50, 202, 85, 193, 4);
-    stroke(b, 276, 184, 311, 176, 4);
-    stroke(b, 275, 193, 310, 202, 4);
-    markings(b, p);
+    ring(b);
+    markings(b, &palettes[character]);
     eyes(b);
-    bean(b, 172, 156, 16, 11, p->pink, 3);
-    mouth(b, p->pink);
+    stroke(b, 38, 177, 87, 188, 6);
+    stroke(b, 41, 212, 87, 199, 6);
+    stroke(b, 273, 188, 322, 177, 6);
+    stroke(b, 273, 199, 319, 212, 6);
+    bean(b, 165, 163, 30, 17, CAT_INK, 0);
+    mouth(b);
     battery(b);
-    if (sleeping) {
-        sleep_z(b, 207, 91 - bounce, 8);
-        sleep_z(b, 223, 77 + bounce, 13);
-    } else if (mood == UI_BUSY) {
-        bean(b, 218, 98 - bounce, 10, 10, 0xfffdf4, 3);
-        bean(b, 227, 82 + bounce, 14, 14, 0xfffdf4, 3);
-    } else if (mood == UI_RECORDING) {
-        sparkle(b, 74, 132, 10, 0xffd166);
-        sparkle(b, 285, 127, 11, 0xffd166);
-    }
 }
 
 static void redraw(int x1, int y1, int x2, int y2)
@@ -291,40 +213,25 @@ static void redraw(int x1, int y1, int x2, int y2)
 
 static void animate(lv_timer_t *timer)
 {
-    if (lv_obj_is_hidden(face)) {
+    if (sleeping || lv_obj_is_hidden(face)) {
         return;
     }
     uint32_t now = lv_tick_get();
-    uint32_t age = now - face_start;
-    uint32_t elapsed = now - phase_start;
-    bool next_blink = age % 3500 >= 3350;
-    int next_gaze = age % 4800 < 4200 ? 0 : age / 4800 % 2 ? -4 : 4;
-    if (sleeping) {
-        unsigned step = elapsed / 200 % 8;
-        unsigned lift = step <= 4 ? step : 8 - step;
-        if (bounce != lift) {
-            bounce = lift;
-            redraw(204, 73, 239, 102);
-        }
-    } else if (mood == UI_IDLE || mood == UI_RECORDING) {
+    if (mood == UI_IDLE || mood == UI_RECORDING) {
+        uint32_t age = now - face_start;
+        bool next_blink = age % 3500 >= 3350;
+        int next_gaze = age % 4800 < 4200 ? 0 : age / 4800 % 2 ? -GAZE_SHIFT : GAZE_SHIFT;
         if (blink != next_blink || gaze != next_gaze) {
             blink = next_blink;
             gaze = next_gaze;
-            redraw(94, 118, 267, 157);
+            redraw(LEFT_EYE_X - MAX_EYE_W / 2 - GAZE_SHIFT, EYE_Y - MAX_EYE_H / 2,
+                   RIGHT_EYE_X + MAX_EYE_W / 2 + GAZE_SHIFT - 1, EYE_Y + MAX_EYE_H / 2 - 1);
         }
     } else if (mood == UI_SPEAKING) {
-        bool open = elapsed % 300 < 150;
+        bool open = (now - phase_start) % 300 < 150;
         if (talking != open) {
             talking = open;
-            redraw(153, 171, 207, 210);
-        }
-    } else {
-        unsigned step = elapsed / 100 % 6;
-        unsigned lift = step < 3 ? step * 2 : (6 - step) * 2;
-        if (bounce != lift) {
-            bounce = lift;
-            redraw(216, 80, 247, 109);
-            redraw(109, 122, 130, 137);
+            redraw(MOUTH_X, MOUTH_Y, MOUTH_X + MOUTH_W - 1, MOUTH_Y + MOUTH_H - 1);
         }
     }
 }
@@ -346,7 +253,6 @@ void cat_face_set_phase(ui_phase_t phase)
         mood = phase;
         phase_start = lv_tick_get();
         talking = phase == UI_SPEAKING;
-        bounce = 0;
         lv_obj_invalidate(face);
     }
     animate(NULL);
@@ -355,8 +261,6 @@ void cat_face_set_phase(ui_phase_t phase)
 void cat_face_set_sleeping(bool asleep)
 {
     sleeping = asleep;
-    phase_start = lv_tick_get();
-    bounce = 0;
     lv_obj_invalidate(face);
 }
 
