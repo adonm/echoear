@@ -1303,7 +1303,7 @@ async function startMic(target) {
     rec.node = new AudioWorkletNode(audio,"echo-mic",{channelCount:1,channelCountMode:"explicit"});
     rec.node.port.onmessage = event => {
       if (mic !== rec) return;
-      if (event.data === "end") {
+      if (event.data === "end" || event.data === "auto_end") {
         endMic(false, true, true);
       } else if (ws?.readyState === WebSocket.OPEN) {
         if (ws.bufferedAmount > 256*1024) {

@@ -497,6 +497,81 @@ func TestHexTranscriptionSilencePadding(t *testing.T) {
 	}
 }
 
+func TestWSRecordingLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pcm     []byte
+		timeout bool
+	}{
+		{"timeout with PCM", make([]byte, 640), true},
+		{"timeout without PCM", nil, true},
+		{"exact PCM cap", bytes.Repeat([]byte{12, 0}, maxPCM/2), false},
+		{"cross PCM cap", append(bytes.Repeat([]byte{12, 0}, (maxPCM-2)/2), 15, 0, 16, 0), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const id = "phone-a123"
+			pcm := tc.pcm[:min(len(tc.pcm), maxPCM)]
+			if bytes.Count(pcm, []byte{0}) != len(pcm) {
+				pad := make([]byte, len(hexSilence))
+				pcm = slices.Concat(pad, pcm, pad)
+			}
+			hexCalled := make(chan struct{}, 1)
+			b, base := wsHarness(t, func(b *bridge, dir string) {
+				b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
+					got, err := io.ReadAll(r.Body)
+					if err != nil || !bytes.Equal(got, WrapWAV(pcm)) {
+						t.Errorf("Hex received %d WAV bytes, want %d with the captured PCM intact: %v", len(got), len(pcm)+44, err)
+					}
+					select {
+					case hexCalled <- struct{}{}:
+					default:
+						t.Error("Hex transcribed the recording more than once")
+					}
+					_, _ = io.WriteString(w, `{"transcript":" "}`)
+				})
+			})
+			dev := testConnectWS(t, base, "unit", false)
+			dev.hello(t, id, "Cake")
+			dev.json(t, object{"ev": "rec_start"})
+			dev.until(t, hasWS("mode", `"mode":"listening"`))
+			for chunk := range slices.Chunk(tc.pcm, pcmPacket) {
+				dev.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, chunk...)))
+			}
+			if tc.timeout {
+				// Wait for the server to consume the PCM before aging the recording.
+				dev.json(t, object{"ev": "status", "volume": 42})
+				dev.until(t, hasWS("volume", `"level":42`))
+				b.ws.mu.Lock()
+				b.ws.devices[id].recAt = time.Now().Add(-66 * time.Second)
+				b.ws.mu.Unlock()
+			}
+			dev.until(t, hasWS("rec", `"action":"stop","op":"rec","target":""`))
+			cancelled := false
+			dev.until(t, func(f wsFrame) bool {
+				cancelled = cancelled || hasWS("chime", `"kind":"cancel"`)(f)
+				return hasWS("mode", `"mode":"idle"`)(f)
+			})
+			select {
+			case <-hexCalled:
+				if len(tc.pcm) == 0 || cancelled {
+					t.Fatal("unexpected transcription or cancellation")
+				}
+			default:
+				if len(tc.pcm) != 0 || !cancelled {
+					t.Fatal("captured PCM was not transcribed or an empty recording was not cancelled")
+				}
+			}
+			b.ws.mu.Lock()
+			d := b.ws.devices[id]
+			cleared := d.recAt.IsZero() && !d.recOpen && len(d.mic) == 0 && !d.busy && d.view == nil
+			b.ws.mu.Unlock()
+			if !cleared {
+				t.Fatal("an empty Hex transcript must leave the device idle with no error card")
+			}
+		})
+	}
+}
+
 func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	allowHex := make(chan struct{})
 	_, base := wsHarness(t, func(b *bridge, dir string) {

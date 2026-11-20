@@ -698,10 +698,7 @@ func (h *wsHub) animate(ctx context.Context) {
 			for _, d := range h.devices {
 				switch {
 				case !d.recAt.IsZero() && now.Sub(d.recAt) > 65*time.Second:
-					h.clearRecording(d)
-					h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
-					h.push(d, object{"op": "chime", "kind": "cancel"}, false)
-					h.render(d, now, false)
+					h.stopRecordingAtLimit(d, now)
 				case d.awaitAck && now.After(d.audioUntil.Add(4*time.Second)):
 					h.playbackDone(d, now)
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:

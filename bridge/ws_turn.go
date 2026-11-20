@@ -50,14 +50,17 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 	if d == nil || !h.active(d) || !d.recOpen {
 		return
 	}
-	if len(data)-1 > maxPCM-len(d.mic) {
-		h.clearRecording(d)
-		h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
-		h.push(d, object{"op": "chime", "kind": "cancel"}, false)
-		h.render(d, time.Now(), false)
-		return
+	room := (maxPCM - len(d.mic)) &^ 1
+	n := min(len(data)-1, room)
+	d.mic = append(d.mic, data[1:1+n]...)
+	if n == room {
+		h.stopRecordingAtLimit(d, time.Now())
 	}
-	d.mic = append(d.mic, data[1:]...)
+}
+
+func (h *wsHub) stopRecordingAtLimit(d *wsDevice, now time.Time) {
+	h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
+	h.endRecording(d, wsEvent{Cancelled: len(d.mic) == 0}, now)
 }
 
 func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {

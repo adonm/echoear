@@ -20,6 +20,8 @@ source scripts/go-bin.sh
 GO_BIN=$(resolve_go)
 python3 -m py_compile bridge/tts_worker.py
 node --check bridge/web/client.js
+node --check bridge/web/mic.js
+node --test bridge/tests/mic_test.cjs
 (
     cd bridge
     "$GO_BIN" mod verify
