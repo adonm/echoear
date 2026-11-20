@@ -155,6 +155,9 @@ OpenCode runs the installed `echoear-bridge mcp` stdio proxy, which forwards
 requests to the bridge's authenticated `POST /mcp` on loopback. The proxy
 reads the token from its environment or the private `bridge.env`; the
 OpenCode config contains only the executable and its argument, no secrets.
+On startup after MCP tool schemas or server instructions change, the bridge
+reconnects EchoEar MCP and compacts active OpenCode sessions without changing
+the canonical chat history.
 Code Mode exposes exactly four MCP tools under `tools.echoear`:
 
 | Tool | Purpose |
@@ -230,6 +233,7 @@ OpenCode streams its reply over SSE.
 | `GET /api/audio/<id>` | Reply PCM from `audio_url`; streams by sentence while synthesis runs |
 | `POST /api/tts` | `{"text":"Hello!"}`, optional `device_id` → complete PCM clip using that device's voice |
 | `POST /api/reset` | `{"device_id":"my-echoear"}` → save the designed cat, restore the blank starter, and start a fresh session |
+| `POST /api/opencode/compact` | LAN-only; optional `device_id` selects one session (default: all), optional `reconnect_mcp: true` refreshes MCP first → `ok`, `compacted`, and `skipped` device IDs |
 | `GET /api/memory?scope=…`, `GET /api/memory/scopes`, `DELETE /api/memory?scope=…&key=…` | LAN-only saved JSON and populated scopes |
 | `GET /api/assets`, `DELETE /api/assets/{name}` | LAN-only reusable visual assets |
 | `GET /api/apps`, `DELETE /api/apps/{name}` | LAN-only saved apps and drawings |

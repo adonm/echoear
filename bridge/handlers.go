@@ -740,6 +740,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		if path == "/api/opencode/pair" {
 			return b.pairOpenCode(r)
 		}
+		if path == "/api/opencode/compact" {
+			return b.compactAPI(w, r)
+		}
 		if id, ok := voiceDevice(path); ok {
 			return b.voiceAPI(r, id)
 		}

@@ -41,6 +41,20 @@ type bridgeDB struct {
 	cloud *turso.TursoSyncDb
 }
 
+func (d *bridgeDB) getMeta(ctx context.Context, key string) (string, error) {
+	var value string
+	err := d.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	}
+	return value, err
+}
+
+func (d *bridgeDB) setMeta(ctx context.Context, key, value string) error {
+	_, err := d.ExecContext(ctx, `INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
+
 func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoice string) (_ *bridgeDB, err error) {
 	if path != ":memory:" {
 		path, err = filepath.Abs(path)
@@ -275,7 +289,11 @@ type store[T any] struct {
 }
 
 func (s *store[T]) all() (map[string]T, error) {
-	rows, err := s.db.Query("SELECT " + s.columns + " FROM " + s.table)
+	return s.allContext(context.Background())
+}
+
+func (s *store[T]) allContext(ctx context.Context) (map[string]T, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+s.columns+" FROM "+s.table)
 	if err != nil {
 		return nil, problem(502, "Cannot read "+s.table)
 	}
@@ -295,7 +313,11 @@ func (s *store[T]) all() (map[string]T, error) {
 }
 
 func (s *store[T]) get(id string) (T, bool, error) {
-	_, value, err := s.scan(s.db.QueryRow("SELECT "+s.columns+" FROM "+s.table+" WHERE "+s.key+"=?", id))
+	return s.getContext(context.Background(), id)
+}
+
+func (s *store[T]) getContext(ctx context.Context, id string) (T, bool, error) {
+	_, value, err := s.scan(s.db.QueryRowContext(ctx, "SELECT "+s.columns+" FROM "+s.table+" WHERE "+s.key+"=?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, false, nil
 	}

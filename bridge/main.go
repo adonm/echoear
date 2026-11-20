@@ -180,6 +180,14 @@ func run() error {
 	defer stop()
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
+	schemaDone := make(chan struct{})
+	go func() {
+		defer close(schemaDone)
+		if err := b.syncSchemaUpgrade(root); err != nil && root.Err() == nil {
+			log.Printf("EchoEar MCP schema upgrade pending: %v", err)
+		}
+	}()
+	defer func() { finish(); <-schemaDone }()
 	select {
 	case <-signals.Done():
 		b.timers.close()

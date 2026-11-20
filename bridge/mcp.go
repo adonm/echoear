@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +23,23 @@ const (
 	maxNodes    = 48
 	exitNode    = "echoear-exit"
 	eventLimit  = 64
+
+	mcpInstructions = "Use the exact EchoEar device ID. Inspect live context, run an SVG drawing or sandboxed JS app, act on a device, or store persistent JSON. Only final assistant prose is spoken."
 )
+
+func mcpSchemaHash() string {
+	return hashMCPSchema(mcpTools, mcpInstructions)
+}
+
+func hashMCPSchema(tools []object, instructions string) string {
+	// json.Marshal sorts map keys, including nested schema properties.
+	raw, err := json.Marshal(object{"tools": tools, "instructions": instructions})
+	if err != nil {
+		panic(err) // The built-in tool schemas must be JSON-serializable.
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
 
 type rpcRequest struct {
 	Version string          `json:"jsonrpc"`
@@ -115,7 +133,7 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		result = object{"protocolVersion": version, "capabilities": object{"tools": object{}},
 			"serverInfo":   object{"name": "echoear", "version": "2.0.0"},
-			"instructions": "Use the exact EchoEar device ID. Inspect live context, run an SVG drawing or sandboxed JS app, act on a device, or store persistent JSON. Only final assistant prose is spoken."}
+			"instructions": mcpInstructions}
 	case "ping":
 		result = object{}
 	case "tools/list":

@@ -1,0 +1,142 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"maps"
+	"net/http"
+	"slices"
+	"time"
+)
+
+const mcpSchemaMeta = "mcp_schema_hash"
+
+type compactResult struct {
+	OK        bool     `json:"ok"`
+	Compacted []string `json:"compacted"`
+	Skipped   []string `json:"skipped"`
+}
+
+func (o *openCode) compactActiveSessions(ctx context.Context, device string) (compactResult, error) {
+	result := compactResult{Compacted: []string{}, Skipped: []string{}}
+	var sessions map[string]string
+	if device == "" {
+		all, err := o.store.allContext(ctx)
+		if err != nil {
+			return result, err
+		}
+		sessions = all
+	} else {
+		sid, _, err := o.store.getContext(ctx, device)
+		if err != nil {
+			return result, err
+		}
+		sessions = map[string]string{device: sid}
+	}
+	var failures []error
+	for _, id := range slices.Sorted(maps.Keys(sessions)) {
+		if ctx.Err() != nil {
+			return result, errors.Join(append(failures, o.unavailable(ctx.Err()))...)
+		}
+		ok, err := o.CompactSession(ctx, id, sessions[id])
+		switch {
+		case err != nil:
+			failures = append(failures, fmt.Errorf("%s: %w", id, err))
+		case ok:
+			result.Compacted = append(result.Compacted, id)
+		default:
+			result.Skipped = append(result.Skipped, id)
+		}
+	}
+	result.OK = len(failures) == 0
+	return result, errors.Join(failures...)
+}
+
+func (b *bridge) syncSchemaUpgrade(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	current := mcpSchemaHash()
+	previous, err := b.db.getMeta(ctx, mcpSchemaMeta)
+	if err != nil || previous == current {
+		return err
+	}
+	if err := b.oc.waitForStartup(ctx); err != nil {
+		return err
+	}
+	reconnect, stop := context.WithTimeout(ctx, 15*time.Second)
+	err = b.oc.ReconnectMCP(reconnect, "echoear")
+	stop()
+	if err != nil && ctx.Err() == nil {
+		log.Printf("EchoEar MCP reconnect (best effort): %v", err)
+	}
+	result, err := b.oc.compactActiveSessions(ctx, "")
+	if err != nil {
+		return err
+	}
+	if err := b.db.setMeta(ctx, mcpSchemaMeta, current); err != nil {
+		return err
+	}
+	log.Printf("EchoEar MCP schema upgraded: compacted=%v skipped=%v", result.Compacted, result.Skipped)
+	return nil
+}
+
+func (o *openCode) waitForStartup(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for !o.reachable(ctx, "/api/info") {
+		select {
+		case <-ctx.Done():
+			return o.unavailable(ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	return nil
+}
+
+func (b *bridge) compactAPI(w http.ResponseWriter, r *http.Request) (any, error) {
+	var device string
+	var reconnect bool
+	if r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
+		input, err := jsonBody(r)
+		if err != nil {
+			return nil, err
+		}
+		if _, present := input["device_id"]; present {
+			device, err = deviceID(r, input, true)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if value, present := input["reconnect_mcp"]; present {
+			var ok bool
+			if reconnect, ok = value.(bool); !ok {
+				return nil, problem(400, "reconnect_mcp must be a boolean")
+			}
+		}
+	}
+	if b.oc == nil {
+		return nil, problem(503, "OpenCode unavailable")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
+	defer cancel()
+	var reconnectErr error
+	if reconnect {
+		refresh, stop := context.WithTimeout(ctx, 15*time.Second)
+		reconnectErr = b.oc.ReconnectMCP(refresh, "echoear")
+		stop()
+	}
+	result, err := b.oc.compactActiveSessions(ctx, device)
+	if err := errors.Join(reconnectErr, err); err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		sendJSON(w, status, object{"ok": false, "compacted": result.Compacted, "skipped": result.Skipped, "error": err.Error()})
+		return nil, nil
+	}
+	return result, nil
+}

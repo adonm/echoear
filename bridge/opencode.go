@@ -471,6 +471,79 @@ func ocData[T any](ctx context.Context, api upstream, method, path string, in an
 	return *envelope.Data, nil
 }
 
+func (o *openCode) ReconnectMCP(ctx context.Context, name string) error {
+	path := "/api/experimental/mcp/" + url.PathEscape(name) + "/connect"
+	if o.project != "" {
+		path += "?" + url.Values{"location[directory]": {o.project}}.Encode()
+	}
+	return o.jsonCall(ctx, http.MethodPost, path, nil, nil)
+}
+
+// CompactSession returns false without an error for an empty, removed, or replaced mapping.
+func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool, error) {
+	if sid == "" {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
+	defer cancel()
+	unlock, err := o.lock(ctx, device)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	current, _, err := o.store.getContext(ctx, device)
+	if err != nil || current != sid {
+		return false, err
+	}
+	if !sessionIDRE.MatchString(sid) {
+		return false, problem(502, "Invalid stored OpenCode session ID")
+	}
+	path := "/api/session/" + sid
+	isMissing := func(err error) bool {
+		var status *upstreamStatus
+		return errors.As(err, &status) && status.code == http.StatusNotFound
+	}
+	session, err := ocData[struct{ ID string }](ctx, o.upstream, http.MethodGet, path, nil)
+	if isMissing(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if session.ID != sid {
+		return false, o.invalid()
+	}
+	item, err := ocData[struct{ ID, SessionID, Type string }](ctx, o.upstream, http.MethodPost, path+"/compact", object{"delivery": "queue"})
+	if isMissing(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if item.ID == "" || item.SessionID != sid || item.Type != "compaction" {
+		return false, o.invalid()
+	}
+	// Admission is not completion. Keep the gate until the result is projected.
+	err = o.jsonCall(ctx, http.MethodPost, "/api/experimental/session/"+sid+"/wait", nil, nil)
+	if isMissing(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	message, err := ocData[struct{ ID, Type, Status string }](ctx, o.upstream, http.MethodGet, path+"/message/"+url.PathEscape(item.ID), nil)
+	if err != nil {
+		return false, err
+	}
+	if message.ID != item.ID || message.Type != "compaction" {
+		return false, o.invalid()
+	}
+	if message.Status != "completed" {
+		return false, problem(502, "OpenCode did not complete session compaction")
+	}
+	return true, nil
+}
+
 func echoEarTitle(device, character string) string {
 	if character = strings.TrimSpace(character); character != "" && character != device {
 		return "EchoEar: " + character + " (" + device + ")"
