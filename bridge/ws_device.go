@@ -19,19 +19,24 @@ const idleSleep = 120 * time.Second
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
 type wsStatus struct {
-	Battery    *int     `json:"battery_pct"`
-	MV         *int     `json:"battery_mv"`
-	Charge     *bool    `json:"charging"`
-	RSSI       *int     `json:"rssi,omitempty"`
-	WiFi       *int     `json:"wifi_rssi"`
-	HasBattery *bool    `json:"has_battery"`
-	Volume     *int     `json:"volume"`
-	FreeHeap   *uint64  `json:"free_heap"`
-	MinHeap    *uint64  `json:"min_free_heap"`
-	FreePSRAM  *uint64  `json:"free_psram"`
-	Uptime     *uint64  `json:"uptime_s"`
-	CPU        *float64 `json:"cpu_pct"`
-	Partition  string   `json:"running_partition,omitempty"`
+	Battery        *int     `json:"battery_pct"`
+	MV             *int     `json:"battery_mv"`
+	Charge         *bool    `json:"charging"`
+	RSSI           *int     `json:"rssi,omitempty"`
+	WiFi           *int     `json:"wifi_rssi"`
+	HasBattery     *bool    `json:"has_battery"`
+	Volume         *int     `json:"volume"`
+	FreeHeap       *uint64  `json:"free_heap"`
+	MinHeap        *uint64  `json:"min_free_heap"`
+	FreePSRAM      *uint64  `json:"free_psram"`
+	Uptime         *uint64  `json:"uptime_s"`
+	CPU            *float64 `json:"cpu_pct"`
+	Partition      string   `json:"running_partition,omitempty"`
+	LastFrameRev   *uint16  `json:"last_frame_rev,omitempty"`
+	DisplayFlushMS *uint32  `json:"display_flush_ms,omitempty"`
+	InputDrops     *uint32  `json:"input_drops,omitempty"`
+	AudioUnderruns *uint32  `json:"audio_underruns,omitempty"`
+	AudioDrops     *uint32  `json:"audio_drops,omitempty"`
 }
 
 type wsDevice struct {
@@ -86,6 +91,7 @@ type wsDevice struct {
 	recIgnoreStart bool
 	mic            []byte
 	turn           uint64
+	trace          *turnTrace
 	cancel         context.CancelFunc
 	busy           bool
 	agentSetScene  bool
@@ -527,6 +533,21 @@ func (d *wsDevice) status(s wsStatus) {
 	if s.Partition != "" {
 		t.Partition = shortText(s.Partition, 24, false)
 	}
+	if s.LastFrameRev != nil {
+		t.LastFrameRev = s.LastFrameRev
+	}
+	if s.DisplayFlushMS != nil {
+		t.DisplayFlushMS = s.DisplayFlushMS
+	}
+	if s.InputDrops != nil {
+		t.InputDrops = s.InputDrops
+	}
+	if s.AudioUnderruns != nil {
+		t.AudioUnderruns = s.AudioUnderruns
+	}
+	if s.AudioDrops != nil {
+		t.AudioDrops = s.AudioDrops
+	}
 }
 
 func (d *wsDevice) voiceTheme() string {
@@ -543,6 +564,7 @@ type renderRequest struct {
 	app    *appInstance
 	screen svgScreen
 	full   bool
+	trace  *turnTrace
 }
 
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
@@ -567,7 +589,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	pose := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 	pose.blink = pose.blink || now.Before(d.pet)
 	d.pose = pose
-	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full}
+	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace}
 	switch {
 	case d.drawer != "" && mood == "idle":
 		switch d.drawer {
@@ -679,9 +701,11 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 		d.rev, d.svgWire = rev, svgWire
 		if web {
 			d.client.enqueue(svgWire)
+			r.trace.measure(diagRender, screen.render)
 			h.trackFrame(d, screen.render, len(svgWire.data), len(screen.source), "svg")
 		} else if native.data != nil {
 			d.client.enqueue(native)
+			r.trace.measure(diagRender, screen.render)
 			codec := "RGB565"
 			if native.data[9] == 1 {
 				codec = "RLE565"

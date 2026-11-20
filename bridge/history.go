@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +38,18 @@ func newChat(role, sender, text, source string) chatEntry {
 }
 
 type chatHistory struct{ db *bridgeDB }
+
+type historyCursor struct {
+	TS int64  `json:"before_ts"`
+	ID string `json:"before_id"`
+}
+
+type historyPage struct {
+	DeviceID string         `json:"device_id"`
+	Messages []chatEntry    `json:"messages"`
+	HasMore  bool           `json:"has_more"`
+	Next     *historyCursor `json:"next_cursor,omitempty"`
+}
 
 const insertChat = `INSERT INTO chat_events (id,device_id,role,sender,text,source,scene_title,tool_summary,ts_ms)
 	VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`
@@ -94,13 +107,21 @@ func (h *chatHistory) list(ctx context.Context, id string) ([]chatEntry, error) 
 }
 
 func (h *chatHistory) read(ctx context.Context, id string, limit int) ([]chatEntry, error) {
+	return h.readBefore(ctx, id, limit, nil)
+}
+
+func (h *chatHistory) readBefore(ctx context.Context, id string, limit int, before *historyCursor) ([]chatEntry, error) {
 	query := `SELECT id,role,sender,text,source,card_title,ts_ms FROM messages WHERE device_id=?`
 	args := []any{strings.ToLower(id)}
+	if before != nil {
+		query += ` AND ts_ms<=? AND (ts_ms<? OR id<?)`
+		args = append(args, before.TS, before.TS, before.ID)
+	}
 	if limit > 0 {
-		query += ` ORDER BY ts_ms DESC,rowid DESC LIMIT ?`
+		query += ` ORDER BY ts_ms DESC,id DESC LIMIT ?`
 		args = append(args, limit)
 	} else {
-		query += ` ORDER BY ts_ms,rowid`
+		query += ` ORDER BY ts_ms,id`
 	}
 	rows, err := h.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -156,15 +177,43 @@ func messagesDevice(path string) (string, bool) {
 	return id, ok && deviceIDRE.MatchString(id)
 }
 
-func (b *bridge) messages(ctx context.Context, id string) (any, error) {
-	if b.history == nil {
-		return object{"device_id": id, "messages": []chatEntry{}}, nil
+func (b *bridge) messages(r *http.Request, id string) (any, error) {
+	if !deviceIDRE.MatchString(id) {
+		return nil, problem(400, "Invalid device ID")
 	}
-	entries, err := b.history.list(ctx, id)
+	query := r.URL.Query()
+	limit := 100
+	if query.Has("limit") {
+		n, err := strconv.Atoi(query.Get("limit"))
+		if err != nil || n < 1 {
+			return nil, problem(400, "Expected a positive history limit")
+		}
+		limit = min(n, 500)
+	}
+	var before *historyCursor
+	if query.Has("before_ts") || query.Has("before_id") {
+		ts, err := strconv.ParseInt(query.Get("before_ts"), 10, 64)
+		key := query.Get("before_id")
+		if err != nil || key == "" || len(key) > 512 {
+			return nil, problem(400, "Expected before_ts (Unix milliseconds) and before_id")
+		}
+		before = &historyCursor{TS: ts, ID: key}
+	}
+	out := historyPage{DeviceID: id, Messages: []chatEntry{}}
+	if b.history == nil {
+		return out, nil
+	}
+	entries, err := b.history.readBefore(r.Context(), id, limit+1, before)
 	if err != nil {
 		return nil, err
 	}
-	return object{"device_id": id, "messages": entries}, nil
+	out.HasMore = len(entries) > limit
+	if out.HasMore {
+		entries = entries[1:] // The extra row is the oldest.
+		out.Next = &historyCursor{TS: entries[0].Timestamp.UnixMilli(), ID: entries[0].ID}
+	}
+	out.Messages = entries
+	return out, nil
 }
 
 func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
@@ -208,7 +257,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		b.ws.mu.Lock()
 		d := b.ws.devices[strings.ToLower(id)]
 		if d != nil && b.ws.active(d) {
-			b.ws.startTurn(d, time.Now(), false, func(ctx context.Context, turn uint64) {
+			b.ws.startTurn(d, time.Now(), false, "typed", func(ctx context.Context, turn uint64) {
 				b.ws.runTurn(ctx, d, turn, text, "typed", nil)
 			})
 			b.ws.mu.Unlock()

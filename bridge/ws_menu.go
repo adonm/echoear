@@ -104,7 +104,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	case "text":
 		text := strings.TrimSpace(ev.Text)
 		if text != "" && len(text) <= 4096 {
-			h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
+			h.startTurn(d, now, false, "typed", func(ctx context.Context, id uint64) {
 				h.runTurn(ctx, d, id, text, "typed", nil)
 			})
 		}
@@ -112,7 +112,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		target, ok := recordTarget(ev.Target)
 		text := strings.TrimSpace(ev.Text)
 		if ok && target != "" && text != "" && len(text) <= 4096 {
-			h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
+			h.startTurn(d, now, false, "intercom", func(ctx context.Context, id uint64) {
 				others, err := h.peerSnapshot(d.who.DeviceID)
 				if err != nil || ctx.Err() != nil {
 					h.turnError(d, id, "Could not find nearby cats.")

@@ -3,6 +3,7 @@ import {audioReady} from "./audio.js";
 import {$, node, say} from "./dom.js";
 import {renderCurrent} from "./live.js";
 import {state} from "./state.js";
+import {transcript} from "./transcript.js";
 
 const dayFormat = new Intl.DateTimeFormat(undefined, {dateStyle:"medium"});
 const timeFormat = new Intl.DateTimeFormat(undefined, {hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
@@ -33,71 +34,97 @@ function bubble(entry) {
   return item;
 }
 
-function renderTranscript(toBottom = false) {
-  const list = $("messages"), scroll = $("transcript"), top = scroll.scrollTop;
-  const follow = toBottom || scroll.scrollHeight - scroll.clientHeight - top <= 80;
-  const anchor = follow ? null : [...list.children].find(el => el.dataset.entry && el.offsetTop + el.offsetHeight > top);
-  const offset = anchor?.offsetTop;
-  const entries = [...state.view.entries.values()].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  const content = document.createDocumentFragment();
-  let lastDay = "";
-  for (const entry of entries) {
-    const when = new Date(entry.timestamp);
-    const day = Number.isFinite(when.valueOf()) ? dayFormat.format(when) : "";
-    if (day && day !== lastDay) content.append(node("li", "day", day));
-    lastDay = day;
-    content.append(bubble(entry));
-  }
-  list.replaceChildren(content);
-  $("empty-chat").hidden = entries.length !== 0;
+const chat = transcript($("messages"), bubble, day => node("li", "day", day), day => dayFormat.format(day));
+
+function transcriptStatus() {
+  $("empty-chat").hidden = chat.size !== 0;
   say("empty-chat", !state.view.id ? "Choose a cat to open its chat." : state.view.loading ? "Loading chat…" :
     state.view.historyError ? "Could not load chat. Try Refresh." : "No messages yet — say hi or tap the mic!");
+  $("load-older").hidden = !state.view.cursor;
+  $("load-older").disabled = !!state.view.loading || !!state.view.resetting;
+  say("load-older", state.view.olderLoading ? "Loading older…" : state.view.olderError ? "Retry loading older" : "Load older");
+}
+
+function updateTranscript(update, keepPosition = false) {
+  const scroll = $("transcript"), top = scroll.scrollTop;
+  const follow = !keepPosition && scroll.scrollHeight - scroll.clientHeight - top <= 80;
+  const anchor = follow ? null : chat.anchor(top);
+  const offset = anchor?.node.offsetTop;
+  const id = anchor?.entry.id;
+  update();
+  transcriptStatus();
   if (follow) scroll.scrollTop = scroll.scrollHeight;
   else {
-    const replacement = anchor && [...list.children].find(el => el.dataset.entry === anchor.dataset.entry);
+    const replacement = id && chat.node(id);
     scroll.scrollTop = replacement ? top + replacement.offsetTop - offset : top;
   }
 }
 
-async function loadHistory({replace = true} = {}) {
+function resetTranscript() {
+  chat.clear();
+  $("transcript").scrollTop = 0;
+  transcriptStatus();
+}
+
+function receiveChat(entry) {
+  if (!entry?.id) return;
+  state.view.liveDuringLoad?.set(entry.id, entry);
+  updateTranscript(() => chat.upsert(entry));
+}
+
+async function loadHistory({replace = true, older = false} = {}) {
   const cat = state.view, current = state.app;
-  if (!cat?.id || cat.resetting) return;
+  if (!cat?.id || cat.resetting || older && (cat.loading || !cat.cursor)) return;
   cat.loading?.abort();
   const loading = new AbortController(), live = new Map();
   cat.loading = loading;
   cat.liveDuringLoad = live;
+  cat.olderLoading = older;
+  cat.olderError = false;
   cat.historyError = false;
   renderCurrent();
-  if (!cat.entries.size) renderTranscript();
+  transcriptStatus();
   try {
-    const {messages} = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/messages`, {signal:loading.signal});
+    const query = older ? `?${new URLSearchParams(cat.cursor)}` : "";
+    const page = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/messages${query}`, {signal:loading.signal});
     if (state.view !== cat || cat.loading !== loading) return;
-    const merged = new Map();
-    for (const entry of messages) if (entry.id) merged.set(entry.id, entry);
-    if (!replace) {
-      for (const [id, entry] of cat.entries) if (!merged.has(id)) merged.set(id, entry);
-    }
-    for (const [id, entry] of live) merged.set(id, entry);
-    cat.entries = merged;
+    // A reconnect can miss more than one page. If there is no overlap,
+    // start over from the new page so "Load older" can walk the entire gap.
+    const gap = !older && !!cat.latestPageID && page.has_more &&
+      !page.messages.some(entry => entry.id === cat.latestPageID);
+    updateTranscript(() => {
+      if (!older && (replace || gap)) chat.clear();
+      if (older || replace || gap || cat.cursor === undefined) cat.cursor = page.has_more ? page.next_cursor : null;
+      if (!older) cat.latestPageID = page.messages.at(-1)?.id;
+      for (const entry of page.messages) if (!live.has(entry.id)) chat.upsert(entry);
+      for (const entry of live.values()) chat.upsert(entry);
+    }, older);
   } catch {
-    if (!loading.signal.aborted) cat.historyError = true;
+    if (!loading.signal.aborted) {
+      if (older) cat.olderError = true;
+      else cat.historyError = true;
+    }
   } finally {
     if (state.view === cat && cat.loading === loading) {
       cat.loading = cat.liveDuringLoad = null;
+      cat.olderLoading = false;
       renderCurrent();
-      renderTranscript();
+      transcriptStatus();
     }
   }
 }
 
 $("refresh").onclick = () => loadHistory();
+$("load-older").onclick = () => loadHistory({older:true});
 $("reset").onclick = async () => {
   const cat = state.view, current = state.app;
   if (!current || current.scope || !cat?.id) return;
   cat.loading?.abort();
   cat.loading = cat.liveDuringLoad = null;
+  cat.olderLoading = false;
   cat.resetting = true;
   renderCurrent();
+  transcriptStatus();
   say("chat-note", "Starting a new chat…");
   try {
     await api(current, "/api/reset", {method:"POST", body:{device_id:cat.id}});
@@ -109,7 +136,10 @@ $("reset").onclick = async () => {
     if (state.view === cat) say("chat-note", "Could not start a new chat.");
   } finally {
     cat.resetting = false;
-    if (state.view === cat) renderCurrent();
+    if (state.view === cat) {
+      renderCurrent();
+      transcriptStatus();
+    }
   }
 };
 
@@ -162,4 +192,4 @@ $("photo-file").onchange = async e => {
   }
 };
 
-export {loadHistory, renderTranscript};
+export {loadHistory, receiveChat, resetTranscript};

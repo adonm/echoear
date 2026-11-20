@@ -350,6 +350,9 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			}
 		}
 		messageID, messages := messagesDevice(path)
+		if path == "/api/history" {
+			messageID, messages = r.URL.Query().Get("device_id"), true
+		}
 		voiceID, voice := voiceDevice(path)
 		volumeID, volume := deviceSettingID(path, "volume")
 		photoDevice, uploadPhoto := deviceSettingID(path, "photo")
@@ -398,7 +401,7 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 				sendError(w, problem(403, "Device out of scope"))
 				return
 			}
-			value, err := b.messages(r.Context(), messageID)
+			value, err := b.messages(r, messageID)
 			sendResult(w, value, err)
 		case post && voice:
 			if voiceID != v.ID {

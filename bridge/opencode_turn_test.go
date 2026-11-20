@@ -213,6 +213,15 @@ func TestWSEagerTTSFailureShowsAnswerUnlessInterrupted(t *testing.T) {
 			nextSpeech(first).done <- ttsResult{pcm: make([]byte, 640)}
 			start := testObject(t, board.until(t, hasWS("tts", `"state":"start"`)).data)
 			board.until(t, isPlayback)
+			eventually(t, func() bool {
+				report := b.diagnosticReport()
+				return len(report.Turns) == 1 && report.Turns[0].FirstPCM != nil && report.Turns[0].Render != nil
+			})
+			row := b.diagnosticReport().Turns[0]
+			if row.Gate == nil || row.FirstSentence == nil || row.First == nil ||
+				*row.FirstSentence < *row.First || *row.FirstPCM < *row.FirstSentence || row.E2E != nil {
+				t.Fatalf("invalid split timings for typed turn: %+v", row)
+			}
 			tail := nextSpeech(second)
 			switch mode {
 			case "before-final":

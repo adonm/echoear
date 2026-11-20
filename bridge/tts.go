@@ -27,6 +27,7 @@ type ttsRequest struct {
 	ctx         context.Context
 	voice, text string
 	done        chan ttsResult
+	queuedAt    time.Time
 }
 
 type ttsResult struct {
@@ -171,7 +172,11 @@ func (w *synthWorker) run(ctx context.Context) {
 							continue
 						}
 						turn, cancel := context.WithTimeout(ctx, ttsWait)
+						trace := traceFrom(req.ctx)
+						admitted := time.Now()
+						trace.measure(diagTTSQueue, admitted.Sub(req.queuedAt))
 						result, broken := p.call(turn, req.voice, req.text)
+						trace.measure(diagTTSInfer, time.Since(admitted))
 						cancel()
 						req.done <- result
 						if broken {
@@ -199,10 +204,14 @@ func (w *synthWorker) run(ctx context.Context) {
 }
 
 func (w *synthWorker) synthesize(ctx context.Context, voice, text string) ([]byte, error) {
+	return w.synthesizeQueued(ctx, voice, text, time.Now())
+}
+
+func (w *synthWorker) synthesizeQueued(ctx context.Context, voice, text string, at time.Time) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	req := ttsRequest{ctx, voice, text, make(chan ttsResult, 1)}
+	req := ttsRequest{ctx: ctx, voice: voice, text: text, done: make(chan ttsResult, 1), queuedAt: at}
 	select {
 	case w.requests <- req:
 	case <-ctx.Done():
@@ -479,11 +488,12 @@ func spokenText(text string) (string, error) {
 }
 
 type speechTurn struct {
-	stream *AudioStream
-	cancel context.CancelFunc
-	queue  chan string
-	sent   []string
-	length int
+	stream      *AudioStream
+	cancel      context.CancelFunc
+	queue       chan string
+	sent        []string
+	length      int
+	firstQueued time.Time // Published to the worker by the first queue send.
 }
 
 func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorker, voice string, onFirst func(*AudioStream)) *speechTurn {
@@ -492,7 +502,11 @@ func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorke
 		defer cancel()
 		first := true
 		for s := range t.queue {
-			pcm, err := w.synthesize(ctx, voice, s)
+			at := t.firstQueued
+			if !first {
+				at = time.Now()
+			}
+			pcm, err := w.synthesizeQueued(ctx, voice, s, at)
 			if err != nil {
 				t.stream.finish(err)
 				return
@@ -519,6 +533,9 @@ func (t *speechTurn) send(s string) {
 	n := runeLen(s)
 	if n == 0 || t.length+n > maxText {
 		return
+	}
+	if t.length == 0 {
+		t.firstQueued = time.Now()
 	}
 	t.length += n
 	t.sent = append(t.sent, s)

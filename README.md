@@ -141,6 +141,10 @@ LAN `/app` dashboard for device status, pipeline timings, and CPU and memory
 usage for the bridge, Kokoro, and host. Firmware reports ESP32-S3 CPU
 usage, free and minimum free heap, free PSRAM, Wi-Fi RSSI, and uptime every five
 seconds over WebSocket. The dashboard also shows WebSocket round-trip time.
+Device status also reports the last frame revision and LCD flush duration,
+input overflows, and PCM starvation/drop counts. Turn diagnostics separate
+OpenCode gate wait and first sentence, TTS queue and worker time, first frame
+render, and elapsed time to the first queued PCM (or HTTP audio URL).
 
 ## Dedicated OpenCode
 
@@ -261,7 +265,7 @@ synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 | `GET /api/cats`, `DELETE /api/cats/{slug}` | List or delete LAN-only saved cat profiles |
 | `POST /api/cats/reassign` | LAN-only `from_device_id`, `to_device_id`, and `mode` (`swap` or `move`) → transfer active cats, voices, and sessions |
 | `POST /api/devices/{id}/cat` | Update active cat fields or send `{"slug":"cake"}` to load a profile (LAN-only) |
-| `GET /api/devices/{id}/messages` | Canonical chronological chat for a device |
+| `GET /api/devices/{id}/messages`, `GET /api/history?device_id={id}` | Canonical chat, newest page first and chronological within each page. `limit` defaults to 100 (max 500). If `has_more`, pass `next_cursor.before_ts` and `next_cursor.before_id` as query parameters to load older messages. |
 | `POST /api/devices/{id}/photo`, `GET /api/photos/{id}` | Share a PNG, JPEG, or WebP up to 2 MiB, or fetch the stored square PNG |
 | `POST /api/devices/{id}/voice` | `{"voice":"af_heart"}` → saved `device_id` and `voice`; scoped links can change only their own cat |
 | `POST /api/chat` | `{"text":"Explain a circle","device_id":"my-echoear"}` → accepted on a connected device; otherwise returns `reply`, `session_id`, and `audio_url` (LAN only) |

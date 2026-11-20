@@ -1,5 +1,5 @@
 import {audioReady, chime, endMic, handleTTS, micStopping, playPCM, setVolume, startMic, stopSound} from "./audio.js";
-import {loadHistory, renderTranscript} from "./chat.js";
+import {loadHistory, receiveChat, resetTranscript} from "./chat.js";
 import {applyVolume, refreshDevices, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
 import {$, colors, isLive, nodes, say, screen, svgNS} from "./dom.js";
 import {loadSaved, loadSavedCats, loadTimers} from "./library.js";
@@ -28,7 +28,7 @@ function select(d, quick = false) {
   state.view?.loading?.abort();
   // A fresh socket keeps unlabelled SVG frames from crossing selections.
   disconnect();
-  state.view = {id, device:d, virtual:d?.kind === "virtual", quick, entries:new Map()};
+  state.view = {id, device:d, virtual:d?.kind === "virtual", quick};
   setVolume(d?.volume ?? 55);
   $("text").value = "";
   $("target").value = "";
@@ -44,7 +44,7 @@ function select(d, quick = false) {
   loadSavedCats();
   renderCurrent();
   renderDevices();
-  renderTranscript(true);
+  resetTranscript();
   if (id) {
     loadTimers();
     if (!quick) loadHistory();
@@ -167,11 +167,7 @@ function command(msg) {
     return;
   }
   if (msg.type === "chat") {
-    if (msg.device_id === state.view.id && msg.entry?.id) {
-      state.view.entries.set(msg.entry.id, msg.entry);
-      state.view.liveDuringLoad?.set(msg.entry.id, msg.entry);
-      renderTranscript();
-    }
+    if (msg.device_id === state.view.id) receiveChat(msg.entry);
     return;
   }
   switch (msg.op) {

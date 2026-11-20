@@ -227,6 +227,7 @@ func (b *bridge) attachAudio(ctx context.Context, out *answer, stream *AudioStre
 			if id, _, _ := b.audio.add(stream); id != "" {
 				path := "/api/audio/" + id
 				out.AudioURL = &path
+				traceFrom(ctx).firstPCM(time.Now())
 			}
 		}
 	}
@@ -334,7 +335,7 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text
 		if !ok {
 			deadline = time.Now().Add(turnTimeout)
 		}
-		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
+		audioCtx, cancel := context.WithDeadline(context.WithValue(audioBase, traceKey{}, traceFrom(ctx)), deadline)
 		return newSpeechTurn(audioCtx, cancel, b.worker, b.voiceFor(sender), onFirst)
 	}
 	var mu sync.Mutex
@@ -470,9 +471,11 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return b.diagnosticReport(), nil
 		case path == "/api/scope":
 			return object{"scoped": false, "auto_volume": true, "voices": voiceCatalog}, nil
+		case path == "/api/history":
+			return b.messages(r, r.URL.Query().Get("device_id"))
 		case strings.HasSuffix(path, "/messages"):
 			if id, ok := messagesDevice(path); ok {
-				return b.messages(ctx, id)
+				return b.messages(r, id)
 			}
 		case strings.HasPrefix(path, "/api/audio/"):
 			return nil, b.audio.ServeAudio(w, r, strings.TrimPrefix(path, "/api/audio/"))

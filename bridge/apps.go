@@ -920,8 +920,33 @@ func (h *wsHub) updateApp(a *appInstance, ev appEvent) bool {
 		h.closeApp(a, ev.now)
 		return true
 	}
-	if (ev.kind != "patch" && a.hooks[ev.kind] == nil) || len(a.events) >= 32 {
+	if ev.kind != "patch" && a.hooks[ev.kind] == nil {
 		return false
+	}
+	if ev.kind == "drag" {
+		for i := len(a.events) - 1; i >= 0; i-- {
+			prior := a.events[i]
+			if prior.i != ev.i {
+				continue
+			}
+			if prior.kind == "drag" {
+				a.events = slices.Delete(a.events, i, i+1)
+				break
+			}
+			if prior.kind == "up" || prior.kind == "tap" {
+				break
+			}
+		}
+	}
+	if len(a.events) >= 32 {
+		if ev.kind == "drag" {
+			return false
+		}
+		i := slices.IndexFunc(a.events, func(p appEvent) bool { return p.kind == "drag" })
+		if i < 0 {
+			return false
+		}
+		a.events = slices.Delete(a.events, i, i+1)
 	}
 	a.events = append(a.events, ev)
 	if ev.kind == "tick" {
@@ -939,6 +964,7 @@ func (h *wsHub) runAppEvents(a *appInstance) {
 	defer h.mu.Unlock()
 	for len(a.events) != 0 && !h.closed && a.ctx.Err() == nil {
 		ev := a.events[0]
+		a.events[0] = appEvent{}
 		a.events = a.events[1:]
 		if ev.i >= 0 && (a.devices[ev.i] == nil || !h.active(a.devices[ev.i])) {
 			continue

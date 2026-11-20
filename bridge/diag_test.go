@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,7 +23,7 @@ func TestDiagnosticsMetricWindowAndTurns(t *testing.T) {
 		trace := traceFrom(ctx)
 		trace.measure(diagSTT, time.Duration(i)*time.Millisecond)
 		trace.measure(diagSTT, 999*time.Millisecond)
-		trace.audioEnqueued(trace.recEnd.Add(50 * time.Millisecond))
+		trace.audioEnqueued(trace.start.Add(50 * time.Millisecond))
 	}
 	report := b.diagnosticReport()
 	stt := report.Latency["stt_ms"]
@@ -124,6 +126,23 @@ func TestDiagnosticsEndpointAndBoardHUD(t *testing.T) {
 		*d.HasBattery || d.DeviceVol == nil || *d.DeviceVol != 70 || d.Frame.Bytes >= d.Frame.RawBytes || d.Frame.Codec != "RLE565" {
 		t.Fatalf("invalid device telemetry: %+v", d)
 	}
+	if d.LastFrameRev != nil || d.AudioDrops != nil {
+		t.Fatal("older devices must not claim to report hardware counters")
+	}
+	board.json(t, object{"ev": "status", "last_frame_rev": 65535, "display_flush_ms": 12, "input_drops": 0, "audio_underruns": 2, "audio_drops": 3})
+	board.json(t, object{"ev": "status", "cpu_pct": 27})
+	board.barrier(t)
+	raw = testRequest(t, "GET", base+"/api/diagnostics", "unit", nil, 200)
+	report = diagReport{}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	d = report.Devices[0]
+	if d.LastFrameRev == nil || *d.LastFrameRev != 65535 || d.DisplayFlushMS == nil || *d.DisplayFlushMS != 12 ||
+		d.InputDrops == nil || *d.InputDrops != 0 || d.AudioUnderruns == nil || *d.AudioUnderruns != 2 ||
+		d.AudioDrops == nil || *d.AudioDrops != 3 {
+		t.Fatalf("invalid IO telemetry: %+v", d)
+	}
 	view := testConnectWS(t, base, "unit", true)
 	view.json(t, object{"ev": "hello", "role": "web"})
 	view.until(t, hasWS("peers", id))
@@ -159,8 +178,56 @@ func TestDiagnosticsFirstSpokenDeltaAndAudio(t *testing.T) {
 	audio.traceFirst(tr, start)
 	tr.audioEnqueued(time.Now())
 	row := b.diagnosticReport().Turns[0]
-	if row.TTS == nil || row.E2E == nil || *row.E2E < 10 {
+	if row.TTS == nil || row.E2E == nil || *row.E2E < 10 || row.FirstPCM == nil || *row.FirstPCM != *row.E2E {
 		t.Fatal(row)
+	}
+}
+
+func TestDiagnosticsTTSQueueDropsCanceledSpeechWithoutRestart(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script, calls := filepath.Join(dir, "worker.py"), filepath.Join(dir, "requests")
+	if err := os.WriteFile(script, []byte(`import struct, sys
+r, w = sys.stdin.buffer, sys.stdout.buffer
+while header := r.read(4):
+    r.read(struct.unpack("<I", header)[0])
+    text = r.read(struct.unpack("<I", r.read(4))[0])
+    with open(sys.argv[1], "ab") as calls:
+        calls.write(text + b"\n")
+    pcm = struct.pack("<f", 0.25) if text else b""
+    w.write(struct.pack("<BII", 0, 16000 if text else 0, len(pcm)) + pcm)
+    w.flush()
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, stop := context.WithCancel(t.Context())
+	worker := newSynthWorker(root, python, script, calls, "")
+	defer func() { stop(); <-worker.done }()
+	b := &bridge{}
+	ctx := b.traceTurn(root, "vocat", "Cake", "typed", time.Now())
+	if pcm, err := worker.synthesizeQueued(ctx, heartVoice, "First", time.Now().Add(-10*time.Millisecond)); err != nil || len(pcm) != 2 {
+		t.Fatalf("worker did not return PCM: %v, %v", pcm, err)
+	}
+	pid := worker.pid()
+	stale, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := worker.synthesize(stale, heartVoice, "Discard me"); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if _, err := worker.synthesize(ctx, heartVoice, "Second"); err != nil || worker.pid() != pid {
+		t.Fatalf("worker did not stay warm: %v", err)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil || string(data) != "\nFirst\nSecond\n" {
+		t.Fatalf("canceled work reached Python: %q (%v)", data, err)
+	}
+	report := b.diagnosticReport()
+	if row := report.Turns[0]; row.TTSQueue == nil || *row.TTSQueue < 10 || row.TTSInfer == nil ||
+		report.Latency["tts_queue_ms"].Count != 1 || report.Latency["tts_infer_ms"].Count != 1 {
+		t.Fatalf("missing split timings: %+v", row)
 	}
 }
 
@@ -225,7 +292,7 @@ func TestAccessibleStopAndFaceInterrupt(t *testing.T) {
 	for _, target := range []string{"stop", "cat-ring"} {
 		cancelled := make(chan struct{})
 		b.ws.mu.Lock()
-		b.ws.startTurn(b.ws.devices[id], time.Now(), false, func(ctx context.Context, _ uint64) {
+		b.ws.startTurn(b.ws.devices[id], time.Now(), false, "typed", func(ctx context.Context, _ uint64) {
 			<-ctx.Done()
 			close(cancelled)
 		})

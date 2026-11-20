@@ -19,8 +19,9 @@ printf 'PASS shell checks\n'
 source scripts/go-bin.sh
 GO_BIN=$(resolve_go)
 python3 -m py_compile bridge/tts_worker.py
-node --check bridge/web/client.js
-node --check bridge/web/mic.js
+for module in bridge/web/*.js; do
+    node --check "$module"
+done
 # mic.test.mjs imports the mic and playback CJS suites.
 node --test bridge/web/*.test.mjs
 (

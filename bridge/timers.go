@@ -408,7 +408,7 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		now := time.Now()
 		if t.WakeAgent {
 			completed := make(chan struct{})
-			h.startTurn(d, now, true, func(turnCtx context.Context, id uint64) {
+			h.startTurn(d, now, true, "timer", func(turnCtx context.Context, id uint64) {
 				defer close(completed)
 				turnCtx, cancel := context.WithCancel(turnCtx)
 				defer cancel()

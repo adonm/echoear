@@ -195,6 +195,42 @@ func TestBrowserAppDragAndUp(t *testing.T) {
 	}
 }
 
+func TestAppDragBurstPreservesCriticalEvents(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := &wsHub{b: &bridge{}}
+		app, _, err := initApp(savedApp{Code: `
+			function init() { return {}; }
+			function render() { return '<svg/>'; }
+			function onDrag() {}
+			function onUp() {}
+			function onTap() {}
+			function onTick() {}`}, nil, nil, nil, nil, buildScreen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		app.running = true // Model a busy JS callback with an undrained queue.
+		for x := range 1000 {
+			if !h.updateApp(app, appEvent{kind: "drag", i: 0, x: x}) {
+				t.Fatal("pending drag should be replaceable")
+			}
+		}
+		for _, ev := range []appEvent{{kind: "up", i: 0}, {kind: "tick", i: -1}, {kind: "tap", i: 0}} {
+			if !h.updateApp(app, ev) {
+				t.Fatalf("drag burst blocked %s", ev.kind)
+			}
+		}
+		if q := app.events; len(q) != 4 || q[0].kind != "drag" || q[0].x != 999 || q[1].kind != "up" || q[2].kind != "tick" || q[3].kind != "tap" {
+			t.Fatalf("unexpected queue: %+v", q)
+		}
+		for len(app.events) < 32 {
+			h.updateApp(app, appEvent{kind: "tap", i: 0})
+		}
+		if !h.updateApp(app, appEvent{kind: "up", i: 0}) || app.events[0].kind != "up" || app.events[31].kind != "up" {
+			t.Fatal("full queue did not make room for a terminal event by dropping a drag")
+		}
+	})
+}
+
 func TestNativeAppDragAndUp(t *testing.T) {
 	for _, tc := range []struct {
 		board string

@@ -658,10 +658,13 @@ func (o *openCode) ask(ctx context.Context, who peer, prompt string, onSentence 
 }
 
 func (o *openCode) askPrepared(ctx context.Context, device string, prepare func() (string, string), stream turnStream, source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
+	waiting := time.Now()
+	trace := traceFrom(ctx)
 	ctx, unlock, err := o.lockPrompt(ctx, device)
 	if err != nil {
 		return "", "", err
 	}
+	trace.measure(diagGate, time.Since(waiting))
 	defer unlock()
 	character, prompt := prepare()
 	sid, err = o.ensureSession(ctx, device, character)

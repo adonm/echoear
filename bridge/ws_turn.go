@@ -109,9 +109,8 @@ func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 		return
 	}
 	d.measureAmbient(pcm)
-	character := d.cat.Name
-	h.startTurn(d, now, false, func(ctx context.Context, id uint64) {
-		h.runVoice(h.b.traceTurn(ctx, d.who.DeviceID, character, "voice", now), d, id, target, pcm)
+	h.startTurn(d, now, false, "voice", func(ctx context.Context, id uint64) {
+		h.runVoice(ctx, d, id, target, pcm)
 	})
 }
 
@@ -124,6 +123,7 @@ func (h *wsHub) cancelTurn(d *wsDevice) {
 
 func (h *wsHub) cancelLocalTurn(d *wsDevice) {
 	d.turn++
+	d.trace = nil
 	d.busy = false
 	d.agentSetScene = false
 	if d.cancel != nil {
@@ -132,16 +132,16 @@ func (h *wsHub) cancelLocalTurn(d *wsDevice) {
 	}
 }
 
-func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, run func(context.Context, uint64)) {
+func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) {
 	if d.busy {
 		h.cancelTurn(d)
 	} else {
 		h.cancelLocalTurn(d)
 	}
-	h.beginTurn(d, now, keepView, run)
+	h.beginTurn(d, now, keepView, source, run)
 }
 
-func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, run func(context.Context, uint64)) {
+func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) {
 	h.wake(d, now)
 	h.stopPlayback(d, true)
 	if !d.recAt.IsZero() {
@@ -153,6 +153,8 @@ func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, run func(co
 		d.view = nil
 	}
 	ctx, cancel := context.WithTimeout(d.client.ctx, turnTimeout)
+	ctx = h.b.traceTurn(ctx, d.who.DeviceID, d.cat.Name, source, now)
+	d.trace = traceFrom(ctx)
 	id := d.turn
 	d.cancel, d.busy = cancel, true
 	if !keepView {
@@ -202,6 +204,7 @@ func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView, audio *Audio
 		d.cancel = nil
 	}
 	h.render(d, now, false)
+	d.trace = nil
 }
 
 func (h *wsHub) turnError(d *wsDevice, id uint64, message string) {

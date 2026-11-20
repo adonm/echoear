@@ -25,12 +25,18 @@ const (
 	diagRender
 	diagFrameBytes
 	diagRawFrameBytes
+	diagGate
+	diagFirstSentence
+	diagTTSQueue
+	diagTTSInfer
+	diagFirstPCM
 	diagMetricCount
 )
 
 var diagMetricNames = [diagMetricCount]string{
 	"stt_ms", "llm_first_ms", "llm_total_ms", "tts_first_ms", "e2e_ms",
 	"render_ms", "frame_bytes", "frame_raw_bytes",
+	"gate_ms", "first_sentence_ms", "tts_queue_ms", "tts_infer_ms", "first_pcm_ms",
 }
 
 const diagInterval = 2 * time.Second
@@ -85,15 +91,21 @@ func summarize(r diagRing[float64]) diagSummary {
 }
 
 type diagTurn struct {
-	TS        int64    `json:"ts_ms"`
-	Device    string   `json:"device"`
-	Character string   `json:"character"`
-	Source    string   `json:"source"`
-	STT       *float64 `json:"stt_ms"`
-	First     *float64 `json:"llm_first_ms"`
-	Total     *float64 `json:"llm_total_ms"`
-	TTS       *float64 `json:"tts_first_ms"`
-	E2E       *float64 `json:"e2e_ms"`
+	TS            int64    `json:"ts_ms"`
+	Device        string   `json:"device"`
+	Character     string   `json:"character"`
+	Source        string   `json:"source"`
+	STT           *float64 `json:"stt_ms"`
+	First         *float64 `json:"llm_first_ms"`
+	Total         *float64 `json:"llm_total_ms"`
+	TTS           *float64 `json:"tts_first_ms"`
+	E2E           *float64 `json:"e2e_ms"`
+	Gate          *float64 `json:"gate_ms"`
+	FirstSentence *float64 `json:"first_sentence_ms"`
+	TTSQueue      *float64 `json:"tts_queue_ms"`
+	TTSInfer      *float64 `json:"tts_infer_ms"`
+	Render        *float64 `json:"render_ms"`
+	FirstPCM      *float64 `json:"first_pcm_ms"`
 }
 
 type diagFrame struct {
@@ -113,16 +125,13 @@ type diagnostics struct {
 type turnTrace struct {
 	d      *diagnostics
 	record *diagTurn
-	recEnd time.Time
+	start  time.Time
 }
 
 type traceKey struct{}
 
 func (b *bridge) traceTurn(ctx context.Context, device, character, source string, at time.Time) context.Context {
-	t := &turnTrace{d: &b.diag, record: &diagTurn{TS: at.UnixMilli(), Device: device, Character: character, Source: source}}
-	if source == "voice" {
-		t.recEnd = at
-	}
+	t := &turnTrace{d: &b.diag, start: at, record: &diagTurn{TS: at.UnixMilli(), Device: device, Character: character, Source: source}}
 	b.diag.mu.Lock()
 	b.diag.turns.add(t.record, 20)
 	b.diag.mu.Unlock()
@@ -145,16 +154,32 @@ func (t *turnTrace) measure(metric diagMetric, elapsed time.Duration) {
 	value := milliseconds(elapsed)
 	t.d.mu.Lock()
 	defer t.d.mu.Unlock()
-	field := [...]**float64{&t.record.STT, &t.record.First, &t.record.Total, &t.record.TTS, &t.record.E2E}[metric]
-	if *field == nil {
+	field := [diagMetricCount]**float64{
+		diagSTT: &t.record.STT, diagLLMFirst: &t.record.First, diagLLMTotal: &t.record.Total,
+		diagTTSFirst: &t.record.TTS, diagE2E: &t.record.E2E, diagRender: &t.record.Render,
+		diagGate: &t.record.Gate, diagFirstSentence: &t.record.FirstSentence,
+		diagTTSQueue: &t.record.TTSQueue, diagTTSInfer: &t.record.TTSInfer, diagFirstPCM: &t.record.FirstPCM,
+	}[metric]
+	if field != nil && *field == nil {
 		*field = &value
-		t.d.metrics[metric].add(value, 32)
+		if metric != diagRender { // The aggregate already includes native frame samples.
+			t.d.metrics[metric].add(value, 32)
+		}
 	}
 }
 
 func (t *turnTrace) audioEnqueued(at time.Time) {
-	if t != nil && !t.recEnd.IsZero() {
-		t.measure(diagE2E, at.Sub(t.recEnd))
+	if t != nil {
+		t.firstPCM(at)
+		if t.record.Source == "voice" {
+			t.measure(diagE2E, at.Sub(t.start))
+		}
+	}
+}
+
+func (t *turnTrace) firstPCM(at time.Time) {
+	if t != nil {
+		t.measure(diagFirstPCM, at.Sub(t.start))
 	}
 }
 

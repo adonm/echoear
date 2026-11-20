@@ -123,9 +123,11 @@ function renderDiagnostics(data) {
   $("diag-system").replaceChildren(...system);
   $("diag-services").replaceChildren(...Object.entries({hex:"Hex", opencode:"OpenCode", tts:"Kokoro", opentunnel:"OpenTunnel"}).map(([key, label]) =>
     node("li", services[key] ? "is-up" : "", `${label} · ${services[key] ? (key === "opentunnel" ? "installed" : "ready") : "unavailable"}`)));
-  $("diag-latency").replaceChildren(...Object.entries({stt_ms:"Hex STT", llm_first_ms:"OpenCode TTFT", llm_total_ms:"OpenCode Total",
-    tts_first_ms:"Kokoro TTS", e2e_ms:"Voice E2E", render_ms:"SVG→RLE565 Render"}).map(([key, title]) => {
-    const m = latency[key];
+  $("diag-latency").replaceChildren(...Object.entries({stt_ms:"Hex STT", gate_ms:"OpenCode Gate",
+    llm_first_ms:"OpenCode TTFT", first_sentence_ms:"First Sentence", llm_total_ms:"OpenCode Total",
+    tts_queue_ms:"TTS Queue", tts_infer_ms:"TTS Worker", tts_first_ms:"Kokoro TTS", first_pcm_ms:"First PCM",
+    e2e_ms:"Voice E2E", render_ms:"SVG→RLE565 Render"}).map(([key, title]) => {
+    const m = latency[key] || {samples:[]};
     const card = diagTile(title, [["Last", diagMS(m.last)], ["p50 / p95", `${diagMS(m.p50)} / ${diagMS(m.p95)}`]]);
     card.append(diagSparkline(m.samples));
     if (key === "render_ms") {
@@ -160,6 +162,9 @@ function renderDiagnostics(data) {
       ["PSRAM free", diagMB(d.free_psram)], ["Uptime", diagUptime(d.uptime_s)], ["Battery", battery],
       ["Ambient RMS", diagFormat(d.ambient_rms, "", 1)], ["Volume", Number.isFinite(d.volume) ? `${d.volume}% · ${d.auto_volume ? "Auto" : "Manual"}` : "—"],
       ["Last frame", f ? `${diagBytes(f.frame_bytes)} · ${diagMS(f.render_ms)} · ${f.frame_codec}` : "—"],
+      ...(d.last_frame_rev != null ? [["LCD revision / flush", `${d.last_frame_rev} / ${diagMS(d.display_flush_ms)}`]] : []),
+      ...(d.input_drops != null ? [["Input drops", diagFormat(d.input_drops, "")]] : []),
+      ...(d.audio_drops != null ? [["PCM underruns / drops", `${diagFormat(d.audio_underruns, "")} / ${diagFormat(d.audio_drops, "")}`]] : []),
     ]);
     diagBar(card, "ESP32 CPU", d.cpu_pct);
     return card;

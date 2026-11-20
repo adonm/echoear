@@ -14,7 +14,7 @@ var appAssets = map[string][2]string{
 }
 
 func init() {
-	for _, name := range []string{"client", "api", "audio", "chat", "devices", "diag", "dom", "library", "live", "mic", "photos", "state"} {
+	for _, name := range []string{"client", "api", "audio", "chat", "devices", "diag", "dom", "library", "live", "mic", "photos", "state", "transcript"} {
 		name += ".js"
 		appAssets["/app/"+name] = [2]string{"web/" + name, "text/javascript; charset=utf-8"}
 	}

@@ -387,6 +387,7 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, str
 		}
 		usedTool = true
 	}
+	firstSentence := false
 	readFinal := func() (string, error) {
 		params := url.Values{"order": {"desc"}, "limit": {"32"}}
 		var msgs []ocMessage
@@ -410,6 +411,9 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, str
 			params.Set("cursor", next)
 		}
 		reply, final, err := finalReply(msgs, result.ID)
+		if trace != nil && !firstSentence && err == nil && strings.ContainsFunc(fenced.ReplaceAllString(reply, ""), alphaNum) {
+			trace.measure(diagFirstSentence, time.Since(start))
+		}
 		if err == nil && !usedTool && stream.tool != nil {
 			// A disconnected feed can miss tool events. Check only this turn.
 			for _, msg := range msgs {
@@ -466,8 +470,12 @@ stream:
 					event.Type == "message.part.updated" && event.Data.Part.Type == "tool" {
 					markTool()
 				}
-				if !usedTool && stream.sentence != nil || streamed.onFirst != nil {
+				if !usedTool && stream.sentence != nil || trace != nil && (!firstSentence || streamed.onFirst != nil) {
 					for _, s := range streamed.addEvent(event) {
+						if trace != nil && !firstSentence && strings.ContainsFunc(s, alphaNum) {
+							trace.measure(diagFirstSentence, time.Since(start))
+							firstSentence = true
+						}
 						if !usedTool && stream.sentence != nil {
 							stream.sentence(s)
 						}

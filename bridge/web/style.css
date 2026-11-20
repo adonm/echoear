@@ -201,6 +201,7 @@ label, legend { font-size: .8rem; color: var(--muted); }
 .chat-cat { gap: .4rem; flex-wrap: wrap; font-size: .85rem; overflow-wrap: anywhere; }
 .chat-actions { gap: .35rem; }
 #transcript { position: relative; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; padding: .9rem 1rem; }
+#load-older { display: block; margin: 0 auto .6rem; }
 .messages { display: flex; flex-direction: column; align-items: flex-start; gap: .6rem; list-style: none; margin: 0; padding: 0; }
 .empty-chat { padding: 1rem 0; color: var(--muted); text-align: center; font-size: .88rem; }
 .day { align-self: center; padding: .2rem; color: var(--muted); font-size: .72rem; }

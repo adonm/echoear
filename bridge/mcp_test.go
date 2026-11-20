@@ -256,7 +256,7 @@ func TestMCPControl(t *testing.T) {
 	}
 	b.ws.mu.Lock()
 	d := b.ws.devices[id]
-	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
+	b.ws.startTurn(d, time.Now(), false, "typed", func(context.Context, uint64) {})
 	turn := d.turn
 	b.ws.mu.Unlock()
 	out := patchControl(t, base, id, object{"volume": 0, "sleep": true})
