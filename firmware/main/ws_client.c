@@ -30,7 +30,7 @@ typedef enum { INPUT_TAP, INPUT_HEAD, REJECT_TTS, REJECT_RECORD } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
-    int action, x, y;
+    int x, y;
     char target[MEDIA_TARGET_CAP];
 } input_t;
 typedef struct {
@@ -102,9 +102,9 @@ void ws_client_tap(int x, int y)
     enqueue((input_t){ .kind = INPUT_TAP, .x = x, .y = y });
 }
 
-void ws_client_head(ws_head_action_t action, int volume)
+void ws_client_head_pet(int volume)
 {
-    enqueue((input_t){ .kind = INPUT_HEAD, .action = action, .x = volume });
+    enqueue((input_t){ .kind = INPUT_HEAD, .x = volume });
 }
 
 bool ws_client_rec_start(uint32_t session, const char *target)
@@ -156,10 +156,9 @@ static void send_input(const input_t *input)
         ws_client_rec_end(session, input->target, true);
         return;
     }
-    static const char *const head_names[] = { "pet", "vol_up", "vol_down" };
     bool head = input->kind == INPUT_HEAD;
     cJSON *json = event_json(head ? "head" : "tap");
-    bool ok = head ? cJSON_AddStringToObject(json, "action", head_names[input->action]) &&
+    bool ok = head ? cJSON_AddStringToObject(json, "action", "pet") &&
                      cJSON_AddNumberToObject(json, "volume", input->x)
                    : cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
     if (ok) send_json(session, json);
@@ -237,7 +236,11 @@ static void dispatch(const cJSON *msg)
         display_set_brightness(integer(msg, "brightness", 12, 85));
     } else if (!strcmp(op, "volume")) {
         int level = integer(msg, "level", 0, 100);
-        if (level >= 0 && audio_set_volume(level) != ESP_OK) ESP_LOGW(TAG, "Could not set volume");
+        if (level >= 0) {
+            bool live = cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(msg, "persist"));
+            esp_err_t err = live ? audio_set_volume_live(level) : audio_set_volume(level);
+            if (err != ESP_OK) ESP_LOGW(TAG, "Could not set volume");
+        }
     }
 }
 

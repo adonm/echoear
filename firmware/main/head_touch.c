@@ -14,7 +14,7 @@ esp_err_t head_touch_start(void) { return ESP_OK; }
 #include "media.h"
 #include "ws_client.h"
 
-enum { PADS = 2, SAMPLE_MS = 20, CALIBRATION_SAMPLES = 12, GESTURE_MS = 450 };
+enum { PADS = 2, SAMPLE_MS = 20, CALIBRATION_SAMPLES = 12, PET_WINDOW_MS = 450 };
 static const char *TAG = "head_touch";
 
 static esp_err_t read_pad(touch_channel_handle_t pad, uint32_t *value)
@@ -25,24 +25,6 @@ static esp_err_t read_pad(touch_channel_handle_t pad, uint32_t *value)
         *value = data[0];
     }
     return err;
-}
-
-static void step_volume(int direction)
-{
-    const int levels[] = { 45, 65, 80, 95 };
-    int current = audio_get_volume();
-    int target = current;
-    for (int i = 0; i < 4; ++i) {
-        int level = levels[direction > 0 ? i : 3 - i];
-        if ((direction > 0 && level > current) || (direction < 0 && level < current)) {
-            target = level;
-            break;
-        }
-    }
-    if (audio_set_volume(target) == ESP_OK) {
-        display_wake();
-        ws_client_head(direction > 0 ? WS_HEAD_VOL_UP : WS_HEAD_VOL_DOWN, target);
-    }
 }
 
 static void scan(touch_channel_handle_t pads[PADS], uint32_t baseline[PADS])
@@ -82,17 +64,15 @@ static void scan(touch_channel_handle_t pads[PADS], uint32_t baseline[PADS])
                 first = i;
                 start = now;
                 display_wake();
-            } else if (first != i && now - start <= GESTURE_MS) {
-                step_volume(i > first ? 1 : -1);
+            } else if (first != i && now - start <= PET_WINDOW_MS) {
+                // Only a short touch on one pad counts as a pet.
                 handled = true;
             }
         }
-        if (first >= 0 && !handled && now - start >= GESTURE_MS) {
-            if (pressed[first]) {
-                step_volume(first == 1 ? 1 : -1);
-            } else {
+        if (first >= 0 && !handled && now - start >= PET_WINDOW_MS) {
+            if (!pressed[first]) {
                 media_interrupt();
-                ws_client_head(WS_HEAD_PET, audio_get_volume());
+                ws_client_head_pet(audio_get_volume());
             }
             handled = true;
         }

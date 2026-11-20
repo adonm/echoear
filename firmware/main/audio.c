@@ -24,7 +24,7 @@ static int16_t *recording;
 static atomic_bool stop_playback;
 static atomic_bool chime_requested;
 static atomic_int volume = 78;
-static int applied_volume;
+static int saved_volume = -1;
 static SemaphoreHandle_t volume_lock;
 static size_t played_samples;
 static int chime_pos;
@@ -35,14 +35,14 @@ int audio_get_volume(void)
     return atomic_load(&volume);
 }
 
-esp_err_t audio_set_volume(int level)
+static esp_err_t set_volume(int level, bool persist)
 {
     if (level < 0 || level > 100 || !volume_lock) {
         return ESP_ERR_INVALID_ARG;
     }
     xSemaphoreTake(volume_lock, portMAX_DELAY);
     esp_err_t err = ESP_OK;
-    if (level != audio_get_volume()) {
+    if (persist && level != saved_volume) {
         nvs_handle_t nvs;
         err = nvs_open("echoear", NVS_READWRITE, &nvs);
         if (err == ESP_OK) {
@@ -53,6 +53,12 @@ esp_err_t audio_set_volume(int level)
             nvs_close(nvs);
         }
         if (err == ESP_OK) {
+            saved_volume = level;
+        }
+    }
+    if (err == ESP_OK && level != audio_get_volume()) {
+        err = esp_codec_dev_set_out_vol(speaker, level);
+        if (err == ESP_OK) {
             atomic_store(&volume, level);
         }
     }
@@ -60,13 +66,18 @@ esp_err_t audio_set_volume(int level)
     return err;
 }
 
+esp_err_t audio_set_volume(int level)
+{
+    return set_volume(level, true);
+}
+
+esp_err_t audio_set_volume_live(int level)
+{
+    return set_volume(level, false);
+}
+
 static esp_err_t write_speaker(int16_t *stereo, size_t frames)
 {
-    int level = audio_get_volume();
-    if (level != applied_volume) {
-        ESP_RETURN_ON_ERROR(esp_codec_dev_set_out_vol(speaker, level), TAG, "Set speaker volume");
-        applied_volume = level;
-    }
     return esp_codec_dev_write(speaker, stereo, frames * CHANNELS * sizeof(*stereo));
 }
 
@@ -96,12 +107,12 @@ esp_err_t audio_init(void)
     if (nvs_open("echoear", NVS_READONLY, &nvs) == ESP_OK) {
         uint8_t saved;
         if (nvs_get_u8(nvs, "volume", &saved) == ESP_OK && saved <= 100) {
+            saved_volume = saved;
             atomic_store(&volume, saved);
         }
         nvs_close(nvs);
     }
-    applied_volume = audio_get_volume();
-    ESP_GOTO_ON_ERROR(esp_codec_dev_set_out_vol(speaker, applied_volume), fail, TAG, "Set speaker volume");
+    ESP_GOTO_ON_ERROR(esp_codec_dev_set_out_vol(speaker, audio_get_volume()), fail, TAG, "Set speaker volume");
     ESP_GOTO_ON_ERROR(esp_codec_dev_open(speaker, &format), fail, TAG, "Open ES8311");
     ESP_GOTO_ON_ERROR(esp_codec_dev_open(mic, &format), fail, TAG, "Open ES7210");
     int16_t probe[FRAMES * CHANNELS];
