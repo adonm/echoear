@@ -10,7 +10,7 @@ EchoEar <-- /ws: RGB565 frames, taps, PCM --> Go bridge :8765 <-- /app: SVG --> 
 ```
 
 **Target:** EchoEar / ESP-VoCat v1.2 (ESP32-S3, 16 MB flash and 16 MB PSRAM).
-Firmware `v0.8.0` is a 1.28 MB thin client. It displays 360×360 RGB565
+Firmware `v0.8.3` is a 1.28 MB thin client. It displays 360×360 RGB565
 updates from the bridge, reports raw touch coordinates, and draws a fallback
 face offline. The bridge runs app logic and renders the display; `/app` uses native SVG.
 
@@ -77,8 +77,12 @@ face offline. The bridge runs app logic and renders the display; `/app` uses nat
 
 - Tap the cat face and speak after the tone. Pause about 2 seconds to send.
   Tap again to stop recording early or interrupt speech.
-- Pet the head pad to wake or interrupt. Slide across the pads to change
-  volume, or hold a pad for one step. The display dims after 120 seconds idle.
+- Head touch only pets, wakes, or interrupts the cat; it never changes volume.
+  The display dims after 120 seconds idle.
+- Use **Text → Vol** on the device or the volume controls in `/app` to choose
+  a level or switch back to **Auto**. Auto-volume estimates ambient noise from
+  microphone recordings and adjusts the DAC in RAM (`persist: false`), with
+  no flash wear and no ceiling below 100%.
 - **Text** opens the peer drawer, where **Voice** switches between Heart and
   Fable. **Cat** closes a diagram. Start a new chat from the LAN web console.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
@@ -180,6 +184,9 @@ in `~/.local/share/echoear/echoear.db` (or `$XDG_DATA_HOME/echoear/echoear.db`);
 0600). The first boot imports valid rows from the six legacy JSON files in that
 directory in one transaction and never modifies those backups.
 Active cat designs and reusable profiles are stored in `cats` and `saved_cats`.
+Both the device and browser use one editable `face_svg` for a cat's appearance.
+The bridge renders shared artwork and the matching `data-pose` layer:
+`idle`, `blink`, `talk`, `listen`, `think`, or `sleep`.
 The canonical `messages` table drives browser history. The v2 migration
 backfills it from legacy bridge chat events and OpenCode session history.
 New rows contain user text, final cat replies, intercom, and display cards,
