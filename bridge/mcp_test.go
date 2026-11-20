@@ -203,7 +203,13 @@ func TestMCPStateSlices(t *testing.T) {
 		"memory": []object{{"scope": "shared", "key": "score", "value": object{"points": 7}}, {"scope": id, "key": "seen", "value": []any{true, nil}}}}, false)
 	const code = `function render(s){return '<svg><text x="80" y="180">'+s.n+'</text></svg>';}`
 	toolTest(t, base, "app", object{"devices": id, "save_as": "slices", "code": code, "initial_state": object{"n": 8}}, false)
-	b.history.add(id, newChat("user", "You", "latest canonical message", "typed"))
+	history, err := b.history.read(t.Context(), id, 1)
+	if err != nil || len(history) != 1 || history[0].Source != "app" {
+		t.Fatalf("missing app history: %v (%v)", history, err)
+	}
+	message := newChat("user", "You", "latest canonical message", "typed")
+	message.Timestamp = history[0].Timestamp.Add(time.Millisecond)
+	b.history.add(id, message)
 	b.diag.mu.Lock()
 	b.diag.metrics[diagE2E].add(12, 32)
 	b.diag.mu.Unlock()
