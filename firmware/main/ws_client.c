@@ -179,8 +179,9 @@ static bool telemetry(uint32_t session, bool hello)
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
         snprintf(extra, sizeof(extra), "\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
-                 "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2",
-                 device_id, wifi_character(), ip, esp_app_get_description()->version);
+                 "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
+                 "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\"",
+                 device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT);
     } else {
         wifi_ap_record_t ap;
         snprintf(extra, sizeof(extra), "\"rssi\":%d", esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0);
@@ -188,7 +189,7 @@ static bool telemetry(uint32_t session, bool hello)
     char text[440];
     int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\",%s,\"battery_pct\":%s,\"battery_mv\":%s,"
                        "\"charging\":%s,\"volume\":%d}", hello ? "hello" : "status", extra, pct, mv,
-                       battery.charging ? "true" : "false", audio_get_volume());
+                       BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null", audio_get_volume());
     return len > 0 && (size_t)len < sizeof(text) && send_wire(session, text, len, false, hello);
 }
 

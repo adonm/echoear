@@ -52,11 +52,11 @@ static void test_raw(void)
 
     const uint8_t pixels[] = { 0xf8, 0x00, 0x07, 0xe0, 0x00, 0x1f, 0xde, 0xad, 0xbe, 0xef, 0xff, 0xff };
     uint8_t packet[FRAME_HEADER_SIZE + sizeof(pixels)];
-    header(packet, 357, 358, 3, 2, 0);
+    header(packet, FRAME_WIDTH - 3, FRAME_HEIGHT - 2, 3, 2, 0);
     memcpy(packet + FRAME_HEADER_SIZE, pixels, sizeof(pixels));
     memset(fb, SENTINEL, sizeof(fb));
-    apply(packet, sizeof(packet), 357, 358, 3, 2);
-    expect_rect(357, 358, 3, 2, pixels);
+    apply(packet, sizeof(packet), FRAME_WIDTH - 3, FRAME_HEIGHT - 2, 3, 2);
+    expect_rect(FRAME_WIDTH - 3, FRAME_HEIGHT - 2, 3, 2, pixels);
 }
 
 static void test_rle(void)
@@ -76,7 +76,7 @@ static void test_rle(void)
     expect_rect(10, 12, 1, 3, blues);
 
     // Both maximum-length runs cross non-contiguous rows near the framebuffer edge.
-    header(packet, 317, 354, 43, 6, 1);
+    header(packet, FRAME_WIDTH - 43, FRAME_HEIGHT - 6, 43, 6, 1);
     uint8_t pixels[43 * 6 * 2];
     for (unsigned i = 0; i < 128; ++i) {
         pixels[i * 2] = (uint8_t)(255 - i);
@@ -91,8 +91,8 @@ static void test_rle(void)
     memcpy(pixels + 512, tail + 4, 2);
     memcpy(pixels + 514, tail + 7, 2);
     memset(fb, SENTINEL, sizeof(fb));
-    apply(packet, sizeof(packet), 317, 354, 43, 6);
-    expect_rect(317, 354, 43, 6, pixels);
+    apply(packet, sizeof(packet), FRAME_WIDTH - 43, FRAME_HEIGHT - 6, 43, 6);
+    expect_rect(FRAME_WIDTH - 43, FRAME_HEIGHT - 6, 43, 6, pixels);
 }
 
 static void reject(const uint8_t *data, size_t len)
@@ -113,10 +113,10 @@ static void test_malformed(void)
     uint8_t packet[FRAME_HEADER_SIZE + 9] = { 0 };
     memset(fb, SENTINEL, sizeof(fb));
     const struct { unsigned x, y, w, h; uint8_t codec; } invalid[] = {
-        { 360, 0, 1, 1, 0 }, { 0, 360, 1, 1, 0 },
+        { FRAME_WIDTH, 0, 1, 1, 0 }, { 0, FRAME_HEIGHT, 1, 1, 0 },
         { 0, 0, 0, 1, 0 }, { 0, 0, 1, 0, 0 },
-        { 359, 0, 2, 1, 1 }, { 0, 359, 1, 2, 1 },
-        { 0, 0, 361, 1, 0 }, { 0, 0, 1, 361, 0 },
+        { FRAME_WIDTH - 1, 0, 2, 1, 1 }, { 0, FRAME_HEIGHT - 1, 1, 2, 1 },
+        { 0, 0, FRAME_WIDTH + 1, 1, 0 }, { 0, 0, 1, FRAME_HEIGHT + 1, 0 },
         { 65535, 65535, 65535, 65535, 0 }, { 0, 0, 1, 1, 2 },
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
@@ -124,14 +124,14 @@ static void test_malformed(void)
         reject(packet, FRAME_HEADER_SIZE + 2);
     }
 
-    header(packet, 359, 359, 1, 1, 0);
+    header(packet, FRAME_WIDTH - 1, FRAME_HEIGHT - 1, 1, 1, 0);
     packet[0] = 0x02;
     reject(packet, FRAME_HEADER_SIZE + 2);
     packet[0] = FRAME_TAG;
     reject(packet, FRAME_HEADER_SIZE + 1);
     reject(packet, FRAME_HEADER_SIZE + 3);
 
-    header(packet, 358, 358, 2, 2, 1);
+    header(packet, FRAME_WIDTH - 2, FRAME_HEIGHT - 2, 2, 2, 1);
     uint8_t mixed[] = { 0x01, 0x12, 0x34, 0x56, 0x78, 0x81, 0x9a, 0xbc };
     memcpy(packet + FRAME_HEADER_SIZE, mixed, sizeof(mixed));
     for (size_t len = 0; len < FRAME_HEADER_SIZE + sizeof(mixed); ++len) reject(packet, len);

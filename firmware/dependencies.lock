@@ -210,6 +210,6 @@ direct_dependencies:
 - espressif/esp_websocket_client
 - espressif/mdns
 - idf
-manifest_hash: 53067f13b63fa7dbc831bd3b1b2b9736049b55c3ceb94fb6a57abe1edcd7b113
+manifest_hash: 193c933aaef36020c75df8016ca1b356ec2881eca60be8eae2d6556b57517764
 target: esp32s3
 version: 2.0.0

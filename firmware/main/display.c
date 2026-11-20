@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "frame.h"
 #include "freertos/FreeRTOS.h"
@@ -21,7 +22,7 @@
 
 enum { STRIP_ROWS = 24, STRIP_BYTES = STRIP_ROWS * FRAME_WIDTH * sizeof(uint16_t), BRIGHT = 85, DIM = 12 };
 _Static_assert(BSP_LCD_H_RES == FRAME_WIDTH && BSP_LCD_V_RES == FRAME_HEIGHT && BSP_LCD_BIGENDIAN,
-               "Framebuffer must match the ST77916");
+               "Framebuffer must match the LCD geometry and byte order");
 static const char *TAG = "display";
 static esp_lcd_panel_handle_t panel;
 static esp_lcd_touch_handle_t touch;
@@ -29,6 +30,7 @@ static SemaphoreHandle_t drawn, fb_lock;
 static TaskHandle_t painter;
 static uint16_t *fb, *strip;
 static bool linked;
+static bool first_frame;
 static int dirty_top, dirty_bottom;
 static atomic_int brightness = BRIGHT;
 static atomic_uint last_touch;
@@ -89,6 +91,7 @@ void display_set_link(bool connected)
 {
     xSemaphoreTake(fb_lock, portMAX_DELAY);
     linked = connected;
+    first_frame = connected;
     if (!connected) {
         display_show_offline();
         mark_rows(0, FRAME_HEIGHT);
@@ -103,7 +106,10 @@ bool display_apply_frame(const uint8_t *data, size_t len)
     xSemaphoreTake(fb_lock, portMAX_DELAY);
     bool applied = linked && frame_apply(fb, data, len, &dirty);
     if (applied) mark_rows(dirty.y, dirty.y + dirty.h);
+    bool first = applied && first_frame;
+    if (first) first_frame = false;
     xSemaphoreGive(fb_lock);
+    if (first) ESP_LOGI(TAG, "Applied bridge frame 0x03 %ux%u (codec %u)", dirty.w, dirty.h, data[9]);
     if (applied) xTaskNotifyGive(painter);
     return applied;
 }
@@ -164,7 +170,8 @@ esp_err_t display_init(void)
     const esp_lcd_panel_io_callbacks_t callbacks = { .on_color_trans_done = color_done };
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_register_event_callbacks(io, &callbacks, drawn), TAG, "LCD DMA callback");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "Enable LCD");
-    ESP_RETURN_ON_ERROR(bsp_touch_new(NULL, &touch), TAG, "Init CST816S");
+    // BOX-3's BSP sets the panel to landscape and already aligns GT911 coordinates.
+    ESP_RETURN_ON_ERROR(bsp_touch_new(NULL, &touch), TAG, "Init " BOARD_TOUCH);
     display_show_offline();
     ESP_RETURN_ON_ERROR(blit(0, FRAME_HEIGHT), TAG, "First frame");
     ESP_RETURN_ON_ERROR(bsp_display_backlight_on(), TAG, "Enable backlight");
@@ -173,5 +180,6 @@ esp_err_t display_init(void)
     ESP_RETURN_ON_FALSE(xTaskCreate(paint_task, "painter", 4096, NULL, 3, &painter) == pdPASS &&
                         xTaskCreate(touch_task, "touch", 3072, NULL, 4, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "Display tasks");
+    ESP_LOGI(TAG, BOARD_LCD " %dx%d LCD and " BOARD_TOUCH " touch initialized", FRAME_WIDTH, FRAME_HEIGHT);
     return ESP_OK;
 }

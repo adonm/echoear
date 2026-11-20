@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-firmware=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../firmware" && pwd -P)
+scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+firmware=$(cd -- "$scripts/../firmware" && pwd -P)
+# shellcheck source=scripts/board.sh
+source "$scripts/board.sh"
 if [[ ! -f "$firmware/sdkconfig.local" ]]; then
     echo "Copy firmware/sdkconfig.local.example to firmware/sdkconfig.local and fill in your credentials." >&2
     exit 1
@@ -16,13 +19,28 @@ else
     exit 1
 fi
 
+# Let the container shell expand its own arguments and paths.
+# shellcheck disable=SC2016
 exec "${podman[@]}" run --rm --user 0 \
-    -v "$firmware:/project:Z" -w /project \
+    -v "$firmware:/project:z" -w /project \
     docker.io/espressif/idf:release-v5.5 \
     bash -ec '
         umask 077
+        build="/project/$1"
+        project="/project/$2"
+        defaults=(/project/sdkconfig.defaults)
+        if [[ $2 != . ]]; then defaults+=("$project/sdkconfig.defaults"); fi
+        defaults+=(/project/sdkconfig.local)
         # Kconfig defaults do not override an existing sdkconfig.
-        rm -f build/sdkconfig
-        idf.py -B build -D SDKCONFIG=build/sdkconfig \
-            -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.local" reconfigure build
-    '
+        actions=(build)
+        for file in "${defaults[@]}"; do
+            if [[ $file -nt "$build/sdkconfig" ]]; then
+                rm -f "$build/sdkconfig"
+                actions=(reconfigure build)
+                break
+            fi
+        done
+        IFS=";"
+        idf.py -C "$project" -B "$build" -D "SDKCONFIG=$build/sdkconfig" \
+            -D "SDKCONFIG_DEFAULTS=${defaults[*]}" "${actions[@]}"
+    ' -- "$build_dir" "$project_dir"

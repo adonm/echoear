@@ -1,5 +1,11 @@
 #include "power.h"
 
+#include "board.h"
+
+#if !BOARD_HAS_BATTERY
+battery_status_t battery_status(void) { return (battery_status_t){ .pct = -1 }; }
+esp_err_t power_start(void) { return ESP_OK; }
+#else
 #include "bsp/esp_vocat.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -68,3 +74,4 @@ esp_err_t power_start(void)
     }
     return xTaskCreate(power_task, "power", 3072, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
+#endif

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "board.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
@@ -26,14 +27,18 @@ static uint8_t device_mac_bytes[6];
 
 const char *wifi_character(void)
 {
+#ifdef ECHOEAR_BOX3
+    return "New Cat";
+#else
     static const char *const names[] = { "Mint", "Plum", "Sunny", "Cake" };
     return names[(device_mac_bytes[4] ^ device_mac_bytes[5]) % 4];
+#endif
 }
 
 esp_err_t wifi_init_identity(void)
 {
     ESP_RETURN_ON_ERROR(esp_read_mac(device_mac_bytes, ESP_MAC_WIFI_STA), TAG, "Read STA MAC");
-    snprintf(device_id, sizeof(device_id), "echoear-%02x%02x", device_mac_bytes[4], device_mac_bytes[5]);
+    snprintf(device_id, sizeof(device_id), BOARD_ID_PREFIX "%02x%02x", device_mac_bytes[4], device_mac_bytes[5]);
     snprintf(device_mac, sizeof(device_mac), MACSTR, MAC2STR(device_mac_bytes));
     return ESP_OK;
 }

@@ -1,5 +1,8 @@
 #include "head_touch.h"
 
+#ifdef ECHOEAR_BOX3
+esp_err_t head_touch_start(void) { return ESP_OK; }
+#else
 #include "audio.h"
 #include "bsp/esp_vocat.h"
 #include "display.h"
@@ -176,3 +179,4 @@ esp_err_t head_touch_start(void)
 {
     return xTaskCreate(head_task, "head_touch", 3072, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
+#endif

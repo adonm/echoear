@@ -2,6 +2,8 @@
 set -euo pipefail
 
 scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=scripts/board.sh
+source "$scripts/board.sh"
 build=1
 host=
 for arg in "$@"; do
@@ -45,17 +47,27 @@ if [[ ! ${ECHOEAR_BRIDGE_TOKEN:-} =~ ^[[:graph:]]+$ ]]; then
     echo "Set ECHOEAR_BRIDGE_TOKEN or add it to $env_file." >&2
     exit 1
 fi
+base="http://$host"
+checked_partition() {
+    python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+board = status.get("board")
+if board is None and status.get("device", "").startswith("echoear-"):
+    board = "esp-vocat"  # Legacy vocat 0.8.0 did not report its board.
+if board != sys.argv[1]:
+    actual = board or "unknown board"
+    raise SystemExit(f"OTA refused: expected {sys.argv[1]}, got {actual}")
+print(status["running_partition"])
+' "$board_name"
+}
+before=$(curl --noproxy '*' -fsS --max-time 5 "$base/status")
+slot=$(checked_partition <<<"$before")
 if (( build )); then
     "$scripts/build.sh"
 fi
-image="$scripts/../firmware/build/echoear.bin"
+image="$scripts/../firmware/$build_dir/$board_image"
 [[ -s "$image" ]] || { echo "Firmware image not found: $image" >&2; exit 1; }
-base="http://$host"
-running_partition() {
-    python3 -c 'import json, sys; print(json.load(sys.stdin)["running_partition"])'
-}
-before=$(curl --noproxy '*' -fsS --max-time 5 "$base/status")
-slot=$(running_partition <<<"$before")
 
 # Pass the header via stdin so the token is not an argument in the process list.
 printf 'X-EchoEar-Token: %s\n' "$ECHOEAR_BRIDGE_TOKEN" |
@@ -64,7 +76,7 @@ printf 'X-EchoEar-Token: %s\n' "$ECHOEAR_BRIDGE_TOKEN" |
 
 for (( attempt=0; attempt<45; attempt++ )); do
     if status=$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "$base/status" 2>/dev/null) &&
-        current=$(running_partition <<<"$status") &&
+        current=$(checked_partition <<<"$status") &&
         [[ "$current" != "$slot" && "$current" =~ ^ota_[01]$ ]]; then
         printf '%s\n' "$status"
         exit 0

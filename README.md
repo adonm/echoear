@@ -41,10 +41,10 @@ face offline. The bridge runs app logic and renders the display; `/app` uses nat
    `CONFIG_ECHOEAR_BRIDGE_URL` (`http://<bridge-host>:8765`, no trailing slash), and
    `CONFIG_ECHOEAR_BRIDGE_TOKEN` (copy `ECHOEAR_BRIDGE_TOKEN` from
    `~/.config/echoear/bridge.env`, or use `$XDG_CONFIG_HOME`).
-   The build uses the ESP-IDF 5.5 container and regenerates `build/sdkconfig`
-   from `firmware/sdkconfig.defaults` and `firmware/sdkconfig.local`.
+   Both board builds use the ESP-IDF 5.5 container and read the same
+   `firmware/sdkconfig.local`. Never commit that file or share the resulting binaries.
 
-3. Build and flash. Omit the port to flash every detected `/dev/ttyACM*`.
+3. Build and flash the EchoEar v1.2 (`vocat`, 360×360 round):
 
    ```sh
    ./scripts/build.sh
@@ -52,13 +52,25 @@ face offline. The bridge runs app logic and renders the display; `/app` uses nat
    ./scripts/monitor.sh /dev/ttyACM0
    ```
 
+   For the Espressif ESP32-S3-BOX-3 (320×240 rectangular, USB power):
+
+   ```sh
+   BOARD=box3 ./scripts/build.sh
+   BOARD=box3 ./scripts/flash-usb.sh /dev/ttyACM0
+   ```
+
+   BOX-3 builds into `firmware/build-box3/` instead of `firmware/build/`.
+   It starts with a blank cat at `box3-xxxx.local` (last four MAC digits)
+   and has no battery gauge or head-touch controls.
+
 4. Update via `./scripts/push-ota.sh <ip|host>`; add `--no-build` to reuse the
-   image. Direct OTA works without the bridge and reads the token from the
+   image, and prefix with `BOARD=box3` for BOX-3. The script refuses a board
+   mismatch. Direct OTA works without the bridge and reads the token from the
    environment or `bridge.env`. The board confirms the new image after display
    initialization and Wi-Fi DHCP; the script checks the running partition.
 
 5. Run `./scripts/check.sh` for Go vet, race tests, and host VAD, frame decoder,
-   and graphics tests (GCC).
+   and graphics tests (strict GCC with ASan/UBSan, both display sizes).
    Add `--live` to exercise the running services; ShellCheck runs if installed.
 
 ## Controls and intercom
@@ -184,7 +196,10 @@ or connectivity are required for normal local operation.
 HTTP API requests use `X-EchoEar-Token` except `/health`, `/app`, and `/status`.
 Firmware `0.8.0` announces `proto: 2` in its `/ws` hello. The pure-Go
 SVG renderer streams dirty rectangles as `0x03` RGB565 binary frames, using
-RLE565 when smaller than raw pixels. The browser receives SVG instead.
+RLE565 when smaller than raw pixels. The bridge defaults to a 360×360 round
+display for older hellos. BOX-3 announces its native size; the bridge centers
+the square artwork on its background and maps raw taps back into SVG space.
+The browser receives SVG instead.
 `0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
 little-endian mono PCM. HTTP voice
 inputs also accept WAV, up to 2 MiB. The bridge appends 150 ms of silence to
@@ -213,16 +228,17 @@ OpenCode streams its reply over SSE.
 | `GET /api/apps`, `DELETE /api/apps/{name}` | LAN-only saved apps and drawings |
 | `GET /api/timers?device_id=…`, `DELETE /api/timers/{id}` | List/cancel active timers; scoped links can see and cancel only their own cat's timers |
 | `GET /ota/version.json`, `GET /ota/latest.bin` | Build manifest or `firmware/build/echoear.bin` with SHA-256 |
+| `GET /ota/box3/version.json`, `GET /ota/box3/latest.bin` | BOX-3 manifest or `firmware/build-box3/echoear_box3.bin` with SHA-256 |
 
 Use `X-Device-Id` and `X-Character` to identify the sender. A text or reset body
 `device_id` overrides the header. Delivery reports names in `delivered_to` and IDs in `sent_to`/`failed_to`.
 
 | Device · port 80 | Request → response |
 | --- | --- |
-| `GET /status` | Identity, firmware, partition, memory, battery, volume, sleeping, and `ws_connected` |
+| `GET /status` | Identity, board, display size, firmware, partition, memory, battery, volume, sleeping, and `ws_connected` |
 | `POST /speak` | Raw PCM (1.5 MiB max) → queued sample count or 409 if busy |
 | `POST /volume` | `{"level":65}` → saved volume (0–100) |
-| `POST /ota`, `POST /ota/upload` | Pull from bridge or upload `echoear.bin` as `application/octet-stream`; reboot on success |
+| `POST /ota`, `POST /ota/upload` | Pull or upload the board's firmware (`application/octet-stream`); reboot on success |
 | `POST /reboot` | Reboot |
 
 ## Networking

@@ -1,11 +1,13 @@
 #pragma once
 
+#include "board.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-enum { FRAME_WIDTH = 360, FRAME_HEIGHT = 360, FRAME_PIXELS = FRAME_WIDTH * FRAME_HEIGHT };
-enum { FRAME_TAG = 0x03, FRAME_HEADER_SIZE = 12, FRAME_PACKET_CAP = 260 * 1024 };
+enum { FRAME_PIXELS = FRAME_WIDTH * FRAME_HEIGHT };
+enum { FRAME_TAG = 0x03, FRAME_HEADER_SIZE = 12, FRAME_PACKET_CAP = FRAME_HEADER_SIZE + FRAME_PIXELS * 2 };
 
 typedef struct {
     uint16_t x, y, w, h, rev_lo;

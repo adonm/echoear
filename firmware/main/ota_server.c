@@ -2,8 +2,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "audio.h"
+#include "board.h"
 #include "cJSON.h"
 #include "display.h"
 #include "esp_app_desc.h"
@@ -103,15 +105,17 @@ static esp_err_t status_get(httpd_req_t *request)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char json[448];
+    char json[544];
     snprintf(json, sizeof(json),
              "{\"device\":\"%s\",\"character\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"wifi_rssi\":%d,"
              "\"free_heap\":%zu,\"free_psram\":%zu,\"firmware\":\"%s\",\"running_partition\":\"%s\","
+             "\"board\":\"" BOARD_NAME "\",\"width\":%d,\"height\":%d,\"has_battery\":%s,"
              "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s}",
              device_id, wifi_character(), device_mac, ip, rssi,
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM), esp_app_get_description()->version, running->label,
-             audio_get_volume(), pct, mv, battery.charging ? "true" : "false",
+             FRAME_WIDTH, FRAME_HEIGHT, BOARD_HAS_BATTERY ? "true" : "false",
+             audio_get_volume(), pct, mv, BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null",
              display_is_sleeping() ? "true" : "false", ws_client_connected() ? "true" : "false");
     return json_response(request, json);
 }
@@ -198,10 +202,16 @@ static esp_err_t pull_headers(esp_http_client_handle_t client)
     return esp_http_client_set_header(client, "X-EchoEar-Token", CONFIG_ECHOEAR_BRIDGE_TOKEN);
 }
 
+static bool matching_board(const esp_app_desc_t *image)
+{
+    const char *project = esp_app_get_description()->project_name;
+    return strncmp(image->project_name, project, sizeof(image->project_name)) == 0;
+}
+
 static esp_err_t ota_pull_post(httpd_req_t *request)
 {
     const esp_http_client_config_t http = {
-        .url = CONFIG_ECHOEAR_BRIDGE_URL "/ota/latest.bin",
+        .url = CONFIG_ECHOEAR_BRIDGE_URL BOARD_OTA_PATH,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 15000,
         .disable_auto_redirect = true,
@@ -209,7 +219,22 @@ static esp_err_t ota_pull_post(httpd_req_t *request)
     const esp_https_ota_config_t config = {
         .http_config = &http, .http_client_init_cb = pull_headers,
     };
-    esp_err_t err = esp_https_ota(&config);
+    esp_https_ota_handle_t update = NULL;
+    esp_app_desc_t image;
+    esp_err_t err = esp_https_ota_begin(&config, &update);
+    if (err == ESP_OK) err = esp_https_ota_get_img_desc(update, &image);
+    if (err == ESP_OK && !matching_board(&image)) {
+        esp_https_ota_abort(update);
+        return text_response(request, "400 Bad Request", "Firmware is for a different board\n");
+    }
+    if (err == ESP_OK) {
+        do {
+            err = esp_https_ota_perform(update);
+        } while (err == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
+    }
+    if (err == ESP_OK && !esp_https_ota_is_complete_data_received(update)) err = ESP_ERR_INVALID_SIZE;
+    if (err == ESP_OK) err = esp_https_ota_finish(update);
+    else if (update) esp_https_ota_abort(update);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Pull failed: %s", esp_err_to_name(err));
         return text_response(request, "502 Bad Gateway", "OTA pull failed\n");
@@ -254,6 +279,10 @@ static esp_err_t ota_upload_post(httpd_req_t *request)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Verify upload: %s", esp_err_to_name(err));
         return text_response(request, "400 Bad Request", "Invalid firmware image\n");
+    }
+    esp_app_desc_t image;
+    if (esp_ota_get_partition_description(target, &image) != ESP_OK || !matching_board(&image)) {
+        return text_response(request, "400 Bad Request", "Firmware is for a different board\n");
     }
     err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {

@@ -5,7 +5,7 @@
 #include <stdatomic.h>
 #include <string.h>
 
-#include "bsp/esp_vocat.h"
+#include "bsp/esp-bsp.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -109,6 +109,7 @@ esp_err_t audio_init(void)
 
     recording = heap_caps_malloc(AUDIO_RECORD_CHUNK_SAMPLES * sizeof(*recording), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_GOTO_ON_FALSE(recording, ESP_ERR_NO_MEM, fail, TAG, "Allocate recording in PSRAM");
+    ESP_LOGI(TAG, "ES8311 speaker and ES7210 stereo microphone initialized (%d Hz Philips I2S)", AUDIO_RATE);
     return ESP_OK;
 
 fail:
@@ -173,7 +174,7 @@ esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t
     vad_t vad = { 0 };
     while (samples < MAX_FRAMES && !stop_requested()) {
         ESP_RETURN_ON_ERROR(esp_codec_dev_read(mic, stereo, sizeof(stereo)), TAG, "Read mic");
-        // The BSP uses Philips stereo; the ES7210 defaults to MIC1 and MIC2 (no TDM).
+        // Both BSPs leave ES7210 mic selection at MIC1 and MIC2 (two Philips slots, not TDM).
         uint64_t sum = 0;
         for (size_t i = 0; i < FRAMES; ++i) {
             int32_t mono = stereo[CHANNELS * i];
