@@ -123,7 +123,8 @@ func run() error {
 		hex: hex, oc: oc, pairPort: pairPort, worker: worker, chime: MakeIntercomChimePCM(), peerHTTP: pooledClient(),
 		voices:  deviceVoiceStore(db, fallbackVoice),
 		virtual: virtualStore(db), history: &chatHistory{db},
-		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
+		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")},
+		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "../firmware/build-box3")), "echoear_box3.bin")}}
 	b.ws = newWSHub(b)
 	// Session history is a one-time, retryable backfill; the LAN service and
 	// local history remain available while OpenCode is offline.

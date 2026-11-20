@@ -27,6 +27,10 @@ type wsEvent struct {
 	Character string `json:"character"`
 	Firmware  string `json:"firmware"`
 	Proto     int    `json:"proto"`
+	Width     *int   `json:"width"`
+	Height    *int   `json:"height"`
+	Shape     string `json:"shape"`
+	Board     string `json:"board"`
 	ID        string `json:"id"`
 	X         int    `json:"x"`
 	Y         int    `json:"y"`
@@ -64,6 +68,8 @@ type wsDevice struct {
 	key      string
 	firmware string
 	proto    int
+	screen   screenGeometry
+	board    string
 	theme    string
 	cat      catState
 	vol      int
@@ -492,6 +498,30 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		c.enqueue(h.peerFrame())
 		return
 	}
+	screen, board := roundScreen, ""
+	if ev.Role == "device" {
+		board = "esp-vocat"
+		if ev.Proto >= 2 {
+			if ev.Width != nil {
+				screen.width = *ev.Width
+			}
+			if ev.Height != nil {
+				screen.height = *ev.Height
+			}
+			if ev.Shape != "" {
+				screen.shape = ev.Shape
+			}
+			if ev.Board != "" {
+				board = ev.Board
+			}
+			// Bound native frames by the v2 maximum (360×360 RGB565).
+			if screen.width < 1 || screen.width > screenSize || screen.height < 1 || screen.height > screenSize ||
+				screen.shape != "round" && screen.shape != "rect" || board != "esp-vocat" && board != "esp-box-3" {
+				c.enqueue(textFrame(object{"op": "error", "status": 400, "error": "Invalid display capabilities"}))
+				return
+			}
+		}
+	}
 	character := strings.TrimSpace(ev.Character)
 	if v.ID != "" {
 		character = v.Character
@@ -512,7 +542,8 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	ip, _ := lanIP(host, true) // Advertised IP never replaces an HTTP registration.
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: peer{DeviceID: ev.DeviceID, Character: character, IP: ip},
-		firmware: shortText(ev.Firmware, 24, false), proto: ev.Proto, theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
+		firmware: shortText(ev.Firmware, 24, false), proto: ev.Proto, screen: screen, board: board,
+		theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
 	d.cat = h.b.catFor(d.who)
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
@@ -755,7 +786,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 		h.render(d, now, false)
 	case "tap", "drag", "up":
-		h.pointer(d, ev, now)
+		h.pointer(d, ev, now, c == d.client && c.role == "device" && d.proto >= 2)
 	case "head":
 		switch ev.Action {
 		case "pet":
@@ -821,9 +852,16 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	}
 }
 
-func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
-	if ev.X < 0 || ev.X > 359 || ev.Y < 0 || ev.Y > 359 || len(ev.ID) > 64 {
+func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
+	width, height := screenSize, screenSize
+	if native {
+		width, height = d.screen.width, d.screen.height
+	}
+	if ev.X < 0 || ev.X >= width || ev.Y < 0 || ev.Y >= height || len(ev.ID) > 64 {
 		return
+	}
+	if native {
+		ev.X, ev.Y = d.screen.inverseTap(ev.X, ev.Y)
 	}
 	wasAsleep := d.asleep
 	h.wake(d, now)
@@ -832,7 +870,21 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 		return
 	}
 	v2 := d.proto >= 2 || d.virtual()
+	inside := d.screen.shape != "round" || inScreenCircle(ev.X, ev.Y)
+	if v2 && ev.Event == "tap" && d.app != nil && d.svg.source == d.appView.source {
+		if i := slices.Index(d.app.devices, d); i >= 0 {
+			id := ""
+			if inside {
+				id = hitID(d.svg.hits, ev.X, ev.Y)
+			}
+			h.updateApp(d.app, i, id, ev.X, ev.Y, now)
+		}
+		return
+	}
 	if v2 && (ev.Event == "tap" || ev.Event == "drag" && d.drag == "") {
+		if !inside {
+			return
+		}
 		ev.ID = ""
 		for _, hit := range d.svg.hits {
 			if (d.scene.actions[hit.id].kind == "volume") == (ev.Event == "drag") {
@@ -842,17 +894,8 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 			}
 		}
 	}
-	if v2 && ev.Event == "tap" {
-		if d.app != nil && d.svg.source == d.appView.source {
-			i := slices.Index(d.app.devices, d)
-			if i >= 0 {
-				h.updateApp(d.app, i, hitID(d.svg.hits, ev.X, ev.Y), ev.X, ev.Y, now)
-			}
-			return
-		}
-		if ev.ID == "" {
-			return
-		}
+	if v2 && ev.Event == "tap" && ev.ID == "" {
+		return
 	}
 	if ev.Event != "tap" {
 		if ev.Event == "drag" || d.drag != "" {

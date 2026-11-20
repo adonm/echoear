@@ -215,8 +215,8 @@ func (a *appInstance) player(i int) goja.Value {
 	return v
 }
 
-func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage) (*appInstance, []svgScreen, error) {
-	a := &appInstance{spec: spec, players: players, memory: memory, scope: "app:" + spec.Name}
+func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice) (*appInstance, []svgScreen, error) {
+	a := &appInstance{spec: spec, players: players, memory: memory, devices: devices, scope: "app:" + spec.Name}
 	if spec.Code != "" {
 		if len(spec.Code) > 16<<10 {
 			return nil, nil, problem(400, "App code exceeds 16 KB")
@@ -382,18 +382,26 @@ func (a *appInstance) initVM() error {
 
 func (a *appInstance) screens() ([]svgScreen, error) {
 	out := make([]svgScreen, len(a.players))
-	if a.vm == nil {
-		screen, err := buildScreen(a.spec.SVG, true, true)
-		if err != nil {
-			return nil, err
-		}
-		for i := range out {
-			out[i] = screen
-		}
-		return out, nil
-	}
+	static := make(map[screenGeometry]svgScreen)
 	for i := range out {
 		if a.devices != nil && a.devices[i] == nil {
+			continue
+		}
+		geometry := roundScreen
+		if a.devices != nil {
+			geometry = a.devices[i].screen
+		}
+		if a.vm == nil {
+			screen, ok := static[geometry]
+			if !ok {
+				var err error
+				screen, err = buildScreen(a.spec.SVG, true, geometry)
+				if err != nil {
+					return nil, err
+				}
+				static[geometry] = screen
+			}
+			out[i] = screen
 			continue
 		}
 		value, err := a.call(a.render, a.state, a.player(i))
@@ -407,7 +415,7 @@ func (a *appInstance) screens() ([]svgScreen, error) {
 		if s.Length() > maxSVG {
 			return nil, fmt.Errorf("app.js render: SVG exceeds 64 KB")
 		}
-		out[i], err = buildScreen(s.String(), true, true)
+		out[i], err = buildScreen(s.String(), true, geometry)
 		if err != nil {
 			return nil, fmt.Errorf("render for player %d: %w", i, err)
 		}
@@ -580,7 +588,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 			memory[str(value["key"])] = value["value"].(json.RawMessage)
 		}
 	}
-	inst, screens, err := initApp(a, players, memory)
+	inst, screens, err := initApp(a, players, memory, devices)
 	if err != nil {
 		return nil, problem(400, err.Error())
 	}
@@ -598,7 +606,6 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		}
 	}
 	now := time.Now()
-	inst.devices = devices
 	if inst.tick != nil && a.TickMS != 0 {
 		inst.remaining = a.MaxTicks
 		inst.nextTick = now.Add(time.Duration(a.TickMS) * time.Millisecond)

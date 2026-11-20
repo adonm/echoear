@@ -376,6 +376,9 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 		entry["character"], entry["cat"] = d.cat.Name, d.cat.catLook
 		_, rev := d.sceneState()
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, rev, d.firmware
+		if d.board != "" {
+			entry["board"], entry["shape"], entry["width"], entry["height"] = d.board, d.screen.shape, d.screen.width, d.screen.height
+		}
 		entry["room"] = d.room
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct

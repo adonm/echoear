@@ -35,6 +35,7 @@ type bridge struct {
 	chime     []byte
 	peerHTTP  *http.Client
 	ota       otaFile
+	box3OTA   otaFile
 	ws        *wsHub
 	virtual   *store[virtualClient]
 	tunnels   *tunnelManager
@@ -711,6 +712,8 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return nil, b.audio.ServeAudio(w, r, strings.TrimPrefix(path, "/api/audio/"))
 		case path == "/ota/version.json" || path == "/ota/latest.bin":
 			return b.ota.serve(w, path == "/ota/version.json")
+		case path == "/ota/box3/version.json" || path == "/ota/box3/latest.bin":
+			return b.box3OTA.serve(w, path == "/ota/box3/version.json")
 		}
 	case http.MethodPost:
 		if path == "/api/opencode/pair" {

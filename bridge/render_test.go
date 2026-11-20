@@ -58,10 +58,11 @@ func TestSVGSanitization(t *testing.T) {
 <a href="javascript:bad()"><text x="180" y="180">bad</text></a><style>bad</style>
 <rect x="150" y="150" width="60" height="60" data-id="ok" onclick="bad()" style="bad" fill="url(https://evil.example)"/>
 </svg>`
-	got, hits, err := prepareSVG(input, true)
+	root, hits, err := prepareSVG(input, true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := svgString(root)
 	for _, bad := range []string{"onload", "onclick", "style", "DOCTYPE", "href", "evil", "foreignObject", "<script", "javascript:"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("unsafe %q survived: %s", bad, got)
@@ -136,7 +137,7 @@ func decodeDisplay(t *testing.T, f wsFrame) (image.Rectangle, uint16, []uint16) 
 }
 
 func TestDirtyRectAndRLE565(t *testing.T) {
-	var previous, next framebuffer
+	previous, next := make([]uint16, 360*360), make([]uint16, 360*360)
 	rect := image.Rect(18, 20, 280, 22)
 	for y := rect.Min.Y; y < rect.Max.Y; y++ {
 		for x := rect.Min.X; x < rect.Max.X; x++ {
@@ -147,16 +148,16 @@ func TestDirtyRectAndRLE565(t *testing.T) {
 			next[y*360+x] = p
 		}
 	}
-	if r := dirtyRect(&previous, &next); r != rect {
+	if r := dirtyRect(previous, next, roundScreen); r != rect {
 		t.Fatal(r)
 	}
-	if r := dirtyRect(&next, &next); !r.Empty() {
+	if r := dirtyRect(next, next, roundScreen); !r.Empty() {
 		t.Fatal(r)
 	}
-	if r := dirtyRect(nil, &next); r != image.Rect(0, 0, 360, 360) {
+	if r := dirtyRect(nil, next, roundScreen); r != image.Rect(0, 0, 360, 360) {
 		t.Fatal(r)
 	}
-	frame := displayFrame(&next, rect, 0x10303)
+	frame := displayFrame(next, rect, 0x10303, roundScreen.width)
 	if got := frame.data[:12]; !slices.Equal(got, []byte{3, 18, 0, 20, 0, 6, 1, 2, 0, 1, 3, 3}) {
 		t.Fatalf("header %x", got)
 	}
@@ -168,7 +169,7 @@ func TestDirtyRectAndRLE565(t *testing.T) {
 	for i := range 129 {
 		next[360+i] = uint16(i)*213 + 1
 	}
-	frame = displayFrame(&next, image.Rect(0, 1, 129, 2), 1)
+	frame = displayFrame(next, image.Rect(0, 1, 129, 2), 1, roundScreen.width)
 	_, _, p = decodeDisplay(t, frame)
 	if frame.data[9] != 0 || !slices.Equal(p, next[360:489]) || frame.data[12] != 0 || frame.data[13] != 1 {
 		t.Fatal("incompressible pixels did not use raw big-endian fallback")
@@ -181,9 +182,96 @@ func TestDirtyRectAndRLE565(t *testing.T) {
 			next[i] = 0x1234
 		}
 	}
-	frame = displayFrame(&next, image.Rect(0, 0, 300, 1), 19)
+	frame = displayFrame(next, image.Rect(0, 0, 300, 1), 19, roundScreen.width)
 	_, _, p = decodeDisplay(t, frame)
 	if frame.data[9] != 1 || !slices.Equal(p, next[:300]) {
 		t.Fatal("mixed runs did not round-trip")
 	}
+}
+
+func TestRectangularScreen(t *testing.T) {
+	geometry := screenGeometry{320, 240, "rect"}
+	const bg = svgStart + `<rect width="360" height="360" fill="#123456"/>`
+	blank, err := buildScreen(bg+`</svg>`, false, geometry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range blank.fb {
+		if p != 0x11aa {
+			t.Fatalf("background pixel %d = %04x", i, p)
+		}
+	}
+	art, err := buildScreen(bg+`<rect x="120" y="90" width="120" height="180" fill="red"/>
+		<rect width="30" height="30" fill="lime" data-id="corner"/></svg>`, false, geometry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[image.Point]uint16{
+		{0, 0}: 0x11aa, {319, 239}: 0x11aa, {40, 0}: 0x07e0,
+		{120, 60}: 0xf800, {199, 179}: 0xf800, {200, 179}: 0x11aa,
+	} {
+		if got := art.fb[p.Y*geometry.width+p.X]; got != want {
+			t.Errorf("pixel %v = %04x, want %04x", p, got, want)
+		}
+	}
+	if rect := dirtyRect(blank.fb, art.fb, geometry); rect != image.Rect(40, 0, 200, 180) {
+		t.Fatalf("dirty rectangle = %v", rect)
+	}
+	full := dirtyRect(nil, art.fb, geometry)
+	f := displayFrame(art.fb, full, 7, geometry.width)
+	if got := f.data[:12]; !slices.Equal(got, []byte{3, 0, 0, 0, 0, 64, 1, 240, 0, 1, 7, 0}) {
+		t.Fatalf("header %x", got)
+	}
+	if r, _, pixels := decodeDisplay(t, f); r != full || !slices.Equal(pixels, art.fb) {
+		t.Fatal("native frame round trip changed pixels")
+	}
+	for p, want := range map[image.Point]image.Point{
+		{0, 0}: {0, 0}, {40, 0}: {0, 0}, {42, 2}: {3, 3}, {160, 120}: {180, 180},
+		{200, 150}: {240, 225}, {279, 239}: {358, 358}, {319, 239}: {359, 358},
+	} {
+		x, y := geometry.inverseTap(p.X, p.Y)
+		if image.Pt(x, y) != want {
+			t.Errorf("tap %v mapped to %d,%d, want %v", p, x, y, want)
+		}
+	}
+}
+
+func TestBox3HelloAndRawAppTaps(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	box := testConnectWS(t, base, "unit", false)
+	round := testConnectWS(t, base, "unit", false)
+	web := testConnectWS(t, base, "unit", true)
+	const boxID, roundID = "box3-b324", "echoear-round"
+	box.json(t, object{"ev": "hello", "role": "device", "device_id": boxID, "proto": 2, "firmware": "0.8.0",
+		"width": 320, "height": 240, "shape": "rect", "board": "esp-box-3"})
+	if r, _, _ := decodeDisplay(t, box.until(t, isDisplay)); r != image.Rect(0, 0, 320, 240) {
+		t.Fatalf("BOX-3 initial frame = %v", r)
+	}
+	if r, _, _ := decodeDisplay(t, round.helloV2(t, roundID, "Cake")); r != image.Rect(0, 0, 360, 360) {
+		t.Fatalf("legacy hello initial frame = %v", r)
+	}
+	devices := testObject(t, testRequest(t, "GET", base+"/api/devices", "unit", nil, 200))["devices"].([]any)
+	boxStatus := devices[0].(object)
+	if boxStatus["device_id"] != boxID || boxStatus["board"] != "esp-box-3" ||
+		boxStatus["character"] != "New Cat" || boxStatus["cat"].(object)["configured"] != false ||
+		boxStatus["ws_connected"] != true {
+		t.Fatal(boxStatus)
+	}
+
+	web.json(t, object{"ev": "hello", "role": "web"})
+	web.json(t, object{"ev": "watch", "device_id": boxID})
+	web.until(t, hasWS("svg", "cat-ring"))
+	code := `function init(){ return {hits:"untouched"} }
+	function render(s){ return '<svg><rect width="360" height="360" fill="#123456"/>'+
+		'<rect width="30" height="30" fill="red" data-id="corner"/><text x="100" y="180">'+s.hits+'</text></svg>' }
+	function onTap(s,p,id,x,y){ s.hits=id+":"+x+","+y; }`
+	toolTest(t, base, "run_app", object{"devices": []string{boxID, roundID}, "code": code}, false)
+	web.until(t, hasWS("svg", "untouched"))
+	if r, _, _ := decodeDisplay(t, box.until(t, isDisplay)); !r.In(image.Rect(0, 0, 320, 240)) {
+		t.Fatalf("BOX-3 app sent an out-of-bounds frame: %v", r)
+	}
+	box.json(t, object{"ev": "tap", "x": 48, "y": 10})
+	web.until(t, hasWS("svg", "corner:12,15"))
+	web.json(t, object{"ev": "tap", "x": 20, "y": 18})
+	web.until(t, hasWS("svg", "corner:20,18"))
 }

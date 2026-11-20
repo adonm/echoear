@@ -29,7 +29,7 @@ func TestAppSandboxAndErrors(t *testing.T) {
 		{`function render(){return require("fs")}`, "require is not defined"},
 	} {
 		start := time.Now()
-		_, _, err := initApp(savedApp{Code: tc.code}, players, nil)
+		_, _, err := initApp(savedApp{Code: tc.code}, players, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("want %q, got %v", tc.want, err)
 		}
@@ -41,7 +41,7 @@ func TestAppSandboxAndErrors(t *testing.T) {
 		if ([typeof require,typeof process,typeof fetch,typeof setTimeout,typeof readFile].some(x=>x!=="undefined")) throw "host leak";
 		return '<svg/>';
 	} function onTap(){while(true){}}`
-	app, _, err := initApp(savedApp{Code: code}, players, nil)
+	app, _, err := initApp(savedApp{Code: code}, players, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ function render(s,p) {
 }`
 
 func TestTicTacToePersonalizedAndAuthoritative(t *testing.T) {
-	a, views, err := initApp(savedApp{Code: ticTacToe}, []appPlayer{{"a", "Cake", 0}, {"b", "Mint", 1}}, nil)
+	a, views, err := initApp(savedApp{Code: ticTacToe}, []appPlayer{{"a", "Cake", 0}, {"b", "Mint", 1}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestSVGDirtyFrameMatchesBrowserAndExit(t *testing.T) {
 		for y := rect.Min.Y; y < rect.Max.Y; y++ {
 			copy(initial[y*360+rect.Min.X:], p[(y-rect.Min.Y)*rect.Dx():(y-rect.Min.Y+1)*rect.Dx()])
 		}
-		fb, err := rasterSVG(str(o["svg"]))
+		fb, _, err := renderSVG(str(o["svg"]))
 		if err != nil || !slices.Equal(initial, fb[:]) {
 			t.Fatalf("browser SVG and device framebuffer disagree: %v", err)
 		}

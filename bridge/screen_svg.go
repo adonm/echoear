@@ -98,21 +98,24 @@ func sceneSVG(s sceneView, extras string) string {
 type svgScreen struct {
 	source string
 	hits   []hitBox
-	fb     *framebuffer
+	fb     []uint16
 }
 
-func buildScreen(raw string, exit, raster bool) (svgScreen, error) {
-	svg, hits, err := prepareSVG(raw, exit)
-	screen := svgScreen{source: svg, hits: hits}
+func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	root, hits, err := prepareSVG(raw, exit)
 	if err != nil {
-		return screen, err
+		return svgScreen{}, err
 	}
-	if raster {
-		fb, err := rasterSVG(svg)
-		screen.fb = &fb
-		return screen, err
+	screen := svgScreen{source: svgString(root), hits: hits}
+	if geometry.width != 0 {
+		screen.fb, err = rasterSVG(screen.source, geometry, root.background())
 	}
-	return screen, nil
+	return screen, err
+}
+
+func renderSVG(raw string) ([]uint16, []hitBox, error) {
+	s, err := buildScreen(raw, false, roundScreen)
+	return s.fb, s.hits, err
 }
 
 func (h *wsHub) svgFrame(d *wsDevice) wsFrame {
@@ -129,9 +132,9 @@ func (h *wsHub) pushScreen(d *wsDevice, screen svgScreen, legacy object, full bo
 		d.client.enqueue(h.svgFrame(d))
 	} else if d.proto >= 2 {
 		if screen.fb != nil {
-			rect := dirtyRect(d.svg.fb, screen.fb)
+			rect := dirtyRect(d.svg.fb, screen.fb, d.screen)
 			if !rect.Empty() {
-				d.client.enqueue(displayFrame(screen.fb, rect, d.rev))
+				d.client.enqueue(displayFrame(screen.fb, rect, d.rev, d.screen.width))
 			}
 		}
 		d.svg = screen
@@ -154,7 +157,11 @@ func (h *wsHub) renderSVGView(d *wsDevice, raw string, legacy object, full bool)
 		return
 	}
 	d.svgRaw = raw
-	screen, err := buildScreen(raw, false, d.proto >= 2 && d.client.role != "web")
+	var geometry screenGeometry
+	if d.proto >= 2 && d.client.role != "web" {
+		geometry = d.screen
+	}
+	screen, err := buildScreen(raw, false, geometry)
 	if err != nil {
 		log.Printf("EchoEar screen: %v", err)
 		if legacy == nil || d.proto >= 2 || d.client.role == "web" {

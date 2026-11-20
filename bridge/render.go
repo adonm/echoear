@@ -26,16 +26,33 @@ import (
 const screenSize = 360
 const maxSVG = 64 << 10
 
-type framebuffer = [screenSize * screenSize]uint16
+type screenGeometry struct {
+	width, height int
+	shape         string
+}
+
+var roundScreen = screenGeometry{screenSize, screenSize, "round"}
+
+func (s screenGeometry) inverseTap(x, y int) (int, int) {
+	side := min(s.width, s.height)
+	// Offsets are (dimension - side) / 2. Keep half-pixel offsets exact.
+	inverse := func(p, dimension int) int {
+		return min(screenSize-1, max(0, (2*p-dimension+side)*screenSize/(2*side)))
+	}
+	return inverse(x, s.width), inverse(y, s.height)
+}
+
+func inScreenCircle(x, y int) bool {
+	const r = screenSize / 2
+	return (x-r)*(x-r)+(y-r)*(y-r) <= r*r
+}
+
 type hitBox struct {
 	id             string
 	x1, y1, x2, y2 int
 }
 
 func hitID(hits []hitBox, x, y int) string {
-	if (x-180)*(x-180)+(y-180)*(y-180) > 180*180 {
-		return ""
-	}
 	for _, h := range hits {
 		if x >= h.x1 && x <= h.x2 && y >= h.y1 && y <= h.y2 {
 			return h.id
@@ -421,10 +438,10 @@ func outlineText(n *svgNode, inherited map[string]string) (svgBounds, bool) {
 	return b, b.x2 > b.x1
 }
 
-func prepareSVG(raw string, exit bool) (string, []hitBox, error) {
+func prepareSVG(raw string, exit bool) (*svgNode, []hitBox, error) {
 	root, err := parseSVG(raw)
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 	if exit {
 		// Match only rendered, hittable elements, not IDs hidden in definitions or comments.
@@ -491,13 +508,44 @@ func prepareSVG(raw string, exit bool) (string, []hitBox, error) {
 		return nil
 	}
 	if err := walk(root, rasterx.Identity, nil, false); err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 	slices.Reverse(hits)
-	return svgString(root), hits, nil
+	return root, hits, nil
 }
 
-func rasterSVG(svg string) (fb framebuffer, err error) {
+// A leading, solid full-viewBox rectangle is the SVG canvas background.
+func (root *svgNode) background() imagecolor.Color {
+	for _, n := range root.children {
+		if n.tag == "defs" {
+			continue
+		}
+		b, _ := n.bounds()
+		if n.tag == "rect" && b == (svgBounds{0, 0, screenSize, screenSize}) &&
+			n.attr["transform"] == "" && root.attr["transform"] == "" {
+			fill := n.attr["fill"]
+			if fill == "" {
+				fill = root.attr["fill"]
+			}
+			if c, err := oksvg.ParseSVGColor(fill); c != nil && err == nil {
+				opacity := 1.0
+				for _, attrs := range []map[string]string{root.attr, n.attr} {
+					for _, key := range []string{"opacity", "fill-opacity"} {
+						if v := attrs[key]; v != "" {
+							opacity *= clampFloat(svgNum(v), 0, 1)
+						}
+					}
+				}
+				r, g, b, _ := c.RGBA()
+				return imagecolor.RGBA{uint8(float64(r>>8) * opacity), uint8(float64(g>>8) * opacity), uint8(float64(b>>8) * opacity), 255}
+			}
+		}
+		break
+	}
+	return imagecolor.Black
+}
+
+func rasterSVG(svg string, screen screenGeometry, bg imagecolor.Color) (fb []uint16, err error) {
 	// oksvg and rasterx are also fed untrusted geometry.
 	defer func() {
 		if recover() != nil {
@@ -508,37 +556,41 @@ func rasterSVG(svg string) (fb framebuffer, err error) {
 	if err != nil {
 		return fb, fmt.Errorf("SVG: %w", err)
 	}
-	img := image.NewRGBA(image.Rect(0, 0, screenSize, screenSize))
+	w, h := screen.width, screen.height
+	side := min(w, h)
+	x, y := float64(w-side)/2, float64(h-side)/2
+	icon.SetTarget(x, y, float64(side), float64(side))
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(img, img.Bounds(), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
-	scan := rasterx.NewScannerGV(screenSize, screenSize, img, img.Bounds())
-	icon.Draw(rasterx.NewDasher(screenSize, screenSize, scan), 1)
-	for y := range screenSize {
-		for x := range screenSize {
-			if (x-180)*(x-180)+(y-180)*(y-180) <= 180*180 {
+	scan := rasterx.NewScannerGV(w, h, img, img.Bounds())
+	clip := image.Rect(int(x), int(y), int(math.Ceil(x+float64(side))), int(math.Ceil(y+float64(side))))
+	icon.Draw(rasterx.NewDasher(w, h, scan), 1)
+	fb = make([]uint16, w*h)
+	br, bgc, bb, _ := bg.RGBA()
+	bar := uint16(br>>11)<<11 | uint16(bgc>>10)<<5 | uint16(bb>>11)
+	for y := range h {
+		for x := range w {
+			dx, dy := 2*x-w, 2*y-h
+			if screen.shape == "rect" && !image.Pt(x, y).In(clip) {
+				fb[y*w+x] = bar
+			} else if screen.shape == "rect" || dx*dx+dy*dy <= side*side {
 				i := y*img.Stride + x*4
-				fb[y*screenSize+x] = uint16(img.Pix[i]&0xf8)<<8 | uint16(img.Pix[i+1]&0xfc)<<3 | uint16(img.Pix[i+2])>>3
+				fb[y*w+x] = uint16(img.Pix[i]&0xf8)<<8 | uint16(img.Pix[i+1]&0xfc)<<3 | uint16(img.Pix[i+2])>>3
 			}
 		}
 	}
 	return fb, nil
 }
 
-func renderSVG(raw string) (fb [360 * 360]uint16, hits []hitBox, err error) {
-	svg, hits, err := prepareSVG(raw, false)
-	if err == nil {
-		fb, err = rasterSVG(svg)
-	}
-	return fb, hits, err
-}
-
-func dirtyRect(prev, next *framebuffer) image.Rectangle {
+func dirtyRect(prev, next []uint16, screen screenGeometry) image.Rectangle {
+	w, h := screen.width, screen.height
 	if prev == nil {
-		return image.Rect(0, 0, 360, 360)
+		return image.Rect(0, 0, w, h)
 	}
-	minX, minY, maxX, maxY := 360, 360, 0, 0
+	minX, minY, maxX, maxY := w, h, 0, 0
 	for i, pixel := range next {
 		if pixel != prev[i] {
-			x, y := i%360, i/360
+			x, y := i%w, i/w
 			minX, minY, maxX, maxY = min(minX, x), min(minY, y), max(maxX, x+1), max(maxY, y+1)
 		}
 	}
@@ -571,10 +623,10 @@ func encodeRLE565(p []uint16) []byte {
 	return out
 }
 
-func displayFrame(fb *framebuffer, r image.Rectangle, rev uint64) wsFrame {
+func displayFrame(fb []uint16, r image.Rectangle, rev uint64, width int) wsFrame {
 	p := make([]uint16, 0, r.Dx()*r.Dy())
 	for y := r.Min.Y; y < r.Max.Y; y++ {
-		p = append(p, fb[y*360+r.Min.X:y*360+r.Max.X]...)
+		p = append(p, fb[y*width+r.Min.X:y*width+r.Max.X]...)
 	}
 	out := make([]byte, 12, 12+len(p)*2)
 	out[0] = 0x03
