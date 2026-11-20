@@ -2,16 +2,31 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"maps"
 	"net/http"
+	"os"
 	"slices"
 	"time"
 )
 
 const mcpSchemaMeta = "mcp_schema_hash"
+const mcpRuntimeContract = "2" // Bump when runtime semantics change without a schema or prompt edit.
+
+func hashMCPSchema(tools []object, instructions, runtime, prompt string) string {
+	// json.Marshal sorts map keys, including nested schema properties.
+	raw, err := json.Marshal(object{"tools": tools, "instructions": instructions, "runtime": runtime, "prompt": prompt})
+	if err != nil {
+		panic(err) // The built-in contract must be JSON-serializable.
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
 
 type compactResult struct {
 	OK        bool     `json:"ok"`
@@ -57,7 +72,15 @@ func (o *openCode) compactActiveSessions(ctx context.Context, device string) (co
 func (b *bridge) syncSchemaUpgrade(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	current := mcpSchemaHash()
+	var prompt []byte
+	if b.agentPath != "" {
+		var err error
+		prompt, err = os.ReadFile(b.agentPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read agent prompt: %w", err)
+		}
+	}
+	current := hashMCPSchema(mcpTools, mcpInstructions, mcpRuntimeContract, string(prompt))
 	previous, err := b.db.getMeta(ctx, mcpSchemaMeta)
 	if err != nil || previous == current {
 		return err

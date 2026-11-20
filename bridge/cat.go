@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -691,14 +690,4 @@ func (b *bridge) catAPI(w http.ResponseWriter, r *http.Request, path string) (an
 		return b.catTool(r.Context(), args)
 	}
 	return nil, problem(404, "Not found")
-}
-
-func catPromptContext(c catState) string {
-	if !c.Configured {
-		return ", setup"
-	}
-	if c.Personality != "" {
-		return fmt.Sprintf(", vibe: %s", c.Personality)
-	}
-	return ""
 }

@@ -3,37 +3,36 @@ package main
 import (
 	"embed"
 	"net/http"
+	"strings"
 )
 
 //go:embed web/index.html web/style.css web/*.js
 var webFiles embed.FS
 
-var appAssets = map[string][2]string{
-	"/app":           {"web/index.html", "text/html; charset=utf-8"},
-	"/app/style.css": {"web/style.css", "text/css; charset=utf-8"},
-}
-
-func init() {
-	for _, name := range []string{"client", "api", "audio", "chat", "devices", "diag", "dom", "library", "live", "mic", "photos", "state", "transcript"} {
-		name += ".js"
-		appAssets["/app/"+name] = [2]string{"web/" + name, "text/javascript; charset=utf-8"}
-	}
-}
-
 func serveApp(w http.ResponseWriter, path string) bool {
-	file, ok := appAssets[path]
-	if !ok {
+	var name, mime string
+	switch path {
+	case "/app":
+		name, mime = "index.html", "text/html; charset=utf-8"
+	case "/app/style.css":
+		name, mime = "style.css", "text/css; charset=utf-8"
+	default:
+		var ok bool
+		name, ok = strings.CutPrefix(path, "/app/")
+		if !ok || !strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".test.js") ||
+			strings.ContainsAny(name, "/\\%") || strings.Contains(name, "..") {
+			return false
+		}
+		mime = "text/javascript; charset=utf-8"
+	}
+	data, err := webFiles.ReadFile("web/" + name)
+	if err != nil {
 		return false
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src data: blob:; worker-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.Header().Set("Permissions-Policy", "microphone=(self)")
-	data, err := webFiles.ReadFile(file[0])
-	if err != nil {
-		http.Error(w, "App unavailable", 500)
-	} else {
-		sendBytes(w, 200, file[1], data)
-	}
+	sendBytes(w, 200, mime, data)
 	return true
 }

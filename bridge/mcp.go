@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,20 +23,6 @@ const (
 
 	mcpInstructions = "Use exact EchoEar device IDs. Read keyed snapshots with state, change device/cat/memory/timers with patch, run or update screens with app, and send live audio with emit. Only final assistant prose is spoken."
 )
-
-func mcpSchemaHash() string {
-	return hashMCPSchema(mcpTools, mcpInstructions)
-}
-
-func hashMCPSchema(tools []object, instructions string) string {
-	// json.Marshal sorts map keys, including nested schema properties.
-	raw, err := json.Marshal(object{"tools": tools, "instructions": instructions})
-	if err != nil {
-		panic(err) // The built-in tool schemas must be JSON-serializable.
-	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
-}
 
 type rpcRequest struct {
 	Version string          `json:"jsonrpc"`
@@ -143,7 +127,7 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 		if params["arguments"] == nil {
 			args, ok = object{}, true
 		}
-		if name == "" || !ok || !slices.ContainsFunc(mcpTools, func(tool object) bool { return tool["name"] == name }) {
+		if !ok || mcpInputSchema(name) == nil {
 			sendJSON(w, 200, rpcError(req.ID, -32602, "Unknown tool or invalid arguments"))
 			return
 		}
@@ -175,6 +159,8 @@ func mcpObject(raw []byte) (object, error) {
 	return decodeObject(raw)
 }
 
+var basicChimes = []string{"tap", "think", "intercom", "celebrate"}
+
 var mcpTools = func() []object {
 	text, number, flag := object{"type": "string"}, object{"type": "integer"}, object{"type": "boolean"}
 	enum := func(items ...string) object { return object{"type": "string", "enum": items} }
@@ -189,7 +175,7 @@ var mcpTools = func() []object {
 		return object{"name": name, "description": description, "inputSchema": in}
 	}
 	notes := object{"anyOf": []object{text, array(text)}, "description": "PITCH:MS separated by spaces or an array, e.g. C5:150 E5:150"}
-	chimes := append([]string{"tap", "think", "intercom", "celebrate"}, slices.Sorted(maps.Keys(sfxPresets))...)
+	chimes := append(slices.Clone(basicChimes), slices.Sorted(maps.Keys(sfxPresets))...)
 	memory := schema(object{"op": enum("set", "delete"), "scope": text, "key": text, "value": object{},
 		"expected_version": object{"type": "integer", "minimum": 0, "description": "Require this version; 0 means absent"}}, "scope", "key")
 	jsonObject := object{"type": "object", "additionalProperties": true}
@@ -201,9 +187,11 @@ var mcpTools = func() []object {
 			schema(object{"device_id": text,
 				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": text}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
-					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"}, "slug": text, "configured": flag}),
+					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"},
+					"slug": object{"type": "string", "description": "Saved cat slug for load/delete_saved"}, "configured": flag,
+					"save_profile": object{"type": "boolean", "description": "Save an updated cat as a reusable profile"}}),
 				"memory": object{"anyOf": []object{memory, array(memory)}},
-				"timer":  schema(object{"op": enum("set", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag, "app": text})})),
+				"timer":  schema(object{"op": enum("set", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),
 		tool("app", "Display SVG, launch/load/save/delete an app or drawing, exit to the cat, or shallow-patch one running JS app without restarting. One shared state renders separately for each player.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
@@ -212,6 +200,52 @@ var mcpTools = func() []object {
 				"notes": notes, "sfx": enum(chimes...), "chime": enum(chimes...)}, "to")),
 	}
 }()
+
+func mcpInputSchema(name string) object {
+	for _, tool := range mcpTools {
+		if tool["name"] == name {
+			return tool["inputSchema"].(object)
+		}
+	}
+	return nil
+}
+
+// Check closed objects against the published schema before dispatch. Leave
+// value constraints and operation-specific fields to the runtime decoders.
+func checkMCPFields(value any, schema object, path string) error {
+	if branches, ok := schema["anyOf"].([]object); ok {
+		for _, branch := range branches {
+			if err := checkMCPFields(value, branch, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	switch v := value.(type) {
+	case object:
+		if schema["additionalProperties"] == false {
+			props := schema["properties"].(object)
+			for _, key := range slices.Sorted(maps.Keys(v)) {
+				child, ok := props[key].(object)
+				if !ok {
+					return fieldError(path+key, "unknown argument")
+				}
+				if err := checkMCPFields(v[key], child, path+key+"."); err != nil {
+					return err
+				}
+			}
+		}
+	case []any:
+		if item, ok := schema["items"].(object); ok {
+			for _, value := range v {
+				if err := checkMCPFields(value, item, path); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
 
 func (b *bridge) lookupDevice(id string) (peer, error) {
 	p, _, err := b.findDevice(id)
@@ -285,6 +319,9 @@ func mcpUint(args object, key string) (*uint64, error) {
 }
 
 func (b *bridge) callMCP(ctx context.Context, name string, args object) (object, error) {
+	if err := checkMCPFields(args, mcpInputSchema(name), ""); err != nil {
+		return nil, err
+	}
 	switch name {
 	case "state":
 		return b.mcpState(ctx, args)
@@ -435,7 +472,7 @@ func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object,
 }
 
 func validChime(kind string) bool {
-	return kind == "tap" || kind == "think" || kind == "intercom" || kind == "celebrate"
+	return slices.Contains(basicChimes, kind)
 }
 
 func (h *wsHub) chime(d *wsDevice, kind string) {

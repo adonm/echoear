@@ -27,23 +27,34 @@ const (
 	heartVoice = "af_heart"
 )
 
-// The first four voices fit on the device picker; the browser offers all of them.
-var voiceCatalog = [...]struct {
+type voiceChoice struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-}{
-	{heartVoice, "Heart"}, {fableVoice, "Fable"}, {emmaVoice, "Emma"}, {"bm_george", "George"},
-	{"bf_alice", "Alice"}, {"bf_isabella", "Isabella"}, {"bf_lily", "Lily"}, {"bm_daniel", "Daniel"}, {"bm_lewis", "Lewis"},
+	Lang string `json:"lang"`
 }
 
-func voiceName(id string) string {
+var voiceCatalog = [...]voiceChoice{
+	{heartVoice, "Heart", "en-us"},
+	{fableVoice, "Fable", "en-gb"},
+	{emmaVoice, "Emma", "en-gb"},
+	{"bm_george", "George", "en-gb"},
+	{"bf_alice", "Alice", "en-gb"},
+	{"bf_isabella", "Isabella", "en-gb"},
+	{"bf_lily", "Lily", "en-gb"},
+	{"bm_daniel", "Daniel", "en-gb"},
+	{"bm_lewis", "Lewis", "en-gb"},
+}
+
+func voiceByID(id string) voiceChoice {
 	for _, voice := range voiceCatalog {
 		if voice.ID == id {
-			return voice.Name
+			return voice
 		}
 	}
-	return ""
+	return voiceChoice{}
 }
+
+func voiceName(id string) string { return voiceByID(id).Name }
 
 type deviceVoices struct {
 	*store[string]

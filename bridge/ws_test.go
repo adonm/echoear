@@ -951,7 +951,17 @@ func syncOnceClose(ch chan struct{}) func() {
 
 func TestEmbeddedApp(t *testing.T) {
 	b := &bridge{}
-	for _, path := range []string{"/", "/app", "/app/style.css", "/app/client.js", "/app/mic.js"} {
+	assets, err := webFiles.ReadDir("web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{"/", "/app", "/app/style.css"}
+	for _, f := range assets {
+		if strings.HasSuffix(f.Name(), ".js") && !strings.HasSuffix(f.Name(), ".test.js") {
+			paths = append(paths, "/app/"+f.Name())
+		}
+	}
+	for _, path := range paths {
 		w := httptest.NewRecorder()
 		b.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 		if path == "/" {
@@ -960,9 +970,19 @@ func TestEmbeddedApp(t *testing.T) {
 			}
 		} else if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Referrer-Policy") != "no-referrer" {
 			t.Fatalf("%s: missing app asset or security headers", path)
+		} else if strings.HasSuffix(path, ".js") && (w.Header().Get("Content-Type") != "text/javascript; charset=utf-8" ||
+			w.Header().Get("Cache-Control") != "no-store") {
+			t.Fatalf("%s: wrong module headers: %v", path, w.Header())
 		} else if path == "/app" && (!strings.Contains(w.Body.String(), `viewBox="0 0 360 360"`) || !strings.Contains(w.Body.String(), "New Chat") ||
 			!strings.Contains(w.Body.String(), `Join as Phone Cat`)) {
 			t.Fatal("app is missing its SVG or phone controls")
+		}
+	}
+	for _, path := range []string{"/app/mic.test.mjs", "/app/mic.test.js", "/app/missing.js", "/app/../client.js", "/app/%2e%2e/client.js", "/app/%2flive.js"} {
+		w := httptest.NewRecorder()
+		b.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 404 {
+			t.Errorf("%s = HTTP %d, want 404", path, w.Code)
 		}
 	}
 }

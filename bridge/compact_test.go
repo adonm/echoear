@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,20 +19,26 @@ import (
 )
 
 func TestMCPSchemaHash(t *testing.T) {
-	original := mcpSchemaHash()
-	if raw, err := hex.DecodeString(original); err != nil || len(raw) != 32 || original != mcpSchemaHash() {
+	original := hashMCPSchema(mcpTools, mcpInstructions, mcpRuntimeContract, "")
+	if raw, err := hex.DecodeString(original); err != nil || len(raw) != 32 || original != hashMCPSchema(mcpTools, mcpInstructions, mcpRuntimeContract, "") {
 		t.Fatal("schema hash is not a deterministic SHA-256 hex digest")
 	}
 	for _, key := range []string{"name", "description", "inputSchema"} {
 		tools := slices.Clone(mcpTools)
 		tools[0] = maps.Clone(tools[0])
 		tools[0][key] = "changed"
-		if hashMCPSchema(tools, mcpInstructions) == original {
+		if hashMCPSchema(tools, mcpInstructions, mcpRuntimeContract, "") == original {
 			t.Errorf("changing %s did not change the schema hash", key)
 		}
 	}
-	if hashMCPSchema(mcpTools, mcpInstructions+" More instructions.") == original {
-		t.Error("changing instructions did not change the schema hash")
+	for _, tc := range []struct{ name, instructions, runtime, prompt string }{
+		{"instructions", "New instructions.", mcpRuntimeContract, ""},
+		{"runtime", mcpInstructions, "new runtime", ""},
+		{"agent prompt", mcpInstructions, mcpRuntimeContract, "New agent prompt."},
+	} {
+		if hashMCPSchema(mcpTools, tc.instructions, tc.runtime, tc.prompt) == original {
+			t.Errorf("changing %s did not change the schema hash", tc.name)
+		}
 	}
 }
 
@@ -97,12 +104,18 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	promptPath := filepath.Join(t.TempDir(), "echoear.md")
+	const prompt = "New agent prompt."
+	if err := os.WriteFile(promptPath, []byte(prompt), 0600); err != nil {
+		t.Fatal(err)
+	}
 	open := func(db *bridgeDB) *bridge {
 		o := newOpenCode(ctx, upstream{"OpenCode", api.Client(), fixedEndpoint{base: api.URL}}, db, "/workspace", ocSettings{})
-		return &bridge{oc: o, db: db}
+		return &bridge{oc: o, db: db, agentPath: promptPath}
 	}
 	b := open(testDB(t, dbPath, ""))
-	if err := b.db.setMeta(ctx, mcpSchemaMeta, "old"); err != nil {
+	previous := hashMCPSchema(mcpTools, mcpInstructions, mcpRuntimeContract, "Old agent prompt.")
+	if err := b.db.setMeta(ctx, mcpSchemaMeta, previous); err != nil {
 		t.Fatal(err)
 	}
 	for id, sid := range map[string]string{"Cake": "ses-cake", "Mint": "ses-mint", "fresh": "ses-fresh", "stale": "ses-stale", "empty": ""} {
@@ -119,7 +132,7 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	first := make(chan error, 1)
 	go func() { first <- b.syncSchemaUpgrade(ctx) }()
 	expectValue(t, waiting, struct{}{})
-	checkMeta("old") // The /compact response admitted the request but hasn't finished it.
+	checkMeta(previous) // The /compact response admitted the request but hasn't finished it.
 	gate, stop := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer stop()
 	if unlock, err := b.oc.lock(gate, "Cake"); err == nil {
@@ -130,7 +143,7 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	if err := <-first; err == nil {
 		t.Fatal("failed compaction was treated as a successful upgrade")
 	}
-	checkMeta("old")
+	checkMeta(previous)
 	mu.Lock()
 	calls = nil
 	mu.Unlock()
@@ -138,7 +151,7 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	if err := b.syncSchemaUpgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
-	checkMeta(mcpSchemaHash())
+	checkMeta(hashMCPSchema(mcpTools, mcpInstructions, mcpRuntimeContract, prompt))
 	if err := b.db.Close(); err != nil {
 		t.Fatal(err)
 	}

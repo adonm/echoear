@@ -29,7 +29,7 @@ function select(d, quick = false) {
   const id = d?.device_id || "";
   if (id === state.view?.id) return;
   state.view?.loading?.abort();
-  // A fresh socket keeps unlabelled SVG frames from crossing selections.
+  // Virtual cats identify themselves per socket; never reuse their audio connection.
   disconnect();
   state.view = {id, device:d, virtual:d?.kind === "virtual", quick};
   setVolume(d?.volume ?? 55);
@@ -212,6 +212,7 @@ function command(msg) {
       break;
     }
     case "svg": {
+      if (msg.device_id !== state.view.id) return;
       const first = !state.rev;
       const svg = new DOMParser().parseFromString(msg.svg, "image/svg+xml").documentElement;
       if (svg.localName !== "svg" || svg.namespaceURI !== svgNS || svg.getAttribute("viewBox") !== "0 0 360 360") return;

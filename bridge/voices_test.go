@@ -1,8 +1,9 @@
 package main
 
 import (
-	"bytes"
+	"encoding/json"
 	"net/http/httptest"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -10,17 +11,50 @@ import (
 )
 
 func TestTTSVoiceFrame(t *testing.T) {
-	for _, tc := range []struct{ voice, encoded string }{
-		{fableVoice, fableVoice},
-		{heartVoice, heartVoice},
-		{"unsupported", heartVoice},
-		{"", heartVoice},
-	} {
+	check := func(id, wantVoice, wantLang string) {
+		t.Helper()
 		const text = "Café"
-		want := []byte(string(rune(len(tc.encoded))) + "\x00\x00\x00" + tc.encoded + "\x05\x00\x00\x00" + text)
-		if got := ttsFrame(tc.voice, text); !bytes.Equal(got, want) {
-			t.Errorf("ttsFrame(%q) = %q, want %q", tc.voice, got, want)
+		got := ttsFrame(id, text)
+		n := le.Uint32(got)
+		var meta ttsVoiceRequest
+		if err := json.Unmarshal(got[4:4+n], &meta); err != nil || meta != (ttsVoiceRequest{wantVoice, wantLang}) {
+			t.Errorf("ttsFrame(%q) metadata = %+v (%v)", id, meta, err)
 		}
+		if rest := got[4+n:]; le.Uint32(rest) != uint32(len(text)) || string(rest[4:]) != text {
+			t.Errorf("ttsFrame(%q) text = %q", id, rest)
+		}
+	}
+	for _, voice := range voiceCatalog {
+		lang := "en-gb"
+		if voice.ID == heartVoice {
+			lang = "en-us"
+		}
+		check(voice.ID, voice.ID, lang)
+	}
+	check("unsupported", heartVoice, "en-us")
+	check("", heartVoice, "en-us")
+}
+
+func TestTTSWorkerVoiceRequest(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	const script = `
+from tts_worker import UnknownVoice, voice_request
+available = {"bf_test"}
+assert voice_request(b'{"voice":"bf_test","lang":"en-gb"}', available) == ("bf_test", "en-gb")
+assert voice_request(b'{"voice":"bf_test"}', available) == ("bf_test", "en-us")
+assert voice_request(b'bf_test', available) == ("bf_test", "en-us")
+try:
+    voice_request(b'{"voice":"unsupported","lang":"en-us"}', available)
+except UnknownVoice:
+    pass
+else:
+    raise AssertionError("unknown voice accepted")
+`
+	if out, err := exec.CommandContext(t.Context(), python, "-B", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("worker voice contract: %v\n%s", err, out)
 	}
 }
 

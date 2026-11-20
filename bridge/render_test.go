@@ -693,7 +693,10 @@ func TestBox3HelloAndRawAppTaps(t *testing.T) {
 
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.json(t, object{"ev": "watch", "device_id": boxID})
-	web.until(t, hasWS("svg", "cat-ring"))
+	boxFrame := web.until(t, hasWS("svg", "cat-ring"))
+	if got := testObject(t, boxFrame.data)["device_id"]; got != boxID {
+		t.Fatalf("BOX-3 mirror tag = %v", got)
+	}
 	code := `function init(){ return {hits:"untouched"} }
 	function render(s){ return '<svg><rect width="360" height="360" fill="#123456"/>'+
 		'<rect width="30" height="30" fill="red" data-id="corner"/><text x="100" y="180">'+s.hits+'</text></svg>' }
@@ -707,4 +710,6 @@ func TestBox3HelloAndRawAppTaps(t *testing.T) {
 	web.until(t, hasWS("svg", "corner:12,15"))
 	web.json(t, object{"ev": "tap", "x": 20, "y": 18})
 	web.until(t, hasWS("svg", "corner:20,18"))
+	web.json(t, object{"ev": "watch", "device_id": roundID})
+	web.until(t, hasWS("svg", `"device_id":"`+roundID+`"`))
 }

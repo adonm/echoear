@@ -193,13 +193,6 @@ func (b *bridge) patchDevice(ctx context.Context, id string, args object) (objec
 	if hasVoice && !b.voices.allowed(str(voice)) {
 		return nil, problem(400, "Unsupported voice")
 	}
-	for k := range args {
-		switch k {
-		case "voice", "volume", "auto_volume", "sleep":
-		default:
-			return nil, fieldError("device", "unknown field %q", k)
-		}
-	}
 	if b.ws == nil {
 		return nil, problem(503, "Device hub unavailable")
 	}

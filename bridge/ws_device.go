@@ -742,7 +742,7 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 				}
 			}
 			screen.render += time.Since(start)
-			svgWire = textFrame(object{"op": "svg", "rev": rev, "svg": screen.source})
+			svgWire = textFrame(object{"op": "svg", "device_id": d.who.DeviceID, "rev": rev, "svg": screen.source})
 		}
 
 		h.mu.Lock()

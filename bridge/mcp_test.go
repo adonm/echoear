@@ -146,6 +146,35 @@ func TestMCPProtocol(t *testing.T) {
 	}
 }
 
+func TestMCPClosedArguments(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	for _, tc := range []struct {
+		tool string
+		args object
+		path string
+	}{
+		{"state", object{"include": []string{}, "device": "typo"}, "device"},
+		{"patch", object{"device_id": "test", "cat": object{"save_profle": true}}, "cat.save_profle"},
+		{"patch", object{"timer": object{"seconds": 5}}, "timer.seconds"},
+		{"patch", object{"memory": []object{{"scope": "shared", "key": "k", "value": 1, "typo": 2}}}, "memory.typo"},
+		{"app", object{"delete_saved": "sample", "typo": true}, "typo"},
+		{"emit", object{"to": "all", "intercom": object{"from": "test", "text": "Hello", "typo": 1}}, "intercom.typo"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			out := toolTest(t, base, tc.tool, tc.args, true)
+			if out["error"] != tc.path+": unknown argument" {
+				t.Fatal(out)
+			}
+		})
+	}
+	mem := object{"device_id": []any{1, nil, object{"anything": true}}}
+	toolTest(t, base, "patch", object{"memory": object{"scope": "shared", "key": "flex", "value": mem}}, false)
+	out := toolTest(t, base, "state", object{"include": []string{"memory"}}, false)
+	if v := out["memory"].(object)["shared"].(object)["flex"].(object)["value"].(object); len(v["device_id"].([]any)) != 3 {
+		t.Fatal(v)
+	}
+}
+
 func stateMe(t *testing.T, base, id string) object {
 	t.Helper()
 	return toolTest(t, base, "state", object{"device_id": id, "include": []string{}}, false)["me"].(object)
@@ -170,7 +199,7 @@ func TestMCPStateSlices(t *testing.T) {
 		defer b.ws.mu.Unlock()
 		return b.ws.devices[id].telemetry.WiFi != nil
 	})
-	toolTest(t, base, "patch", object{"device_id": id, "cat": object{"name": "Slices"}, "timer": object{"in_seconds": 300},
+	toolTest(t, base, "patch", object{"device_id": id, "cat": object{"name": "Slices", "save_profile": true}, "timer": object{"in_seconds": 300, "chime": "tap"},
 		"memory": []object{{"scope": "shared", "key": "score", "value": object{"points": 7}}, {"scope": id, "key": "seen", "value": []any{true, nil}}}}, false)
 	const code = `function render(s){return '<svg><text x="80" y="180">'+s.n+'</text></svg>';}`
 	toolTest(t, base, "app", object{"devices": id, "save_as": "slices", "code": code, "initial_state": object{"n": 8}}, false)

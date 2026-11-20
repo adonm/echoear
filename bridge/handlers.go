@@ -22,6 +22,7 @@ type bridge struct {
 	db        *bridgeDB
 	root      context.Context
 	token     string
+	agentPath string
 	peers     peers
 	hex       hexClient
 	oc        *openCode
@@ -237,22 +238,38 @@ type delivery struct {
 	sent, delivered, failed []string
 }
 
+func intercomConfirmation(target string, recipients []peer, sent, partial bool) (title, reply string) {
+	if broadcast(target) {
+		target = "everyone"
+	} else if len(recipients) != 0 {
+		target = recipients[0].Character
+	}
+	switch {
+	case !sent:
+		return "Not delivered", "I couldn't reach " + target + " right now."
+	case partial:
+		return "Partly delivered", "I sent your message, but couldn't reach everyone."
+	default:
+		return "Message sent", "Sent to " + target + "!"
+	}
+}
+
+func (b *bridge) intercomIntent(id, text string) ([]peer, *intercomMessage, error) {
+	body := directBody(text)
+	if body == "" {
+		return nil, nil, nil
+	}
+	others, err := b.peerSnapshot(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return others, directMessage(others, body), nil
+}
+
 func (b *bridge) relay(ctx context.Context, sender peer, others []peer, target, text string) (answer, error) {
 	recipients := b.intercomTargets(others, target)
 	d := b.deliver(ctx, sender, recipients, text, nil)
-	recipient := target
-	if broadcast(target) {
-		recipient = "everyone"
-	} else if len(recipients) > 0 {
-		recipient = recipients[0].Character
-	}
-	ok := len(d.delivered) > 0
-	reply := "Sent to " + recipient + "!"
-	if !ok {
-		reply = "I couldn't reach " + recipient + " right now."
-	} else if len(d.failed) != 0 {
-		reply = "I sent your message, but couldn't reach everyone."
-	}
+	_, reply := intercomConfirmation(target, recipients, len(d.delivered) != 0, len(d.failed) != 0)
 	sid, err := b.oc.get(sender.DeviceID)
 	if err != nil {
 		return answer{}, err
@@ -275,15 +292,13 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string) (answer, er
 	if traceFrom(ctx) == nil {
 		ctx = b.traceTurn(ctx, sender.DeviceID, b.catFor(sender).Name, source, time.Now())
 	}
-	if body := directBody(text); body != "" {
-		others, err := b.peerSnapshot(sender.DeviceID)
-		if err != nil {
-			return answer{}, err
-		}
-		if direct := directMessage(others, body); direct != nil {
-			b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
-			return b.relay(ctx, sender, others, direct.target, direct.text)
-		}
+	others, direct, err := b.intercomIntent(sender.DeviceID, text)
+	if err != nil {
+		return answer{}, err
+	}
+	if direct != nil {
+		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
+		return b.relay(ctx, sender, others, direct.target, direct.text)
 	}
 	options := turnOptions{source: source}
 	gen, err := b.generateReply(ctx, b.root, sender, text, options)

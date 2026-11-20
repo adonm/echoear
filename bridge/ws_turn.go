@@ -307,17 +307,15 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 			}
 		}
 	}
-	if body := directBody(text); body != "" {
-		others, err := h.peerSnapshot(d.who.DeviceID)
-		if err != nil || ctx.Err() != nil {
-			h.turnError(d, id, "Could not find nearby cats.")
-			return
-		}
-		if direct := directMessage(others, body); direct != nil {
-			h.b.chat(d.who.DeviceID, newChat("user", "You", text, source), true)
-			h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
-			return
-		}
+	others, direct, err := h.b.intercomIntent(d.who.DeviceID, text)
+	if err != nil || others != nil && ctx.Err() != nil {
+		h.turnError(d, id, "Could not find nearby cats.")
+		return
+	}
+	if direct != nil {
+		h.b.chat(d.who.DeviceID, newChat("user", "You", text, source), true)
+		h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
+		return
 	}
 	if h.b.oc == nil {
 		h.turnError(d, id, "Chat is not ready yet.")
@@ -347,19 +345,7 @@ func (h *wsHub) sendIntercom(ctx context.Context, d *wsDevice, id uint64, others
 }
 
 func (h *wsHub) confirm(ctx context.Context, d *wsDevice, id uint64, target string, recipients []peer, sent, partial bool) {
-	if broadcast(target) {
-		target = "everyone"
-	} else if len(recipients) != 0 {
-		target = recipients[0].Character
-	}
-	reply := "Sent to " + target + "!"
-	title := "Message sent"
-	switch {
-	case !sent:
-		reply, title = "I couldn't reach "+target+" right now.", "Not delivered"
-	case partial:
-		reply, title = "I sent your message, but couldn't reach everyone.", "Partly delivered"
-	}
+	title, reply := intercomConfirmation(target, recipients, sent, partial)
 	view := noticeScene(title, reply)
 	h.sayTurn(ctx, d, id, reply, &view)
 }

@@ -131,8 +131,9 @@ func run() error {
 	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
 		hex: hex, oc: oc, pairPort: pairPort, worker: worker,
-		voices:  deviceVoiceStore(db, fallbackVoice),
-		virtual: virtualStore(db), history: &chatHistory{db},
+		agentPath: filepath.Join(project, "../agents/echoear.md"),
+		voices:    deviceVoiceStore(db, fallbackVoice),
+		virtual:   virtualStore(db), history: &chatHistory{db},
 		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")},
 		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "../firmware/build-box3")), "echoear_box3.bin")}}
 	b.ws = newWSHub(b)

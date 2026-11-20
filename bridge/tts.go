@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -100,12 +101,19 @@ func (p *workerProcess) stop() {
 	p.out.Close()
 }
 
-func ttsFrame(voice, text string) []byte {
-	if voiceName(voice) == "" {
-		voice = heartVoice
+type ttsVoiceRequest struct {
+	Voice string `json:"voice"`
+	Lang  string `json:"lang"`
+}
+
+func ttsFrame(id, text string) []byte {
+	voice := voiceByID(id)
+	if voice.ID == "" {
+		voice = voiceByID(heartVoice)
 	}
-	request := make([]byte, 0, 8+len(voice)+len(text))
-	request = append(le.AppendUint32(request, uint32(len(voice))), voice...)
+	meta, _ := json.Marshal(ttsVoiceRequest{voice.ID, voice.Lang})
+	request := make([]byte, 0, 8+len(meta)+len(text))
+	request = append(le.AppendUint32(request, uint32(len(meta))), meta...)
 	return append(le.AppendUint32(request, uint32(len(text))), text...)
 }
 
