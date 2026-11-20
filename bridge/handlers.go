@@ -320,65 +320,95 @@ func turnPrompt(sender peer, web bool, source, text string, cat catState) string
 	return fmt.Sprintf("[%s (%s) · %s · %s%s]\n%s", cat.Name, sender.DeviceID, kind, source, extra, text)
 }
 
-// SSE overlaps synthesis with the turn. Only the verified final reply is audible.
+// Play plain prose as soon as the first PCM is ready; reconcile against the
+// authoritative reply before finishing the stream.
 func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text string, options turnOptions) (generatedReply, error) {
 	if traceFrom(ctx) == nil {
 		ctx = b.traceTurn(ctx, sender.DeviceID, b.catFor(sender).Name, options.source, time.Now())
 	}
-	makeSpeech := func() *speechTurn {
+	makeSpeech := func(onFirst func(*AudioStream)) *speechTurn {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			deadline = time.Now().Add(turnTimeout)
 		}
 		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
-		return newSpeechTurn(audioCtx, cancel, b.worker, b.voiceFor(sender))
+		return newSpeechTurn(audioCtx, cancel, b.worker, b.voiceFor(sender), onFirst)
 	}
+	var mu sync.Mutex
 	var eager *speechTurn
-	onSentence := func(s string) {
-		if b.worker == nil || !b.worker.ready.Load() {
+	var ttsStart time.Time
+	published := false
+	drop := func(abort bool) {
+		if eager == nil {
 			return
 		}
-		if eager == nil {
-			eager = makeSpeech()
+		if abort && published {
+			options.publish(nil, time.Time{})
 		}
-		eager.send(s)
+		eager.discard()
+		eager = nil
+		published = false
 	}
+	onSentence := func(s string) {
+		start := time.Now()
+		clean, err := spokenText(s)
+		if err != nil || b.worker == nil || !b.worker.ready.Load() {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if eager == nil {
+			ttsStart = start
+			eager = makeSpeech(func(stream *AudioStream) {
+				mu.Lock()
+				defer mu.Unlock()
+				if options.publish != nil && !published && eager != nil && eager.stream == stream && ctx.Err() == nil {
+					options.publish(stream, start)
+					published = true
+				}
+			})
+		}
+		eager.send(clean)
+	}
+	pieces := turnStream{sentence: onSentence, tool: func() {
+		mu.Lock()
+		defer mu.Unlock()
+		drop(true)
+	}}
 	prepare := func() (string, string) {
 		cat := b.catFor(sender)
 		return cat.Name, turnPrompt(sender, options.web, options.source, text, cat)
 	}
-	raw, sid, err := b.oc.askPrepared(ctx, sender.DeviceID, prepare, onSentence, options.source, nil, func(entry chatEntry) {
+	raw, sid, err := b.oc.askPrepared(ctx, sender.DeviceID, prepare, pieces, options.source, nil, func(entry chatEntry) {
 		if entry.Role == "assistant" {
 			entry.Sender = b.catFor(sender).Name
 		}
 		b.chat(sender.DeviceID, entry, true)
 	})
+	mu.Lock()
+	defer mu.Unlock()
 	if err != nil {
-		if eager != nil {
-			eager.discard()
-		}
+		drop(true)
 		return generatedReply{}, err
 	}
 	reply := strings.TrimSpace(fenced.ReplaceAllString(raw, ""))
-	ttsStart := time.Now()
 	var stream *AudioStream
 	clean, speechErr := spokenText(reply)
 	if speechErr == nil && (eager != nil || b.worker != nil && b.worker.ready.Load()) {
 		final := SplitSentences(clean)
-		if eager == nil {
-			eager = makeSpeech()
-		}
-		if !eager.complete(final) {
-			eager.discard()
-			eager = makeSpeech()
+		if eager == nil || !eager.complete(final) {
+			drop(false) // Publishing its replacement invalidates the old generation.
+			ttsStart = time.Now()
+			eager = makeSpeech(nil)
 			eager.complete(final)
 		}
 		stream = eager.stream
-		if options.publish != nil {
+		if options.publish != nil && !published {
 			options.publish(stream, ttsStart)
+			published = true
 		}
-	} else if eager != nil {
-		eager.discard()
+	} else {
+		drop(true)
 	}
 	return generatedReply{reply, sid, stream, ttsStart}, nil
 }
@@ -386,6 +416,14 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text
 func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any, error) {
 	ctx := r.Context()
 	switch {
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/photo"):
+		if id, ok := deviceSettingID(path, "photo"); ok {
+			return b.postPhoto(w, r, id)
+		}
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/photos/"):
+		if id, ok := photoPath(path); ok {
+			return nil, b.getPhoto(w, r, id, "")
+		}
 	case path == "/api/cats" || strings.HasPrefix(path, "/api/cats/") ||
 		strings.HasPrefix(path, "/api/devices/") && strings.HasSuffix(path, "/cat"):
 		return b.catAPI(w, r, path)

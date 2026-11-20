@@ -1,0 +1,361 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+)
+
+func (d *bridgeDB) addV2Columns(ctx context.Context) error {
+	return d.migrateColumns(ctx, "migrated_v2_columns",
+		`ALTER TABLE cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE saved_cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE timers ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'`)
+}
+
+func (d *bridgeDB) addTimerAppColumn(ctx context.Context) error {
+	return d.migrateColumns(ctx, "migrated_timer_app",
+		`ALTER TABLE timers ADD COLUMN app_name TEXT NOT NULL DEFAULT ''`)
+}
+
+func (d *bridgeDB) migrateColumns(ctx context.Context, marker string, statements ...string) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var done string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, marker).Scan(&done)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	for _, q := range statements {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?,'1')`, marker); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *bridgeDB) migrateFaceSVG(ctx context.Context) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, table := range []struct{ name, key, configured string }{
+		{"cats", "device_id", "configured"}, {"saved_cats", "slug", "1"},
+	} {
+		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table.name+`)`)
+		if err != nil {
+			return err
+		}
+		found := false
+		for rows.Next() {
+			var name string
+			var cid, kind, notNull, defaultVal, pk any
+			if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultVal, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			found = found || name == "face_svg"
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		if !found {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table.name+` ADD COLUMN face_svg TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		rows, err = tx.QueryContext(ctx, `SELECT `+table.key+`,face_bg,mark_color,accent_color,`+table.configured+
+			` FROM `+table.name+` WHERE face_svg=''`)
+		if err != nil {
+			return err
+		}
+		type seed struct{ key, svg string }
+		var seeds []seed
+		for rows.Next() {
+			var key, bg, mark, accent string
+			var configured int
+			if err := rows.Scan(&key, &bg, &mark, &accent, &configured); err != nil {
+				rows.Close()
+				return err
+			}
+			seeds = append(seeds, seed{key, defaultFaceSVG(bg, mark, accent, configured != 0)})
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		for _, s := range seeds {
+			if _, err := tx.ExecContext(ctx, `UPDATE `+table.name+` SET face_svg=? WHERE `+table.key+`=?`, s.svg, s.key); err != nil {
+				return err
+			}
+		}
+		// Overlays could mask the editable eyes (Cake's closed-eye overlay did).
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table.name+` SET svg_extras='', extras_json='[]'
+			WHERE (svg_extras<>'' OR extras_json<>'[]') AND NOT EXISTS (SELECT 1 FROM meta WHERE key='migrated_face_svg_v1')`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES ('migrated_face_svg_v1','1') ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateMap[T any](ctx context.Context, tx *sql.Tx, dir string, s *store[T], valid func(string, T) bool) error {
+	return legacyRows(dir, s.table, func(id string, raw json.RawMessage) error {
+		var value T
+		if json.Unmarshal(raw, &value) != nil || !valid(id, value) {
+			return nil
+		}
+		if v, ok := any(value).(tunnelRecord); ok && v.CreatedAt == "" {
+			v.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			value = any(v).(T)
+		}
+		args := s.values(id, value)
+		_, err := tx.ExecContext(ctx, "INSERT INTO "+s.table+" ("+s.columns+") VALUES ("+placeholders(len(args))+") ON CONFLICT DO NOTHING", args...)
+		return err
+	})
+}
+
+func legacyRows(dir, name string, visit func(string, json.RawMessage) error) error {
+	raw, err := os.ReadFile(filepath.Join(dir, name+".json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s.json: %w", name, err)
+	}
+	var rows map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil || rows == nil {
+		return fmt.Errorf("invalid %s.json", name)
+	}
+	for id, row := range rows {
+		if deviceIDRE.MatchString(id) {
+			if err := visit(id, row); err != nil {
+				return fmt.Errorf("import %s.json: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (d *bridgeDB) migrate(ctx context.Context, legacy string) error {
+	if legacy == "" {
+		return nil
+	}
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var migrated string
+	err = tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key='migrated_json_v1'").Scan(&migrated)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := migrateMap(ctx, tx, legacy, deviceStore(d), validLegacyPeer); err != nil {
+		return err
+	}
+	if err := migrateMap(ctx, tx, legacy, sessionStore(d), func(_ string, sid string) bool { return sessionIDRE.MatchString(sid) }); err != nil {
+		return err
+	}
+	// Preserve alias rows as well as the canonical mapping. Prefer an existing LAN session.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (device_id,session_id,updated_at)
+		SELECT substr(device_id,7),session_id,updated_at FROM sessions
+		WHERE device_id GLOB 'scope-virt-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]' ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
+	if err := migrateMap(ctx, tx, legacy, virtualStore(d), validLegacyVirtual); err != nil {
+		return err
+	}
+	if err := migrateMap(ctx, tx, legacy, voiceStore(d), func(id, voice string) bool {
+		return id == strings.ToLower(id) && voiceName(voice) != ""
+	}); err != nil {
+		return err
+	}
+	if err := migrateMap(ctx, tx, legacy, tunnelStore(d), validLegacyTunnel); err != nil {
+		return err
+	}
+	if err := legacyRows(legacy, "chat_events", func(id string, raw json.RawMessage) error {
+		var entries []json.RawMessage
+		if json.Unmarshal(raw, &entries) != nil {
+			return nil
+		}
+		for _, item := range entries {
+			var e chatEntry
+			if json.Unmarshal(item, &e) == nil && e.ID != "" && !e.Timestamp.IsZero() {
+				var fields struct {
+					SceneTitle  string `json:"scene_title"`
+					ToolSummary string `json:"tool_summary"`
+				}
+				if json.Unmarshal(item, &fields) == nil {
+					if e.SceneTitle == "" {
+						e.SceneTitle = fields.SceneTitle
+					}
+					e.ToolSummary = fields.ToolSummary
+				}
+				if _, err := tx.ExecContext(ctx, insertChat, chatValues(id, e)...); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO meta VALUES ('migrated_json_v1','1')"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type backfillMessage struct {
+	id    string
+	entry chatEntry
+}
+
+func (d *bridgeDB) migrateLocalMessages(ctx context.Context) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var done string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='migrated_messages_v2_local'`).Scan(&done)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT device_id,id,role,sender,text,source,scene_title,ts_ms FROM chat_events`)
+	if err != nil {
+		return err
+	}
+	var batch []backfillMessage
+	for rows.Next() {
+		var row backfillMessage
+		e := &row.entry
+		var ts int64
+		if err := rows.Scan(&row.id, &e.ID, &e.Role, &e.Sender, &e.Text, &e.Source, &e.SceneTitle, &ts); err != nil {
+			rows.Close()
+			return err
+		}
+		e.Timestamp = time.UnixMilli(ts)
+		batch = append(batch, row)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	return insertBackfill(ctx, tx, batch, "migrated_messages_v2_local")
+}
+
+func insertBackfill(ctx context.Context, tx *sql.Tx, batch []backfillMessage, marker string) error {
+	for _, row := range batch {
+		if e, ok := canonicalMessage(row.entry); ok {
+			if _, err := tx.ExecContext(ctx, insertMessage, messageValues(row.id, e)...); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?, '1') ON CONFLICT DO NOTHING`, marker); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *bridgeDB) historyDeviceIDs(ctx context.Context) ([]string, error) {
+	rows, err := d.QueryContext(ctx, `SELECT lower(device_id) FROM devices
+		UNION SELECT lower(id) FROM virtual_clients
+		UNION SELECT lower(device_id) FROM cats
+		UNION SELECT lower(CASE WHEN device_id LIKE 'scope-virt-%' THEN substr(device_id,7) ELSE device_id END) FROM sessions`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if deviceIDRE.MatchString(id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
+func (b *bridge) migrateSessionMessages(ctx context.Context) error {
+	const marker = "migrated_messages_v2"
+	var done string
+	err := b.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, marker).Scan(&done)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	ids, err := b.db.historyDeviceIDs(ctx)
+	if err != nil {
+		return err
+	}
+	var batch []backfillMessage
+	for _, id := range ids {
+		active, err := b.oc.get(id)
+		if err != nil {
+			return err
+		}
+		alias, err := b.oc.get("scope-" + id)
+		if err != nil {
+			return err
+		}
+		sessions, err := b.oc.listDeviceSessions(ctx, id, active, false)
+		if err != nil {
+			return err
+		}
+		if alias != "" && !slices.Contains(sessions, alias) {
+			sessions = append(sessions, alias)
+		}
+		who, err := b.lookupDevice(id)
+		if err != nil {
+			who = peer{DeviceID: id, Character: "EchoEar"}
+		}
+		for _, sid := range sessions {
+			entries, err := b.oc.GetSessionMessages(ctx, sid)
+			var status *upstreamStatus
+			if errors.As(err, &status) && status.code == http.StatusNotFound {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			for _, e := range entries {
+				if e.Role != "user" && e.Role != "assistant" {
+					continue
+				}
+				if e.Role == "assistant" {
+					e.Sender = who.Character
+				}
+				batch = append(batch, backfillMessage{id, e})
+			}
+		}
+	}
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return insertBackfill(ctx, tx, batch, marker)
+}

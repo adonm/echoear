@@ -314,7 +314,7 @@ func TestWSHelloPersistsOnlyV2Hardware(t *testing.T) {
 
 func TestWSMirrorAndControls(t *testing.T) {
 	_, base := wsHarness(t, nil)
-	const id = "echoear-33d8"
+	const id = "echoear-mirror"
 	dev := testConnectWS(t, base, "unit", false)
 	_, rev, _ := decodeDisplay(t, dev.hello(t, id, "Cake"))
 	web := testConnectWS(t, base, "unit", true)
@@ -801,14 +801,13 @@ func TestWSPlaybackAbortIgnoresOldACKs(t *testing.T) {
 	}
 }
 
-func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
+func TestWSVoicePlaysFirstSentenceBeforeFinal(t *testing.T) {
 	release := make(chan struct{})
 	closeRelease := syncOnceClose(release)
 	defer closeRelease()
 	pcm := bytes.Repeat([]byte{9, 0}, 350)
 	speech := bytes.Repeat([]byte{2, 3}, 220)
 	kick := make(chan struct{})
-	synthesized := make(chan struct{}, 1)
 	const first = "Stars release their own light. "
 	const last = "That lights nearby planets."
 	const raw = first + last + "\n```echoear-screen\n{\"title\":\"Night sky\",\"shapes\":[{\"t\":\"btn\",\"x\":121,\"y\":212,\"w\":118,\"h\":34,\"c\":\"#ffaa33\",\"s\":\"Fact\",\"tap\":\"Stars are bright.\"}]}\n```"
@@ -830,9 +829,6 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 				case <-b.root.Done():
 					return
 				case req := <-b.worker.requests:
-					if req.text == strings.TrimSpace(first) {
-						synthesized <- struct{}{}
-					}
 					req.done <- ttsResult{pcm: speech}
 				}
 			}
@@ -875,10 +871,14 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 				close(kick)
 				_, _ = io.WriteString(w, `{"data":{"id":"msg1"}}`)
 			case "/api/session/ses-ws/message":
-				_ = json.NewEncoder(w).Encode(object{"data": []object{
-					{"id": "msg2", "type": "assistant", "finish": "stop", "content": []object{{"type": "text", "text": raw}}},
-					{"id": "msg1", "type": "user"},
-				}})
+				select {
+				case <-release:
+					_ = json.NewEncoder(w).Encode(object{"data": []object{
+						{"id": "msg2", "type": "assistant", "finish": "stop", "content": []object{{"type": "text", "text": raw}}},
+						{"id": "msg1", "type": "user"},
+					}})
+				case <-r.Context().Done():
+				}
 			default:
 				w.WriteHeader(404)
 			}
@@ -896,24 +896,16 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	dev.json(t, object{"ev": "rec_start"})
 	dev.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm...)))
 	dev.json(t, object{"ev": "rec_end", "cancelled": false})
-	select {
-	case <-synthesized:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Kokoro did not overlap the OpenCode turn")
-	}
-	dev.write(t, maskedFrame(wsPing, true, nil))
-	dev.until(t, func(f wsFrame) bool {
-		if isPlayback(f) || hasWS("tts", `"state":"start"`)(f) {
-			t.Fatal("unverified speech was played")
-		}
-		return f.op == wsPong
-	})
-	closeRelease()
 	dev.until(t, hasWS("tts", `"state":"start"`))
 	got := dev.until(t, isPlayback)
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], speech) {
 		t.Fatal("did not receive eager Kokoro frame")
 	}
+	eventually(t, func() bool {
+		turns := b.diagnosticReport().Turns
+		return len(turns) == 1 && turns[0].TTS != nil && turns[0].E2E != nil && turns[0].Total == nil
+	})
+	closeRelease()
 	got = dev.until(t, isPlayback)
 	if len(got.data) != 1+sampleRate/5+len(speech) || !bytes.HasSuffix(got.data, speech) {
 		t.Fatal("did not receive tail sentence")
@@ -942,7 +934,7 @@ func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	}
 	turn := diag.Turns[0]
 	if turn.Device != "echoear-a" || turn.Source != "voice" || turn.STT == nil || turn.First == nil ||
-		turn.Total == nil || turn.TTS == nil || turn.E2E == nil || *turn.First > *turn.Total || *turn.Total > *turn.E2E {
+		turn.Total == nil || turn.TTS == nil || turn.E2E == nil || *turn.First > *turn.Total {
 		t.Fatalf("voice milestones missing or out of order: %+v", turn)
 	}
 }

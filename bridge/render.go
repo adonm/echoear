@@ -20,11 +20,13 @@ import (
 
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/sfnt"
+	"golang.org/x/image/math/f64"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -127,13 +129,17 @@ func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svg
 }
 
 func buildScreenUncached(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	return buildScreenWithPhotos(raw, exit, geometry, nil)
+}
+
+func buildScreenWithPhotos(raw string, exit bool, geometry screenGeometry, lookup photoLookup) (svgScreen, error) {
 	root, hits, err := prepareSVG(raw, exit)
 	if err != nil {
 		return svgScreen{}, err
 	}
 	screen := svgScreen{raw: raw, source: svgString(root), hits: hits}
 	if geometry.width != 0 {
-		screen.fb, err = rasterSVG(screen.source, geometry, root.background())
+		screen.fb, err = rasterScreen(root, screen.source, geometry, lookup)
 	}
 	return screen, err
 }
@@ -165,7 +171,7 @@ type svgNode struct {
 }
 
 var (
-	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text")
+	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text image")
 	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor aria-label data-id data-hit data-pose")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
@@ -328,7 +334,7 @@ func parseSVG(raw string) (*svgNode, error) {
 	dec := xml.NewDecoder(strings.NewReader(raw))
 	var root *svgNode
 	var stack []*svgNode
-	nodes := 0
+	nodes, photos := 0, 0
 	for {
 		token, err := dec.Token()
 		if err == io.EOF {
@@ -347,7 +353,7 @@ func parseSVG(raw string) (*svgNode, error) {
 				return nil, fmt.Errorf("SVG too complex")
 			}
 			if !svgTags[tag] || t.Name.Space != "" && t.Name.Space != "http://www.w3.org/2000/svg" ||
-				len(stack) != 0 && (tag == "svg" || stack[len(stack)-1].tag == "text") {
+				len(stack) != 0 && (tag == "svg" || stack[len(stack)-1].tag == "text" || stack[len(stack)-1].tag == "image") {
 				if len(stack) == 0 {
 					return nil, fmt.Errorf("Invalid SVG namespace")
 				}
@@ -362,13 +368,33 @@ func parseSVG(raw string) (*svgNode, error) {
 				if a.Name.Space != "" {
 					continue
 				}
+				if tag == "image" && k == "href" {
+					if id, ok := strings.CutPrefix(v, "photo:"); ok && photoID.MatchString(id) {
+						n.attr[k] = v
+					}
+				}
 				if len(stack) == 0 && k == "viewBox" && !slices.Equal(svgNums(v), []float64{0, 0, 360, 360}) {
 					return nil, fmt.Errorf(`SVG viewBox must be "0 0 360 360"`)
 				}
 				if svgAttrs[k] || k == "id" && (tag == "linearGradient" || tag == "radialGradient") {
+					if tag == "image" && strings.HasSuffix(v, "%") && (k == "x" || k == "y" || k == "width" || k == "height") {
+						continue
+					}
 					if v, ok := cleanSVGAttr(k, v); ok {
 						n.attr[k] = v
 					}
+				}
+			}
+			if tag == "image" {
+				if n.attr["href"] == "" {
+					if err := dec.Skip(); err != nil {
+						return nil, fmt.Errorf("SVG: %w", err)
+					}
+					continue
+				}
+				photos++
+				if photos > 8 {
+					return nil, fmt.Errorf("SVG exceeds 8 photo references")
 				}
 			}
 			if len(stack) == 0 {
@@ -452,7 +478,7 @@ func (n *svgNode) bounds() (svgBounds, bool) {
 		return svgBounds{p[0], p[1], p[0] + p[2], p[1] + p[3]}, true
 	}
 	switch n.tag {
-	case "rect":
+	case "rect", "image":
 		return svgBounds{x, y, x + v("width"), y + v("height")}, v("width") > 0 && v("height") > 0
 	case "circle", "ellipse":
 		x, y = v("cx"), v("cy")
@@ -658,28 +684,40 @@ func (root *svgNode) background() imagecolor.Color {
 	return imagecolor.Black
 }
 
-func rasterSVG(svg string, screen screenGeometry, bg imagecolor.Color) (fb []uint16, err error) {
+func rasterScreen(root *svgNode, source string, screen screenGeometry, lookup photoLookup) (fb []uint16, err error) {
 	// oksvg and rasterx are also fed untrusted geometry.
 	defer func() {
 		if recover() != nil {
 			err = fmt.Errorf("Invalid SVG geometry")
 		}
 	}()
-	icon, err := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.StrictErrorMode)
-	if err != nil {
-		return fb, fmt.Errorf("SVG: %w", err)
-	}
 	w, h := screen.width, screen.height
 	side := min(w, h)
 	x, y := float64(w-side)/2, float64(h-side)/2
-	icon.SetTarget(x, y, float64(side), float64(side))
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(img, img.Bounds(), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
 	scan := rasterx.NewScannerGV(w, h, img, img.Bounds())
 	clip := image.Rect(int(x), int(y), int(math.Ceil(x+float64(side))), int(math.Ceil(y+float64(side))))
-	icon.Draw(rasterx.NewDasher(w, h, scan), 1)
+	drawSVG := func(svg string) error {
+		icon, err := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.StrictErrorMode)
+		if err != nil {
+			return fmt.Errorf("SVG: %w", err)
+		}
+		icon.SetTarget(x, y, float64(side), float64(side))
+		icon.Draw(rasterx.NewDasher(w, h, scan), 1)
+		return nil
+	}
+	if !strings.Contains(source, "<image ") {
+		err = drawSVG(source)
+	} else {
+		scale := float64(side) / screenSize
+		err = rasterPhotos(root, img, rasterx.Identity.Translate(x, y).Scale(scale, scale), lookup, drawSVG)
+	}
+	if err != nil {
+		return nil, err
+	}
 	fb = make([]uint16, w*h)
-	br, bgc, bb, _ := bg.RGBA()
+	br, bgc, bb, _ := root.background().RGBA()
 	bar := uint16(br>>11)<<11 | uint16(bgc>>10)<<5 | uint16(bb>>11)
 	for y := range h {
 		for x := range w {
@@ -693,6 +731,108 @@ func rasterSVG(svg string, screen screenGeometry, bg imagecolor.Color) (fb []uin
 		}
 	}
 	return fb, nil
+}
+
+type photoLookup func(string) (image.Image, error)
+
+// oksvg draws vector paths only. Flush consecutive vector layers on either
+// side of a bitmap, preserving groups, transforms and painter order.
+func rasterPhotos(root *svgNode, dst *image.RGBA, target rasterx.Matrix2D, lookup photoLookup, drawSVG func(string) error) error {
+	var defs []*svgNode
+	var collectDefs func(*svgNode)
+	collectDefs = func(n *svgNode) {
+		for _, child := range n.children {
+			if child.tag == "defs" {
+				defs = append(defs, child)
+			} else {
+				collectDefs(child)
+			}
+		}
+	}
+	collectDefs(root)
+	layer := &svgNode{tag: root.tag, attr: root.attr, children: slices.Clone(defs)}
+	groups := map[*svgNode]*svgNode{root: layer}
+	flush := func() error {
+		if len(layer.children) == len(defs) {
+			return nil
+		}
+		err := drawSVG(svgString(layer))
+		layer.children = layer.children[:len(defs)]
+		clear(groups)
+		groups[root] = layer
+		return err
+	}
+	images := make(map[string]image.Image)
+	var walk func(*svgNode, []*svgNode, rasterx.Matrix2D, float64) error
+	walk = func(n *svgNode, parents []*svgNode, m rasterx.Matrix2D, opacity float64) error {
+		local, _ := svgMatrix(n.attr["transform"])
+		m = m.Mult(local)
+		if s := n.attr["opacity"]; s != "" {
+			opacity *= min(1, max(0, svgNum(s)))
+		}
+		switch n.tag {
+		case "defs":
+		case "svg", "g":
+			for _, child := range n.children {
+				if err := walk(child, append(parents, n), m, opacity); err != nil {
+					return err
+				}
+			}
+		case "image":
+			if lookup == nil || opacity <= 0 {
+				return nil
+			}
+			width, height := svgNum(n.attr["width"]), svgNum(n.attr["height"])
+			if width <= 0 || height <= 0 {
+				return nil
+			}
+			id := strings.TrimPrefix(n.attr["href"], "photo:")
+			src, ok := images[id]
+			if !ok {
+				var err error
+				src, err = lookup(id)
+				if err != nil {
+					return err
+				}
+				images[id] = src
+			}
+			if src == nil {
+				return nil
+			}
+			if err := flush(); err != nil {
+				return err
+			}
+			b := src.Bounds()
+			scale := min(width/float64(b.Dx()), height/float64(b.Dy()))
+			x := svgNum(n.attr["x"]) + (width-scale*float64(b.Dx()))/2
+			y := svgNum(n.attr["y"]) + (height-scale*float64(b.Dy()))/2
+			m = m.Translate(x, y).Scale(scale, scale).Translate(-float64(b.Min.X), -float64(b.Min.Y))
+			if m.A*m.D-m.B*m.C != 0 {
+				var opts *xdraw.Options
+				if opacity < 1 {
+					opts = &xdraw.Options{SrcMask: image.NewUniform(imagecolor.Alpha{A: uint8(255 * opacity)})}
+				}
+				xdraw.BiLinear.Transform(dst, f64.Aff3{m.A, m.C, m.E, m.B, m.D, m.F}, src, b, draw.Over, opts)
+			}
+		default:
+			parent := layer
+			for _, ancestor := range parents {
+				group := groups[ancestor]
+				if group == nil {
+					group = &svgNode{tag: ancestor.tag, attr: ancestor.attr}
+					parent.children = append(parent.children, group)
+					groups[ancestor] = group
+				}
+				parent = group
+			}
+			parent.children = append(parent.children, n)
+		}
+		return nil
+	}
+	if err := walk(root, nil, target, 1); err != nil {
+		return err
+	}
+	return flush()
 }
 
 func dirtyRect(prev, next []uint16, screen screenGeometry) image.Rectangle {

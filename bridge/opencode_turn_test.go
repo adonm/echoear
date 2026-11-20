@@ -36,6 +36,114 @@ func expectValue[T comparable](t *testing.T, result <-chan T, want T) {
 	}
 }
 
+func TestEagerReplyPublishesPCMBeforeSSEFinishes(t *testing.T) {
+	for _, mode := range []string{"matching", "divergent", "tool"} {
+		t.Run(mode, func(t *testing.T) {
+			const id, sid = "echoear-eager", "ses-eager"
+			const prefix, tail = "First sentence. ", "Here is another sentence."
+			final := prefix + tail
+			if mode == "divergent" {
+				final = "A different first sentence. " + tail
+			}
+			prompted, sendTool, finishSSE := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			b, base := wsHarness(t, func(b *bridge, dir string) {
+				b.worker = fakeTTS(b.root, nil)
+				b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/api/event":
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, ": connected\n\n")
+						flusher := w.(http.Flusher)
+						flusher.Flush()
+						event := func(kind, text string) {
+							fmt.Fprintf(w, "data: {\"type\":%q,\"data\":{\"sessionID\":%q,\"delta\":%q}}\n\n", kind, sid, text)
+							flusher.Flush()
+						}
+						select {
+						case <-prompted:
+							event("session.text.delta", prefix)
+						case <-r.Context().Done():
+							return
+						}
+						if mode == "tool" {
+							select {
+							case <-sendTool:
+								event("session.tool.input.started", "")
+							case <-r.Context().Done():
+								return
+							}
+						}
+						select {
+						case <-finishSSE:
+							event("session.text.delta", tail)
+							event("session.execution.succeeded", "")
+						case <-r.Context().Done():
+						}
+					case "/api/session":
+						fmt.Fprintf(w, `{"data":{"id":%q}}`, sid)
+					case "/api/session/" + sid + "/prompt":
+						_, _ = io.WriteString(w, `{"data":{"id":"prompt"}}`)
+						close(prompted)
+					case "/api/session/" + sid + "/message":
+						select {
+						case <-finishSSE:
+							fmt.Fprintf(w, `{"data":[{"id":"answer","type":"assistant","finish":"stop","content":[{"type":"text","text":%q}]},{"id":"prompt","type":"user"}]}`, final)
+						case <-r.Context().Done():
+						}
+					default:
+						http.NotFound(w, r)
+					}
+				})
+			})
+			eventually(t, func() bool {
+				b.oc.feed.mu.Lock()
+				defer b.oc.feed.mu.Unlock()
+				return b.oc.feed.connected
+			})
+			device := testConnectWS(t, base, "unit", false)
+			device.hello(t, id, "Cake")
+			device.json(t, object{"ev": "text", "text": "Speak two sentences."})
+			start := testObject(t, device.until(t, hasWS("tts", `"state":"start"`)).data)
+			pcm := func(f wsFrame) bool { return f.op == wsBinary && len(f.data) > 1 && f.data[0] == pcmPrefix }
+			device.until(t, pcm) // The upstream is still blocked on finishSSE.
+			eventually(t, func() bool {
+				turns := b.diagnosticReport().Turns
+				return len(turns) != 0 && turns[0].TTS != nil && turns[0].Total == nil
+			})
+			if mode == "tool" {
+				close(sendTool)
+				abort := testObject(t, device.until(t, hasWS("tts", `"state":"abort"`)).data)
+				if abort["audio"] != start["audio"] {
+					t.Fatal("tool did not abort the speculative generation")
+				}
+			}
+			close(finishSSE)
+			var end object
+			continued := false
+			for end == nil {
+				f := device.read(t)
+				switch {
+				case pcm(f):
+					continued = true
+				case hasWS("tts", `"state":"abort"`)(f):
+					if mode != "divergent" || testObject(t, f.data)["audio"] != start["audio"] {
+						t.Fatal("unexpected audio abort", string(f.data))
+					}
+				case hasWS("tts", `"state":"start"`)(f):
+					if mode == "matching" || testObject(t, f.data)["audio"] == start["audio"] {
+						t.Fatal("unexpected audio generation", string(f.data))
+					}
+				case hasWS("tts", `"state":"end"`)(f):
+					end = testObject(t, f.data)
+				}
+			}
+			if !continued || (start["audio"] == end["audio"]) != (mode == "matching") {
+				t.Fatalf("unexpected completion: continued=%t, start=%v, end=%v", continued, start, end)
+			}
+		})
+	}
+}
+
 func TestOpenCodeCancelAndReset(t *testing.T) {
 	for _, action := range []string{"cancel", "reset", "disconnect"} {
 		t.Run(action, func(t *testing.T) {
@@ -93,7 +201,7 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 }
 
 func TestOpenCodeInterruptOrdersReplacementPrompt(t *testing.T) {
-	const id, sid = "echoear-33d8", "ses-order"
+	const id, sid = "echoear-order", "ses-order"
 	prompts := make(chan string, 4)
 	interrupt := make(chan bool, 4)
 	allowPrompt, allowStop := make(chan struct{}), make(chan struct{})
@@ -103,7 +211,7 @@ func TestOpenCodeInterruptOrdersReplacementPrompt(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/session":
 			raw, _ := io.ReadAll(r.Body)
-			if got := testObject(t, raw)["title"]; got != "EchoEar: Cake (echoear-33d8)" {
+			if got := testObject(t, raw)["title"]; got != "EchoEar: Cake ("+id+")" {
 				t.Error("unexpected character title:", got)
 			}
 			_, _ = fmt.Fprintf(w, `{"data":{"id":%q}}`, sid)

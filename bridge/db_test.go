@@ -26,6 +26,66 @@ func testDB(t *testing.T, path, legacy string) *bridgeDB {
 	return d
 }
 
+func TestDailyBackupIncludesWALAndPrunes(t *testing.T) {
+	root := t.TempDir()
+	d := testDB(t, filepath.Join(root, "echoear.db"), "")
+	dir := filepath.Join(root, "it's backed up")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC)
+	for i := range 9 {
+		name := "echoear-" + now.AddDate(0, 0, -1-i).Format(time.DateOnly) + ".db"
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := filepath.Join(dir, "echoear-keep.db")
+	if err := os.WriteFile(unrelated, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO photos VALUES ('photo-12345678','cake','image/png',x'fedc','image',100)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.backup(t.Context(), dir, now); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "echoear-2026-11-21.db")
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 || d.lastBackup.Load() != info.ModTime().Unix() {
+		t.Fatalf("backup mode or timestamp: %v %d", info.Mode(), d.lastBackup.Load())
+	}
+	if _, err := d.Exec(`UPDATE photos SET caption='new'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.backup(t.Context(), dir, now); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 8 {
+		t.Fatalf("expected 7 daily files and unrelated file: %v %v", entries, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "echoear-2026-11-14.db")); !os.IsNotExist(err) {
+		t.Fatalf("expected eighth daily backup pruned, stat: %v", err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := sql.Open("turso", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var caption string
+	var data []byte
+	if err := backup.QueryRow(`SELECT data,caption FROM photos`).Scan(&data, &caption); err != nil || !bytes.Equal(data, []byte{0xfe, 0xdc}) || caption != "image" {
+		t.Fatalf("backup did not preserve WAL data: %x %q %v", data, caption, err)
+	}
+}
+
 func writeMap(path string, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {

@@ -172,6 +172,7 @@ type appInstance struct {
 	effects                             []appEffect
 	allowEffects                        bool
 	geometry                            []screenGeometry
+	buildScreen                         func(string, bool, screenGeometry) (svgScreen, error)
 	lastScreens                         []svgScreen
 	ctx                                 context.Context
 	cancel                              context.CancelFunc
@@ -245,9 +246,9 @@ func (a *appInstance) player(i int) goja.Value {
 	return v
 }
 
-func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice, initial json.RawMessage) (*appInstance, []svgScreen, error) {
+func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice, initial json.RawMessage, renderer func(string, bool, screenGeometry) (svgScreen, error)) (*appInstance, []svgScreen, error) {
 	a := &appInstance{spec: spec, players: players, memory: memory, devices: devices, scope: "app:" + spec.Name,
-		geometry: make([]screenGeometry, len(players)), lastScreens: make([]svgScreen, len(players))}
+		geometry: make([]screenGeometry, len(players)), buildScreen: renderer, lastScreens: make([]svgScreen, len(players))}
 	for i := range players {
 		// Geometry and the client role do not change after hello.
 		if devices == nil {
@@ -516,7 +517,7 @@ func (a *appInstance) screens(connected []bool) ([]svgScreen, error) {
 			out[i] = last
 			continue
 		}
-		screen, err := buildScreen(raw, true, a.geometry[i])
+		screen, err := a.buildScreen(raw, true, a.geometry[i])
 		if err != nil {
 			return nil, fmt.Errorf("render for player %d: %w", i, err)
 		}
@@ -697,7 +698,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 			if slices.ContainsFunc(devices, func(d *wsDevice) bool { return d.client.role == "device" }) {
 				geometry = roundScreen
 			}
-			if _, err := buildScreen(a.SVG, false, geometry); err != nil {
+			if _, err := b.buildScreen(a.SVG, false, geometry); err != nil {
 				return nil, problem(400, err.Error())
 			}
 		}
@@ -722,7 +723,7 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 			memory[str(value["key"])] = value["value"].(json.RawMessage)
 		}
 	}
-	inst, screens, err := initApp(a, players, memory, devices, initial)
+	inst, screens, err := initApp(a, players, memory, devices, initial, b.buildScreen)
 	if err != nil {
 		return nil, problem(400, err.Error())
 	}

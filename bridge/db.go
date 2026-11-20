@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -11,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-
 	turso "turso.tech/database/tursogo"
 )
 
@@ -30,6 +29,7 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS chat_device_ts ON chat_events (device_id, ts_ms)`,
 	`CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, role TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, card_title TEXT NOT NULL DEFAULT '', ts_ms INTEGER NOT NULL)`,
 	`CREATE INDEX IF NOT EXISTS messages_device_ts ON messages (device_id, ts_ms)`,
+	`CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, mime TEXT NOT NULL, data BLOB NOT NULL, caption TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS memory (scope TEXT NOT NULL, key TEXT NOT NULL, value_json TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL, PRIMARY KEY (scope, key))`,
 	`CREATE TABLE IF NOT EXISTS apps (name TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, svg TEXT NOT NULL DEFAULT '', code TEXT NOT NULL DEFAULT '', tick_ms INTEGER NOT NULL DEFAULT 0, max_ticks INTEGER NOT NULL DEFAULT 0, author TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS timers (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, label TEXT NOT NULL, say TEXT NOT NULL, chime TEXT NOT NULL, wake_agent INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, fire_at TEXT NOT NULL)`,
@@ -37,7 +37,111 @@ var schema = []string{
 
 type bridgeDB struct {
 	*sql.DB
-	cloud *turso.TursoSyncDb
+	cloud      *turso.TursoSyncDb
+	lastBackup atomic.Int64
+}
+
+// VACUUM INTO produces a standalone consistent SQLite file, including WAL data,
+// without copying live database files or pausing the sync worker.
+func (d *bridgeDB) backup(ctx context.Context, dir string, now time.Time) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	target := filepath.Join(dir, "echoear-"+now.Format(time.DateOnly)+".db")
+	_, err := os.Lstat(target)
+	if os.IsNotExist(err) {
+		staging, err := os.MkdirTemp(dir, ".backup-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(staging)
+		tmp := filepath.Join(staging, "echoear.db")
+		// Turso 0.8.4 requires a literal and does not unescape doubled quotes
+		// in the VACUUM path, but accepts either quote delimiter.
+		quote := "'"
+		if strings.Contains(tmp, quote) {
+			quote = `"`
+			if strings.Contains(tmp, quote) {
+				return errors.New("backup path contains both SQL quote delimiters")
+			}
+		}
+		if _, err := d.ExecContext(ctx, "VACUUM INTO "+quote+tmp+quote); err != nil {
+			return err
+		}
+		if err := os.Chmod(tmp, 0o600); err != nil {
+			return err
+		}
+		copyDB, err := sql.Open("turso", tmp)
+		if err != nil {
+			return err
+		}
+		var check string
+		err = copyDB.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check)
+		if err = errors.Join(err, copyDB.Close()); err != nil {
+			return err
+		}
+		if check != "ok" {
+			return fmt.Errorf("backup quick_check: %s", check)
+		}
+		f, err := os.Open(tmp)
+		if err != nil {
+			return err
+		}
+		if err := errors.Join(f.Sync(), f.Close()); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, target); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("daily backup path is not a regular file")
+	}
+	d.lastBackup.Store(info.ModTime().Unix())
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var daily []string
+	for _, entry := range entries {
+		date, isBackup := strings.CutPrefix(entry.Name(), "echoear-")
+		if !entry.Type().IsRegular() || !isBackup || !strings.HasSuffix(date, ".db") {
+			continue
+		}
+		if _, err := time.Parse(time.DateOnly, strings.TrimSuffix(date, ".db")); err == nil {
+			daily = append(daily, entry.Name())
+		}
+	}
+	for _, name := range daily[:max(0, len(daily)-7)] {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *bridgeDB) backupPeriodically(ctx context.Context, dir string) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		run, cancel := context.WithTimeout(ctx, time.Minute)
+		err := d.backup(run, dir, time.Now())
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			log.Printf("EchoEar daily backup: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d *bridgeDB) getMeta(ctx context.Context, key string) (string, error) {
@@ -128,107 +232,6 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoic
 		return nil, fmt.Errorf("seed EchoEar device preferences: %w", err)
 	}
 	return d, nil
-}
-
-func (d *bridgeDB) addV2Columns(ctx context.Context) error {
-	return d.migrateColumns(ctx, "migrated_v2_columns",
-		`ALTER TABLE cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE saved_cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE timers ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'`)
-}
-
-func (d *bridgeDB) addTimerAppColumn(ctx context.Context) error {
-	return d.migrateColumns(ctx, "migrated_timer_app",
-		`ALTER TABLE timers ADD COLUMN app_name TEXT NOT NULL DEFAULT ''`)
-}
-
-func (d *bridgeDB) migrateColumns(ctx context.Context, marker string, statements ...string) error {
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var done string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, marker).Scan(&done)
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	for _, q := range statements {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?,'1')`, marker); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *bridgeDB) migrateFaceSVG(ctx context.Context) error {
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, table := range []struct{ name, key, configured string }{
-		{"cats", "device_id", "configured"}, {"saved_cats", "slug", "1"},
-	} {
-		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table.name+`)`)
-		if err != nil {
-			return err
-		}
-		found := false
-		for rows.Next() {
-			var name string
-			var cid, kind, notNull, defaultVal, pk any
-			if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultVal, &pk); err != nil {
-				rows.Close()
-				return err
-			}
-			found = found || name == "face_svg"
-		}
-		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-			return err
-		}
-		if !found {
-			if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table.name+` ADD COLUMN face_svg TEXT NOT NULL DEFAULT ''`); err != nil {
-				return err
-			}
-		}
-		rows, err = tx.QueryContext(ctx, `SELECT `+table.key+`,face_bg,mark_color,accent_color,`+table.configured+
-			` FROM `+table.name+` WHERE face_svg=''`)
-		if err != nil {
-			return err
-		}
-		type seed struct{ key, svg string }
-		var seeds []seed
-		for rows.Next() {
-			var key, bg, mark, accent string
-			var configured int
-			if err := rows.Scan(&key, &bg, &mark, &accent, &configured); err != nil {
-				rows.Close()
-				return err
-			}
-			seeds = append(seeds, seed{key, defaultFaceSVG(bg, mark, accent, configured != 0)})
-		}
-		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-			return err
-		}
-		for _, s := range seeds {
-			if _, err := tx.ExecContext(ctx, `UPDATE `+table.name+` SET face_svg=? WHERE `+table.key+`=?`, s.svg, s.key); err != nil {
-				return err
-			}
-		}
-		// Overlays could mask the editable eyes (Cake's closed-eye overlay did).
-		if _, err := tx.ExecContext(ctx, `UPDATE `+table.name+` SET svg_extras='', extras_json='[]'
-			WHERE (svg_extras<>'' OR extras_json<>'[]') AND NOT EXISTS (SELECT 1 FROM meta WHERE key='migrated_face_svg_v1')`); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES ('migrated_face_svg_v1','1') ON CONFLICT DO NOTHING`); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 const initialAutoVolume = 55
@@ -412,115 +415,4 @@ func tunnelStore(d *bridgeDB) *store[tunnelRecord] {
 		}, values: func(id string, v tunnelRecord) []any {
 			return []any{id, v.RouteName, v.URL, v.LocalPort, v.Token, v.Profile, v.CreatedAt}
 		}}
-}
-
-func migrateMap[T any](ctx context.Context, tx *sql.Tx, dir string, s *store[T], valid func(string, T) bool) error {
-	return legacyRows(dir, s.table, func(id string, raw json.RawMessage) error {
-		var value T
-		if json.Unmarshal(raw, &value) != nil || !valid(id, value) {
-			return nil
-		}
-		if v, ok := any(value).(tunnelRecord); ok && v.CreatedAt == "" {
-			v.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			value = any(v).(T)
-		}
-		args := s.values(id, value)
-		_, err := tx.ExecContext(ctx, "INSERT INTO "+s.table+" ("+s.columns+") VALUES ("+placeholders(len(args))+") ON CONFLICT DO NOTHING", args...)
-		return err
-	})
-}
-
-func legacyRows(dir, name string, visit func(string, json.RawMessage) error) error {
-	raw, err := os.ReadFile(filepath.Join(dir, name+".json"))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read %s.json: %w", name, err)
-	}
-	var rows map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &rows); err != nil || rows == nil {
-		return fmt.Errorf("invalid %s.json", name)
-	}
-	for id, row := range rows {
-		if deviceIDRE.MatchString(id) {
-			if err := visit(id, row); err != nil {
-				return fmt.Errorf("import %s.json: %w", name, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (d *bridgeDB) migrate(ctx context.Context, legacy string) error {
-	if legacy == "" {
-		return nil
-	}
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var migrated string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key='migrated_json_v1'").Scan(&migrated)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if err := migrateMap(ctx, tx, legacy, deviceStore(d), validLegacyPeer); err != nil {
-		return err
-	}
-	if err := migrateMap(ctx, tx, legacy, sessionStore(d), func(_ string, sid string) bool { return sessionIDRE.MatchString(sid) }); err != nil {
-		return err
-	}
-	// Preserve alias rows as well as the canonical mapping. Prefer an existing LAN session.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (device_id,session_id,updated_at)
-		SELECT substr(device_id,7),session_id,updated_at FROM sessions
-		WHERE device_id GLOB 'scope-virt-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]' ON CONFLICT DO NOTHING`); err != nil {
-		return err
-	}
-	if err := migrateMap(ctx, tx, legacy, virtualStore(d), validLegacyVirtual); err != nil {
-		return err
-	}
-	if err := migrateMap(ctx, tx, legacy, voiceStore(d), func(id, voice string) bool {
-		return id == strings.ToLower(id) && voiceName(voice) != ""
-	}); err != nil {
-		return err
-	}
-	if err := migrateMap(ctx, tx, legacy, tunnelStore(d), validLegacyTunnel); err != nil {
-		return err
-	}
-	if err := legacyRows(legacy, "chat_events", func(id string, raw json.RawMessage) error {
-		var entries []json.RawMessage
-		if json.Unmarshal(raw, &entries) != nil {
-			return nil
-		}
-		for _, item := range entries {
-			var e chatEntry
-			if json.Unmarshal(item, &e) == nil && e.ID != "" && !e.Timestamp.IsZero() {
-				var fields struct {
-					SceneTitle  string `json:"scene_title"`
-					ToolSummary string `json:"tool_summary"`
-				}
-				if json.Unmarshal(item, &fields) == nil {
-					if e.SceneTitle == "" {
-						e.SceneTitle = fields.SceneTitle
-					}
-					e.ToolSummary = fields.ToolSummary
-				}
-				if _, err := tx.ExecContext(ctx, insertChat, chatValues(id, e)...); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO meta VALUES ('migrated_json_v1','1')"); err != nil {
-		return err
-	}
-	return tx.Commit()
 }

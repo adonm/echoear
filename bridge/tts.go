@@ -483,7 +483,7 @@ type speechTurn struct {
 	length int
 }
 
-func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorker, voice string) *speechTurn {
+func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorker, voice string, onFirst func(*AudioStream)) *speechTurn {
 	t := &speechTurn{stream: newAudioStream(), cancel: cancel, queue: make(chan string, maxText)}
 	go func() {
 		defer cancel()
@@ -497,11 +497,14 @@ func newSpeechTurn(ctx context.Context, cancel context.CancelFunc, w *synthWorke
 			if !first {
 				pcm = append(make([]byte, sampleRate/5, sampleRate/5+len(pcm)), pcm...)
 			}
-			first = false
 			if !t.stream.append(pcm) {
 				t.stream.finish(errTTS)
 				return
 			}
+			if first && onFirst != nil {
+				onFirst(t.stream)
+			}
+			first = false
 		}
 		t.stream.finish(nil)
 	}()
@@ -520,6 +523,7 @@ func (t *speechTurn) send(s string) {
 }
 
 func (t *speechTurn) discard() {
+	t.stream.finish(context.Canceled)
 	t.cancel()
 	close(t.queue)
 }

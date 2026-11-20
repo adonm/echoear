@@ -7,7 +7,7 @@
   <title>EchoEar · Cat Club</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/app/style.css">
-  <script src="/app/client.js" defer></script>
+  <script type="module" src="/app/client.js"></script>
 </head>
 <body>
   <header class="masthead">
@@ -158,6 +158,8 @@
         <form id="prompt" class="row">
           <label class="sr-only" for="text">Message</label>
           <input id="text" maxlength="640" required placeholder="Say something to your cat…" autocomplete="off" disabled>
+          <input id="photo-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+          <button id="share-photo" class="quiet" type="button" disabled>Photo</button>
           <button id="send" class="accent" type="submit" disabled>Send</button>
         </form>
         <div id="phone-controls" class="row wrap" hidden>

@@ -20,6 +20,126 @@ func facePoseSVGs() []string {
 	}
 }
 
+func TestSystemScreenPixelRegions(t *testing.T) {
+	type region struct {
+		name       string
+		box        image.Rectangle
+		background string
+		wide, tall int
+	}
+	type scene struct {
+		name, svg string
+		regions   []region
+	}
+	reg := func(name, bg string, x, y, w, h, wide, tall int) region {
+		return region{name, image.Rect(x, y, x+w, y+h), bg, wide, tall}
+	}
+	var scenes []scene
+	cat := blankCat()
+	for i, pose := range []catPose{{mood: "idle"}, {mood: "idle", blink: true}, {mood: "speaking"}, {mood: "sleepy"}} {
+		pose.battery = 80
+		eyes := []int{20, 4, 9, 10}
+		r := []region{
+			reg("left eye", cat.FaceBG, 89, 118, 46, 47, 22, eyes[i]),
+			reg("right eye", cat.FaceBG, 225, 118, 46, 47, 22, eyes[i]),
+			reg("mouth", cat.FaceBG, 139, 188, 82, 44, 34, 8),
+			reg("battery", cat.FaceBG, 226, 39, 40, 21, 23, 10),
+		}
+		if i < 3 {
+			bg, icon := "#202538", "menu"
+			if i == 2 {
+				bg, icon = "#32263C", "stop"
+			}
+			r = append(r, reg(icon+" icon", bg, 148, 307, 22, 17, 8, 7),
+				reg(icon+" label", bg, 172, 306, 45, 22, 22, 8))
+		} else {
+			r = append(r, reg("sleep z", cat.FaceBG, 212, 79, 39, 36, 20, 17))
+		}
+		scenes = append(scenes, scene{[]string{"idle", "blink", "talk", "sleep"}[i], catSVG(cat, pose), r})
+	}
+
+	menu := func(name string, s sceneView, regions ...region) {
+		scenes = append(scenes, scene{name, s.svg(""), append(regions,
+			reg("title", menuBG, 95, 51, 170, 29, 42, 14),
+			reg("back icon", "#262E43", 148, 306, 22, 18, 8, 8),
+			reg("back label", "#262E43", 171, 305, 49, 22, 23, 8))})
+	}
+	menu("home", menuHome(heartVoice, true, 55, false),
+		reg("intercom icon", "#372530", 104, 105, 22, 21, 13, 13),
+		reg("intercom label", "#372530", 68, 133, 94, 22, 44, 9),
+		reg("volume icon", "#203144", 234, 101, 22, 21, 13, 10),
+		reg("volume label", "#203144", 198, 125, 94, 18, 45, 9),
+		reg("volume subtitle", "#203144", 198, 147, 94, 15, 32, 6),
+		reg("voice icon", "#322741", 104, 189, 22, 21, 13, 8),
+		reg("voice label", "#322741", 68, 213, 94, 18, 34, 9),
+		reg("voice subtitle", "#322741", 68, 235, 94, 15, 22, 6),
+		reg("stats icon", "#193833", 234, 193, 22, 21, 13, 10),
+		reg("stats label", "#193833", 198, 221, 94, 22, 32, 9))
+	menu("volume", volumeScene(true, 55),
+		reg("level", menuBG, 76, 98, 208, 31, 105, 17),
+		reg("volume track", menuBG, 70, 144, 220, 15, 185, 7),
+		reg("minus", "#203144", 110, 194, 30, 16, 15, 2),
+		reg("plus", "#203144", 220, 188, 30, 28, 15, 13),
+		reg("auto icon", "#203144", 148, 252, 22, 18, 10, 8),
+		reg("auto label", "#203144", 171, 251, 48, 22, 24, 8))
+	var choiceRegions []region
+	for i := range 4 {
+		x, y := 58+130*(i%2), 93+88*(i/2)
+		choiceRegions = append(choiceRegions,
+			reg(voiceCatalog[i].Name+" icon", "#322741", x+46, y+12, 22, 23, 11, 8),
+			reg(voiceCatalog[i].Name+" label", "#322741", x+10, y+36, 94, 24, 26, 9))
+	}
+	menu("voice", voiceScene(heartVoice), choiceRegions...)
+	var choices []menuPeer
+	choiceRegions = nil
+	for i := range 9 {
+		choices = append(choices, menuPeer{strconv.Itoa(i), "Cat " + strconv.Itoa(i), "#372530", "#FFADAC"})
+		if i < 4 {
+			x, y := 58+130*(i%2), 86+72*(i/2)
+			choiceRegions = append(choiceRegions, reg("peer "+strconv.Itoa(i)+" icon", "#372530", x+43, y+9, 28, 13, 16, 6),
+				reg("peer "+strconv.Itoa(i)+" label", "#372530", x+22, y+32, 70, 17, 24, 7))
+		}
+	}
+	menu("intercom", intercomSceneMenu(choices, 1), append(choiceRegions,
+		reg("previous label", "#262E43", 97, 246, 60, 17, 23, 7),
+		reg("next label", "#262E43", 202, 246, 60, 17, 23, 7))...)
+	var rows []region
+	for i := range 6 {
+		rows = append(rows, reg("stats row "+strconv.Itoa(i+1), "#0E111B", 55, 106+27*i, 250, 18, 90, 6))
+	}
+	hub := &wsHub{b: &bridge{}}
+	menu("stats", hub.statsScene(&wsDevice{client: &wsClient{role: "device"}, cat: cat, board: "esp-vocat", firmware: "0.9.1", vol: 55}), rows...)
+
+	for _, geometry := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
+		for _, s := range scenes {
+			t.Run(s.name+"/"+strconv.Itoa(geometry.width), func(t *testing.T) {
+				screen, err := buildScreen(s.svg, false, geometry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				side := min(geometry.width, geometry.height)
+				offsetX, offsetY := (geometry.width-side)/2, (geometry.height-side)/2
+				for _, r := range s.regions {
+					n, _ := strconv.ParseUint(r.background[1:], 16, 24)
+					bg := uint16(n>>19)<<11 | uint16((n>>10)&63)<<5 | uint16((n>>3)&31)
+					extent, lit := image.Rectangle{}, 0
+					for y := offsetY + r.box.Min.Y*side/360; y < offsetY+r.box.Max.Y*side/360; y++ {
+						for x := offsetX + r.box.Min.X*side/360; x < offsetX+r.box.Max.X*side/360; x++ {
+							if screen.fb[y*geometry.width+x] != bg {
+								extent = extent.Union(image.Rect(x, y, x+1, y+1))
+								lit++
+							}
+						}
+					}
+					if extent.Dx() < max(2, r.wide*side/360) || extent.Dy() < max(2, r.tall*side/360) || lit < 8 {
+						t.Errorf("%s: only %d lit pixels spanning %dx%d in %v", r.name, lit, extent.Dx(), extent.Dy(), r.box)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestFacePoseCacheReusesFramesAndHitboxes(t *testing.T) {
 	var cache screenCache
 	poses := facePoseSVGs()
@@ -365,7 +485,7 @@ func TestBox3HelloAndRawAppTaps(t *testing.T) {
 	box := testConnectWS(t, base, "unit", false)
 	round := testConnectWS(t, base, "unit", false)
 	web := testConnectWS(t, base, "unit", true)
-	const boxID, roundID = "box3-b324", "echoear-round"
+	const boxID, roundID = "box3-test", "echoear-round"
 	box.json(t, object{"ev": "hello", "role": "device", "device_id": boxID, "proto": 2, "firmware": "0.8.0",
 		"width": 320, "height": 240, "shape": "rect", "board": "esp-box-3"})
 	if r, _, _ := decodeDisplay(t, box.until(t, isDisplay)); r != image.Rect(0, 0, 320, 240) {

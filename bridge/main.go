@@ -103,6 +103,14 @@ func run() error {
 	}
 	root, finish := context.WithCancel(context.Background())
 	defer finish()
+	if productionDB(dbPath) {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			db.backupPeriodically(root, filepath.Join(local, "backups"))
+		}()
+		defer func() { finish(); <-done }()
+	}
 	if db.cloud != nil {
 		done := make(chan struct{})
 		go func() {
@@ -216,6 +224,18 @@ func run() error {
 		return nil
 	}
 	return err
+}
+
+func productionDB(path string) bool {
+	if path == ":memory:" {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(os.TempDir(), abs)
+	return err == nil && !filepath.IsLocal(rel)
 }
 
 func main() {

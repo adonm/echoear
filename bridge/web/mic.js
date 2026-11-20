@@ -14,7 +14,7 @@ class EchoMic extends AudioWorkletProcessor {
     this.frames = 0;
     this.calibration = [];
     this.threshold = 0;
-    this.voiced = false;
+    this.voiced = 0;
     this.quiet = 0;
     this.port.onmessage = () => this.finish("end");
   }
@@ -25,8 +25,12 @@ class EchoMic extends AudioWorkletProcessor {
     this.port.postMessage(message);
   }
   hear(rms) {
-    if (rms >= this.threshold) this.voiced = true;
-    if (this.voiced) this.quiet = rms >= this.threshold * 0.5 ? 0 : this.quiet + 1;
+    if (rms >= (this.voiced ? this.threshold * 0.5 : this.threshold)) {
+      this.voiced++;
+      this.quiet = 0;
+    } else if (this.voiced) {
+      this.quiet++;
+    }
   }
   frame() {
     const rms = Math.sqrt(this.energy / frameSamples);
@@ -42,8 +46,9 @@ class EchoMic extends AudioWorkletProcessor {
     } else {
       this.hear(rms);
     }
-    // End at 3 s of silence after speech, 60 s total, or 8 s without detection.
-    if (this.quiet >= 150 || this.frames >= 3000 || (!this.voiced && this.frames >= 400)) {
+    // End after 1.5 s of silence, or 3 s once 4 s of speech has accumulated.
+    const silence = this.voiced < 200 ? 75 : 150;
+    if (this.quiet >= silence || this.frames >= 3000 || (!this.voiced && this.frames >= 400)) {
       this.finish("auto_end");
     }
   }

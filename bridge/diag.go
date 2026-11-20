@@ -185,11 +185,12 @@ type diagProcess struct {
 
 type diagBridge struct {
 	diagProcess
-	HeapAlloc uint64 `json:"heap_alloc_bytes"`
-	HeapInuse uint64 `json:"heap_inuse_bytes"`
-	Goroutine int    `json:"goroutines"`
-	Uptime    int64  `json:"uptime_s"`
-	DB        int64  `json:"db_bytes"`
+	HeapAlloc  uint64     `json:"heap_alloc_bytes"`
+	HeapInuse  uint64     `json:"heap_inuse_bytes"`
+	Goroutine  int        `json:"goroutines"`
+	Uptime     int64      `json:"uptime_s"`
+	DB         int64      `json:"db_bytes"`
+	LastBackup *time.Time `json:"last_backup"`
 }
 
 type diagWorker struct {
@@ -243,6 +244,11 @@ func (b *bridge) diagnosticReport() diagReport {
 	}
 	b.diag.turns.each(func(t *diagTurn) { out.Turns = append(out.Turns, *t) })
 	b.diag.mu.Unlock()
+	if b.db != nil {
+		if at := b.db.lastBackup.Load(); at != 0 {
+			out.Bridge.LastBackup = new(time.Unix(at, 0).UTC())
+		}
+	}
 	slices.Reverse(out.Turns)
 	if b.ws != nil {
 		out.Devices = b.ws.diagDevices()

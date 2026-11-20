@@ -22,7 +22,7 @@ func TestAppVMLeavesHubUnlockedAndCannotPublishAfterExit(t *testing.T) {
 		const code = `function init() { return {color: "red"}; }
 			function render(s) { return '<svg><rect width="360" height="360" fill="' + s.color + '"/></svg>'; }
 			function onTap(s) { waitForTest(); s.color = "lime"; chime("tap"); }`
-		a, views, err := initApp(savedApp{Code: code}, []appPlayer{{id: d.key}}, nil, []*wsDevice{d}, nil)
+		a, views, err := initApp(savedApp{Code: code}, []appPlayer{{id: d.key}}, nil, []*wsDevice{d}, nil, buildScreen)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +91,7 @@ func TestAppSandboxAndErrors(t *testing.T) {
 		{`function render(){storeSet("score",1); return "<svg/>"}`, "only available"},
 	} {
 		start := time.Now()
-		_, _, err := initApp(savedApp{Code: tc.code}, players, nil, nil, nil)
+		_, _, err := initApp(savedApp{Code: tc.code}, players, nil, nil, nil, buildScreen)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("want %q, got %v", tc.want, err)
 		}
@@ -103,7 +103,7 @@ func TestAppSandboxAndErrors(t *testing.T) {
 		if ([typeof require,typeof process,typeof fetch,typeof setTimeout,typeof readFile].some(x=>x!=="undefined")) throw "host leak";
 		return '<svg/>';
 	} function onTap(){while(true){}}`
-	app, _, err := initApp(savedApp{Code: code}, players, nil, nil, nil)
+	app, _, err := initApp(savedApp{Code: code}, players, nil, nil, nil, buildScreen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestAppAndEmitNamedSFX(t *testing.T) {
 	}
 	toolTest(t, base, "emit", object{"to": id, "chime": "unknown"}, true)
 	a, _, err := initApp(savedApp{Code: `function render(){return "<svg/>"} function onUp(){sfxAll("pop");}`},
-		[]appPlayer{{id: id}}, nil, nil, nil)
+		[]appPlayer{{id: id}}, nil, nil, nil, buildScreen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ function render(s,p) {
 }`
 
 func TestTicTacToePersonalizedAndAuthoritative(t *testing.T) {
-	a, views, err := initApp(savedApp{Code: ticTacToe}, []appPlayer{{"a", "Cake", 0}, {"b", "Mint", 1}}, nil, nil, nil)
+	a, views, err := initApp(savedApp{Code: ticTacToe}, []appPlayer{{"a", "Cake", 0}, {"b", "Mint", 1}}, nil, nil, nil, buildScreen)
 	if err != nil {
 		t.Fatal(err)
 	}

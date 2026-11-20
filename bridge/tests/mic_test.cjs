@@ -37,16 +37,28 @@ function worklet(sampleRate) {
   return {mic, messages, frames, ended};
 }
 
-test("detects speech during calibration and honors hysteresis and 150 quiet frames", () => {
+test("sends after 75 quiet frames below 4 seconds of voiced audio", () => {
   const {mic, frames, ended} = worklet(44100);
   frames(9, .02);
   frames(1, .1);
-  frames(149, .02);
-  frames(1, .03); // Above half the calibrated threshold (.05), but below onset.
-  frames(149, .02);
+  frames(197, .1);
+  frames(74, .02);
+  frames(1, .03); // The release threshold resets silence and counts voiced time.
+  frames(74, .02);
   frames(1, .02, false);
   mic.port.onmessage({data:"flush"});
-  ended("auto_end", 310);
+  ended("auto_end", 357);
+});
+
+test("sends after 150 quiet frames at 4 seconds of voiced audio", () => {
+  const {frames, ended} = worklet(48000);
+  frames(10, .02);
+  frames(100, .1);
+  frames(74, .02); // Gaps do not count as voiced time.
+  frames(100, .1);
+  frames(149, .02);
+  frames(1, .02, false);
+  ended("auto_end", 434);
 });
 
 test("sends quiet recordings at 8 s and caps voiced recordings at 60 s", () => {

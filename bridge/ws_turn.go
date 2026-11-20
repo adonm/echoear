@@ -342,6 +342,11 @@ func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *Aud
 	if !h.active(d) || d.turn != id || ctx.Err() != nil {
 		return
 	}
+	if stream == nil {
+		h.stopPlayback(d, true)
+		h.playbackDone(d, time.Now())
+		return
+	}
 	// The turn deadline bounds synthesis; it must not cut off paced playback
 	// of PCM that is already available. An interrupt still calls stopPlayback.
 	h.playTraced(d, stream, traceFrom(ctx), start)

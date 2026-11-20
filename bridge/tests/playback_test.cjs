@@ -1,14 +1,12 @@
 const assert = require("node:assert/strict");
-const {readFileSync} = require("node:fs");
-const {join} = require("node:path");
 const {test} = require("node:test");
-const {runInNewContext} = require("node:vm");
 
-test("schedules a 12-second reply gaplessly and acknowledges only after its final source ends", () => {
+test("schedules a 12-second reply gaplessly and acknowledges only after its final source ends", async () => {
   const sources = [], events = [];
   const context = {
     state: "running",
     currentTime: 0,
+    createGain: () => ({gain:{value:0}, connect() {}}),
     createBuffer: (_, count, rate) => ({duration: count / rate, getChannelData: () => new Float32Array(count)}),
     createBufferSource() {
       return {
@@ -20,11 +18,8 @@ test("schedules a 12-second reply gaplessly and acknowledges only after its fina
     },
   };
   const dom = new Map();
-  const source = readFileSync(join(__dirname, "../web/client.js"), "utf8");
-  const client = {
-    ArrayBuffer, URL, context,
-    location: {href: "https://echoear.test/app"},
-    localStorage: {getItem: key => key === "echoear-phone" ? "phone-1234" : null},
+  Object.assign(globalThis, {
+    AudioContext: class { constructor() { return context; } },
     document: {
       addEventListener() {},
       getElementById(id) {
@@ -34,19 +29,21 @@ test("schedules a 12-second reply gaplessly and acknowledges only after its fina
     },
     matchMedia: () => ({addEventListener() {}}),
     WebSocket: {OPEN: 1},
-    socket: {readyState: 1, send: raw => events.push(JSON.parse(raw))},
-  };
-  runInNewContext(source + "\naudio = context; view = {virtual:true}; ws = socket;", client);
+  });
+  const {audioReady, handleTTS, playPCM} = await import("../web/audio.js");
+  const {state} = await import("../web/state.js");
+  state.ws = {readyState:1, send:raw => events.push(JSON.parse(raw))};
+  assert.equal(await audioReady(), true);
 
   const packet = new Uint8Array(4001);
   packet[0] = 2;
-  client.command({op:"tts", state:"start", audio:42});
-  for (let i = 0; i < 8; i++) client.playPCM(packet.buffer);
+  handleTTS({state:"start", audio:42});
+  for (let i = 0; i < 8; i++) playPCM(packet.buffer);
   context.currentTime = .5;
   context.state = "suspended";
-  client.syncSpeaker();
-  for (let i = 8; i < 96; i++) client.playPCM(packet.buffer);
-  client.command({op:"tts", state:"end", audio:42});
+  context.onstatechange();
+  for (let i = 8; i < 96; i++) playPCM(packet.buffer);
+  handleTTS({state:"end", audio:42});
   assert.equal(sources.length, 96);
   assert.ok(sources[0].at > 0);
   for (const [i, s] of sources.entries()) {
@@ -54,7 +51,7 @@ test("schedules a 12-second reply gaplessly and acknowledges only after its fina
     if (i) assert.equal(s.at, sources[i-1].at + sources[i-1].buffer.duration);
   }
   context.state = "running";
-  client.syncSpeaker();
+  context.onstatechange();
   for (const s of sources.slice(0, -1)) s.onended();
   assert.deepEqual(events, []);
   sources.at(-1).onended();
