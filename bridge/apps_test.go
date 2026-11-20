@@ -411,13 +411,83 @@ func TestAppAndEmitNamedSFX(t *testing.T) {
 		})
 	}
 	toolTest(t, base, "emit", object{"to": id, "chime": "unknown"}, true)
-	a, _, err := initApp(savedApp{Code: `function render(){return "<svg/>"} function onUp(){sfxAll("pop");}`},
+	a, _, err := initApp(savedApp{Code: `function render(){return "<svg/>"} function onUp(){sfxAll("pop"); sfxAll("cancel");}`},
 		[]appPlayer{{id: id}}, nil, nil, nil, buildScreen)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.update(appEvent{kind: "up"}, nil); err != nil || len(a.effects) != 1 || !a.effects[0].all {
-		t.Fatalf("sfxAll did not broadcast: %v", err)
+	if _, err := a.update(appEvent{kind: "up"}, nil); err != nil || len(a.effects) != 2 ||
+		a.effects[0].kind != "pcm" || !a.effects[0].all ||
+		a.effects[1].kind != "chime" || a.effects[1].text != "cancel" || !a.effects[1].all {
+		t.Fatalf("sfxAll did not broadcast a preset and a chime: %v", err)
+	}
+}
+
+func TestAppSFXChimeAndUnknownSoundKeepGameRunning(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-game"
+	board := testConnectWS(t, base, "unit", false)
+	board.helloV2(t, id, "Cake")
+	const code = `
+	function init(){ return {level:1}; }
+	function render(s){ return '<svg><rect data-id="next" x="120" y="160" width="120" height="40"/>'+
+		'<text x="120" y="120" fill="white">Level '+s.level+'</text></svg>'; }
+	function onTap(s,p,id){ if(id==="next"){ sfx(s.level===1 ? "tap" : "nope"); return {level:s.level+1}; } }`
+	out := toolTest(t, base, "app", object{"devices": id, "code": code}, false)
+	if _, warned := out["layout_warnings"]; warned {
+		t.Fatal(out)
+	}
+	board.until(t, isDisplay)
+	tap := func() { board.json(t, object{"ev": "tap", "x": 180, "y": 180}) }
+	checkLevel := func(want json.Number) {
+		t.Helper()
+		active, _ := stateMe(t, base, id)["active_app"].(object)
+		state, _ := active["state"].(object)
+		if state["level"] != want {
+			t.Fatalf("wanted open app at level %s, got %v", want, active)
+		}
+	}
+	tap()
+	board.until(t, hasWS("chime", `"kind":"tap"`))
+	board.until(t, isDisplay)
+	checkLevel("2")
+
+	tap()
+	board.until(t, func(f wsFrame) bool {
+		if hasWS("chime", "")(f) || isPlayback(f) {
+			t.Fatalf("unknown sound should be silent: %q", f.data)
+		}
+		return isDisplay(f)
+	})
+	checkLevel("3")
+}
+
+func TestAppLaunchReportsLayoutWarnings(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const roundID, rectID = "echoear-round", "box3-rect"
+	for _, dev := range []struct{ id, board string }{{roundID, "esp-vocat"}, {rectID, "esp-box-3"}} {
+		c := testConnectWS(t, base, "unit", false)
+		c.json(t, object{"ev": "hello", "role": "device", "device_id": dev.id, "proto": 2, "board": dev.board})
+		c.until(t, isDisplay)
+	}
+	const svg = `<svg><rect data-id="next" x="150" y="270" width="60" height="25"/>
+		<rect data-id="wide" x="80" y="12" width="200" height="24"/></svg>`
+	const overlap = `control "next" overlaps bottom Cat exit button (keep controls above y=296)`
+	const bezel = `control "wide" clips outside the round display bezel`
+	for _, tc := range []struct {
+		title   string
+		devices any
+		want    []any
+	}{
+		{"rect only", rectID, []any{overlap}},
+		{"mixed", []string{rectID, roundID}, []any{bezel, overlap}},
+	} {
+		t.Run(tc.title, func(t *testing.T) {
+			out := toolTest(t, base, "app", object{"devices": tc.devices, "svg": svg}, false)
+			if warnings, _ := out["layout_warnings"].([]any); !slices.Equal(warnings, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, out)
+			}
+		})
 	}
 }
 

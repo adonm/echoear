@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
@@ -298,19 +299,27 @@ func (a *appInstance) initVM(initial json.RawMessage) error {
 		}
 		return s.String(), true
 	}
+	checkEffectLimit := func() {
+		if len(a.effects) >= 8 {
+			panic(vm.NewTypeError("Too many app effects"))
+		}
+	}
 	run := func(name string, f func(goja.FunctionCall) goja.Value) {
 		_ = vm.Set(name, func(c goja.FunctionCall) goja.Value {
 			if !a.allowEffects {
 				panic(vm.NewTypeError("%s is only available in onTap/onDrag/onUp/onTick", name))
 			}
-			if len(a.effects) >= 8 {
-				panic(vm.NewTypeError("Too many app effects"))
-			}
 			return f(c)
 		})
 	}
+	addEffect := func(e appEffect) goja.Value {
+		checkEffectLimit()
+		a.effects = append(a.effects, e)
+		return goja.Undefined()
+	}
 	for _, name := range []string{"play", "playAll"} {
 		run(name, func(c goja.FunctionCall) goja.Value {
+			checkEffectLimit()
 			var notes any
 			v := c.Argument(0)
 			if s, ok := asString(v); ok {
@@ -330,39 +339,49 @@ func (a *appInstance) initVM(initial json.RawMessage) error {
 			if err != nil {
 				bad(err)
 			}
-			a.effects = append(a.effects, appEffect{kind: "pcm", pcm: pcm, all: name == "playAll"})
-			return goja.Undefined()
+			return addEffect(appEffect{kind: "pcm", pcm: pcm, all: name == "playAll"})
 		})
 	}
+	isAppChime := func(kind string) bool { return kind == "cancel" || validChime(kind) }
+	warnedSFX := false
 	for _, name := range []string{"sfx", "sfxAll"} {
 		run(name, func(c goja.FunctionCall) goja.Value {
 			kind, _ := asString(c.Argument(0))
+			all := name == "sfxAll"
+			if isAppChime(kind) {
+				return addEffect(appEffect{kind: "chime", text: kind, all: all})
+			}
+			if _, ok := sfxPresets[kind]; !ok {
+				if !warnedSFX {
+					warnedSFX = true
+					slog.Warn("Unknown app sound ignored", "app", a.spec.Name, "function", name, "sound", truncate(kind, 80))
+				}
+				return goja.Undefined()
+			}
+			checkEffectLimit()
 			pcm, err := sfxPCM(kind)
 			if err != nil {
 				bad(err)
 			}
-			a.effects = append(a.effects, appEffect{kind: "pcm", pcm: pcm, all: name == "sfxAll"})
-			return goja.Undefined()
+			return addEffect(appEffect{kind: "pcm", pcm: pcm, all: all})
 		})
 	}
 	run("chime", func(c goja.FunctionCall) goja.Value {
 		kind, _ := asString(c.Argument(0))
-		if !validChime(kind) {
+		if !isAppChime(kind) {
 			panic(vm.NewTypeError("Unknown chime kind"))
 		}
-		a.effects = append(a.effects, appEffect{kind: "chime", text: kind})
-		return goja.Undefined()
+		return addEffect(appEffect{kind: "chime", text: kind})
 	})
 	run("say", func(c goja.FunctionCall) goja.Value {
 		text, _ := asString(c.Argument(0))
 		if clean := shortText(text, 100, true); clean != "" {
-			a.effects = append(a.effects, appEffect{kind: "say", text: clean})
+			return addEffect(appEffect{kind: "say", text: clean})
 		}
 		return goja.Undefined()
 	})
 	run("exit", func(goja.FunctionCall) goja.Value {
-		a.effects = append(a.effects, appEffect{kind: "exit"})
-		return goja.Undefined()
+		return addEffect(appEffect{kind: "exit"})
 	})
 	_ = vm.Set("storeGet", func(c goja.FunctionCall) goja.Value {
 		key, _ := asString(c.Argument(0))
@@ -386,6 +405,7 @@ func (a *appInstance) initVM(initial json.RawMessage) error {
 		return v
 	})
 	run("storeSet", func(c goja.FunctionCall) goja.Value {
+		checkEffectLimit()
 		key, _ := asString(c.Argument(0))
 		if !memoryKeyRE.MatchString(key) {
 			panic(vm.NewTypeError("Invalid app memory key"))
@@ -398,8 +418,7 @@ func (a *appInstance) initVM(initial json.RawMessage) error {
 		if !ok || len(s) > 16384 {
 			panic(vm.NewTypeError("Expected a JSON value of up to 16384 bytes"))
 		}
-		a.effects = append(a.effects, appEffect{kind: "store", text: key, value: json.RawMessage(s)})
-		return goja.Undefined()
+		return addEffect(appEffect{kind: "store", text: key, value: json.RawMessage(s)})
 	})
 	_ = vm.Set("app", goja.Undefined())
 	if _, err := a.runJS(func() (goja.Value, error) { return vm.RunScript("app.js", a.spec.Code) }); err != nil {
@@ -727,6 +746,24 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	if err != nil {
 		return nil, problem(400, err.Error())
 	}
+	out := object{"ok": true, "devices": ids, "title": a.Title, "hit_ids": appHitIDs(screens...)}
+	if inst.snapshot != nil {
+		out["state"] = inst.snapshot
+	}
+	round := slices.ContainsFunc(devices, func(d *wsDevice) bool { return d.screen.shape == "round" })
+	seen := map[string]bool{}
+	var warnings []string
+	for _, screen := range screens {
+		for _, warning := range layoutWarnings(screen.hits, round) {
+			if !seen[warning] {
+				seen[warning] = true
+				warnings = append(warnings, warning)
+			}
+		}
+	}
+	if len(warnings) > 0 {
+		out["layout_warnings"] = warnings
+	}
 	h.mu.Lock()
 	for i, d := range devices {
 		if !h.active(d) {
@@ -749,10 +786,6 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	if inst.hooks["tick"] != nil && a.TickMS != 0 {
 		inst.remaining = a.MaxTicks
 		inst.nextTick = now.Add(time.Duration(a.TickMS) * time.Millisecond)
-	}
-	out := object{"ok": true, "devices": ids, "title": a.Title, "hit_ids": appHitIDs(screens...)}
-	if inst.snapshot != nil {
-		out["state"] = inst.snapshot
 	}
 	for _, d := range devices {
 		if d.app == nil {

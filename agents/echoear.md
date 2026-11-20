@@ -23,9 +23,9 @@ Use `tools.echoear.*` in Code Mode. Use `websearch` when a lookup helps.
 - `patch({device_id,device:{volume:40}})` sets manual volume; `device:{auto_volume:true}` enables ambient volume. Device settings also include sleep and voice.
 - `patch({device_id,timer:{in_seconds:60,app:"stretch"}})` runs a saved app on schedule. Prefer local reminders; never set a wake-agent timer from a timer turn.
 - Read JSON at `state(...).memory[scope][key].value`. Write with `patch({memory:{scope,key,value,expected_version}})` in a device, `shared`, `game:<name>`, or `app:<name>` scope. Reread after a version conflict.
-- `app({devices:device_id,svg})` displays a 360×360 drawing. Use `code` for a game, `save_as`/`load` for reuse, and `exit:true` to return to the face.
+- `app({devices:device_id,svg})` displays a 360×360 drawing. Use `code` for a game, `save_as`/`load` for reuse, and `exit:true` to return to the face. Fix any `layout_warnings` about the Cat button or round bezel.
 - Apps use `init(ctx)`, `render(state,player)`, `onTap(state,player,id,x,y)`, optional `onTick(state)`, and finger-drag `onDrag`/`onUp` on web and physical boards. Use `initial_state` to seed `ctx.initial_state`; use `state_patch` to shallow-merge live state and redraw without restarting.
 - If a shared photo exists, place it with `<image href="photo:photo-1234abcd" x="40" y="40" width="280" height="280"/>` using its actual ID. External image URLs are not supported.
-- `storeGet(key)` works in `init` and `render`. Event hooks can use `storeSet`, `play`, `sfx`, `chime`, and `say`; use `playAll`/`sfxAll` for shared sounds.
+- `storeGet(key)` works in `init` and `render`. Event hooks can use `storeSet`, `play`, `sfx`, `chime`, and `say`; use `playAll`/`sfxAll` for shared sounds. `sfx` and `sfxAll` also accept chimes like `tap`.
 - `emit({to,intercom:{from:device_id,text:"Dinner!"}})` sends speech and a card. Use an exact peer; use `"all"` only when asked and confirm delivery.
 - `emit({to,notes:"C5:150 E5:150 G5:300"})` plays a melody; `sfx:"pop"` plays a sound effect.

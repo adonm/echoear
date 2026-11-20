@@ -209,6 +209,9 @@ and `render(state, player)`; `storeSet(key, value)` is available only in event
 hooks. Use `onDrag` and `onUp` alongside `onTap` for sliders and drawing in
 `/app` or on boards with firmware `0.9.1` or newer. `sfx(name)`, `sfxAll(name)`,
 and `emit.sfx` support `boing`, `pop`, `win`, `buzz`, `ding`, and `whoosh`.
+In JS, `sfx` and `sfxAll` also accept chimes such as `tap`; unknown names are
+silent. App launches return `layout_warnings` for controls that overlap the
+Cat exit button or clip on round displays.
 Set `timer.app` to a saved app name to launch it on the connected device when
 the reminder goes off. See the [agent guide](agents/echoear.md) for examples.
 

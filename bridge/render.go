@@ -58,6 +58,7 @@ func inScreenCircle(x, y int) bool {
 type hitBox struct {
 	id             string
 	x1, y1, x2, y2 int
+	bounds         svgBounds // Transformed control bounds before touch padding and canvas clipping.
 }
 
 type svgScreen struct {
@@ -175,6 +176,45 @@ func hitID(hits []hitBox, x, y int) string {
 		}
 	}
 	return ""
+}
+
+func layoutWarnings(hits []hitBox, round bool) []string {
+	var exits []hitBox
+	for _, h := range hits {
+		if h.id == exitNode {
+			exits = append(exits, h)
+		}
+	}
+	const r = screenSize / 2
+	outside := func(x, y, radius float64) bool {
+		return (x-r)*(x-r)+(y-r)*(y-r) > radius*radius
+	}
+	var warnings []string
+	for _, h := range hits {
+		if h.id == exitNode {
+			continue
+		}
+		if slices.ContainsFunc(exits, func(e hitBox) bool {
+			return h.x1 <= e.x2 && e.x1 <= h.x2 && h.y1 <= e.y2 && e.y1 <= h.y2
+		}) {
+			warnings = append(warnings, fmt.Sprintf("control %q overlaps bottom Cat exit button (keep controls above y=296)", h.id))
+		}
+		if round {
+			b := h.bounds
+			corners := 0
+			for _, x := range [...]float64{b.x1, b.x2} {
+				for _, y := range [...]float64{b.y1, b.y2} {
+					if outside(x, y, r) {
+						corners++
+					}
+				}
+			}
+			if outside((b.x1+b.x2)/2, (b.y1+b.y2)/2, r-6) || corners >= 2 {
+				warnings = append(warnings, fmt.Sprintf("control %q clips outside the round display bezel", h.id))
+			}
+		}
+	}
+	return warnings
 }
 
 type svgNode struct {
@@ -607,8 +647,8 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 	}
 	var hits []hitBox
 	hasExit := false
-	var walk func(*svgNode, rasterx.Matrix2D, svgTextStyle, bool) error
-	walk = func(n *svgNode, m rasterx.Matrix2D, style svgTextStyle, defs bool) error {
+	var walk func(*svgNode, rasterx.Matrix2D, svgTextStyle, bool, int) error
+	walk = func(n *svgNode, m rasterx.Matrix2D, style svgTextStyle, defs bool, pad int) error {
 		defs = defs || n.tag == "defs" || n.tag == "linearGradient" || n.tag == "radialGradient" || n.tag == "stop"
 		if raw := n.attr["transform"]; raw != "" {
 			local, _ := svgMatrix(raw)
@@ -653,8 +693,8 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 				out = svgBounds{min(x, out.x1), min(y, out.y1), max(x, out.x2), max(y, out.y2)}
 			}
 			const last = screenSize - 1
-			h := hitBox{id, max(0, int(math.Floor(out.x1))-8), max(0, int(math.Floor(out.y1))-8),
-				min(last, int(math.Ceil(out.x2))+8), min(last, int(math.Ceil(out.y2))+8)}
+			h := hitBox{id, max(0, int(math.Floor(out.x1))-pad), max(0, int(math.Floor(out.y1))-pad),
+				min(last, int(math.Ceil(out.x2))+pad), min(last, int(math.Ceil(out.y2))+pad), out}
 			if h.x1 <= h.x2 && h.y1 <= h.y2 {
 				hits = append(hits, h)
 				hasExit = hasExit || id == exitNode
@@ -666,19 +706,19 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 			delete(n.attr, "data-id")
 		}
 		for _, child := range n.children {
-			if err := walk(child, m, style, defs); err != nil {
+			if err := walk(child, m, style, defs, pad); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := walk(root, rasterx.Identity, svgTextStyle{}, false); err != nil {
+	if err := walk(root, rasterx.Identity, svgTextStyle{}, false, 8); err != nil {
 		return preparedScene{}, err
 	}
 	background := root.background()
 	if exit && !hasExit {
-		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,300,86,36"><rect x="137" y="300" width="86" height="36" rx="18" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="324" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Cat</text></g></svg>`)
-		_ = walk(pill, rasterx.Identity, svgTextStyle{}, false)
+		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Cat</text></g></svg>`)
+		_ = walk(pill, rasterx.Identity, svgTextStyle{}, false, 4)
 		if root.attr["transform"] != "" || root.attr["opacity"] != "" {
 			// Keep the bridge's escape hatch outside the author's transform/opacity.
 			pill.children = append([]*svgNode{root.asGroup()}, pill.children...)

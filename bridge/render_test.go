@@ -356,8 +356,44 @@ func TestPreparedSceneBrowserControlsMatchHits(t *testing.T) {
 		}
 	}
 	slices.Reverse(browser)
-	if len(browser) != 3 || !slices.Equal(browser, scene.hits) || hitID(scene.hits, 45, 40) != "front" || hitID(scene.hits, 180, 318) != exitNode {
+	sameHit := func(wire, hit hitBox) bool {
+		hit.bounds = svgBounds{}
+		return wire == hit
+	}
+	if len(browser) != 3 || !slices.EqualFunc(browser, scene.hits, sameHit) || hitID(scene.hits, 45, 40) != "front" || hitID(scene.hits, 180, 318) != exitNode {
 		t.Fatalf("browser %v; hit targets %v", browser, scene.hits)
+	}
+}
+
+func TestAppLayoutWarnings(t *testing.T) {
+	for _, tc := range []struct {
+		name, controls string
+		want           []string
+	}{
+		{"safe", `<rect data-id="top" x="110" y="18" width="140" height="32"/>
+			<rect data-id="next" x="150" y="270" width="60" height="21"/>
+			<rect data-id="one-corner" x="55" y="34" width="70" height="66"/>`, nil},
+		{"padded overlap", `<rect data-id="next" x="150" y="270" width="60" height="25"/>`,
+			[]string{`control "next" overlaps bottom Cat exit button (keep controls above y=296)`}},
+		{"two corners", `<rect data-id="wide" x="80" y="12" width="200" height="24"/>`,
+			[]string{`control "wide" clips outside the round display bezel`}},
+		{"center margin", `<rect data-id="high" x="171" y="2" width="18" height="6"/>`,
+			[]string{`control "high" clips outside the round display bezel`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			screen, err := buildScreen("<svg>"+tc.controls+"</svg>", true, roundScreen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := layoutWarnings(screen.hits, true); !slices.Equal(got, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+			exit := screen.hits[0]
+			if exit.id != exitNode || exit.x1 != 133 || exit.y1 != 300 || exit.x2 != 227 || exit.y2 != 340 ||
+				!inScreenCircle(exit.x1, exit.y2) || !inScreenCircle(exit.x2, exit.y2) {
+				t.Fatalf("exit target drifted or clipped: %+v", exit)
+			}
+		})
 	}
 }
 
