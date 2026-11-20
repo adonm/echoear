@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"mime"
 	"net/http"
 	"net/url"
@@ -115,8 +114,8 @@ func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
 			version = mcpProtocol
 		}
 		result = object{"protocolVersion": version, "capabilities": object{"tools": object{}},
-			"serverInfo":   object{"name": "echoear", "version": "0.3.0"},
-			"instructions": "Use the exact EchoEar device_id from the conversation. Use scene/patch tap and cycle for local interaction, with move and revert_ms for motion. Reserve wait_event for input needed by the current turn; pass the latest event_cursor."}
+			"serverInfo":   object{"name": "echoear", "version": "2.0.0"},
+			"instructions": "Use the exact EchoEar device ID. Inspect live context, run an SVG drawing or sandboxed JS app, act on a device, or store persistent JSON. Only final assistant prose is spoken."}
 	case "ping":
 		result = object{}
 	case "tools/list":
@@ -164,10 +163,8 @@ func mcpObject(raw []byte) (object, error) {
 }
 
 var mcpTools = func() []object {
-	str := func(description string) object { return object{"type": "string", "description": description} }
-	integer := func(description string, min, max int) object {
-		return object{"type": "integer", "minimum": min, "maximum": max, "description": description}
-	}
+	text, number, flag := object{"type": "string"}, object{"type": "integer"}, object{"type": "boolean"}
+	enum := func(items ...string) object { return object{"type": "string", "enum": items} }
 	array := func(items object) object { return object{"type": "array", "items": items} }
 	schema := func(props object, required ...string) object {
 		if required == nil {
@@ -175,109 +172,24 @@ var mcpTools = func() []object {
 		}
 		return object{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 	}
-	withID := func(props object, required ...string) object {
-		props["device_id"] = str("Exact EchoEar device ID")
-		return schema(props, append([]string{"device_id"}, required...)...)
-	}
 	tool := func(name, description string, in object) object {
 		return object{"name": name, "description": description, "inputSchema": in}
 	}
-	bg := str("Background color as #RRGGBB")
-	say := object{"type": "string", "maxLength": maxText, "description": "Speak plain text on the device without repeating it in the final reply"}
-	chime := object{"type": "string", "enum": []string{"tap", "think", "intercom", "celebrate"}}
-	notes := object{"type": "array", "items": str("PITCH:MS; e.g. C5:150, F#4:200, R:100, 880:200"), "minItems": 1, "maxItems": 32,
-		"description": "16 kHz melody; up to 6000 ms total"}
-	ref := func(name string) object { return object{"$ref": "#/$defs/" + name} }
-	node := object{"id": str("Stable node ID (1–24 letters, numbers, dots, underscores or hyphens)"),
-		"t": object{"type": "string", "enum": []string{"circle", "rect", "line", "tri", "arc", "text", "btn"}}}
-	for _, key := range strings.Fields("x y x1 y1 x2 y2 x3 y3 w h r") {
-		node[key] = object{"type": "integer", "description": "Pixel coordinate or dimension; clamped to 0–359"}
-	}
-	for _, key := range strings.Fields("a1 a2") {
-		node[key] = integer("Angle in degrees", 0, 360)
-	}
-	for _, key := range strings.Fields("c bc tc") {
-		node[key] = str("Color as #RRGGBB")
-	}
-	node["vis"] = object{"type": "boolean"}
-	node["fill"] = object{"type": "boolean", "description": "Fill the shape; defaults to true for tri"}
-	node["group"] = object{"type": []string{"string", "null"}, "description": "Name for moving nodes together; null clears it"}
-	node["sw"], node["fs"] = integer("Stroke width", 0, 180), integer("Font scale", 1, 3)
-	node["s"], node["on"] = str("Plain ASCII display text (no emoji)"), object{"type": "string", "enum": []string{"tap", ""}}
-	node["action"] = object{"type": "string", "enum": []string{"exit", ""}, "description": "Optional tap-back to the face"}
-	node["ask"] = str("Legacy fallback prompt if no waiter; prefer tap.ask")
-	node["tap"] = object{"description": `Local reaction; auto-enables taps. Example: {"move":{"target":"fish","dx":0,"dy":-90},"revert_ms":400}. Null removes it.`,
-		"anyOf": []object{ref("reaction"), str("Legacy spoken feedback"), {"type": "null"}}}
-	node["cycle"] = object{"description": "Rotate through 2–8 local reactions; null removes it.", "anyOf": []object{
-		{"type": "array", "items": ref("reaction"), "minItems": 2, "maxItems": 8}, {"type": "null"},
-	}}
-	extra := maps.Clone(node)
-	for _, key := range strings.Fields("id vis group on action ask tap cycle tc") {
-		delete(extra, key)
-	}
-	extra["t"] = object{"enum": []string{"rect", "circle", "line", "arc", "tri", "text"}}
-	extras := array(schema(extra, "t", "c"))
-	extras["maxItems"] = maxCatExtras
-	fields := maps.Clone(node)
-	delete(fields, "id")
-	nodes := array(ref("node"))
-	nodes["maxItems"] = maxNodes
-	patch := object{"bg": bg, "set": object{"type": "object", "additionalProperties": schema(fields),
-		"description": `Partial updates keyed by exact existing node ID. Lines use two coordinate pairs, triangles use three.`},
-		"add": nodes, "del": array(str("Node ID"))}
-	move := schema(object{"target": str("Exact node ID or group name"), "dx": object{"type": "integer"}, "dy": object{"type": "integer"}}, "target", "dx", "dy")
-	reaction := schema(object{"chime": chime, "notes": notes, "speak": object{"type": "string", "maxLength": 240, "description": "Speak locally without the AI"},
-		"patch": ref("patch"), "state": str("Switch to this named state before applying patch or move"),
-		"move": move, "revert_ms": integer("Undo visual attributes changed by move or patch.set, and any background change", 50, 10000),
-		"after_ms": integer("Delay before then; required with then, at most two chained delays", 50, 10000), "then": ref("reaction"),
-		"ask": object{"type": "string", "maxLength": 240, "description": "Start a new AI turn only when needed"}, "exit": object{"type": "boolean"},
-		"broadcast": object{"type": "boolean", "description": "Apply the local visual/audio reaction to all connected cats in the current room"},
-		"store":     schema(object{"scope": str("shared, a device ID, or game:<slug>"), "key": str("Memory key"), "value": object{}}, "scope", "key", "value")})
-	reaction["dependentRequired"] = object{"after_ms": []string{"then"}, "then": []string{"after_ms"}}
-	withSceneDefs := func(in object) object {
-		in["$defs"] = object{"node": schema(node, "id", "t"), "reaction": reaction, "patch": schema(patch)}
-		return in
-	}
-	title := str("Optional short title shown at the top")
-	states := object{"type": "object", "description": "Named screens selected by tap.state", "maxProperties": maxSceneStates, "additionalProperties": schema(object{"bg": bg, "title": title, "nodes": nodes}, "nodes")}
-	patchArgs := maps.Clone(patch)
-	patchArgs["expected_rev"] = integer("Expected scene revision", 0, 1<<32-1)
-	chimeArgs := withID(object{"kind": chime, "notes": notes})
-	chimeArgs["anyOf"] = []object{{"required": []string{"kind"}}, {"required": []string{"notes"}}}
+	notes := object{"anyOf": []object{text, array(text)}, "description": "PITCH:MS separated by spaces or an array, e.g. C5:150 E5:150"}
 	return []object{
-		tool("devices", "List physical and virtual EchoEars and their connection, mode and cursor.", schema(object{})),
-		tool("snapshot", "Read the device status, 360×360 keyed scene and last 20 events.", withID(object{})),
-		tool("scene", "Draw geometric shapes and ASCII text on a 360×360 screen, or restore the cat face. Use tap and cycle for local reactions. Use say, notes or chime for immediate audio.",
-			withSceneDefs(withID(object{"bg": bg, "title": title, "nodes": nodes, "states": states, "chime": chime, "notes": notes, "say": say,
-				"room": str("Join a live multiplayer room by slug"), "asset": str("Load saved visuals by name"), "save_as": str("Save sanitized visuals as this asset name"),
-				"preset": object{"type": "string", "enum": []string{"face"}}}))),
-		tool("patch", "Update visuals or local reactions by node ID; snapshot again if expected_rev conflicts.",
-			withSceneDefs(withID(patchArgs))),
-		tool("speak", "Speak plain text on the device. Do not repeat these words in your final reply.", withID(object{"text": str("Plain words to speak")}, "text")),
-		tool("chime", "Play a preset chime or a melody. If notes are supplied, they replace kind.", chimeArgs),
-		tool("intercom", "Send a spoken message and screen card to an explicit online peer. Use all only if asked.",
-			schema(object{"from_device_id": str("Sender ID"), "to_device_id": str("Recipient ID or all"), "text": str("Message to speak")}, "from_device_id", "to_device_id", "text")),
-		tool("control", "Set a connected device's volume, put it to sleep, or wake it. Supply volume, sleep, or both.",
-			withID(object{"volume": integer("Speaker volume", 0, 100), "sleep": object{"type": "boolean", "description": "True dims and sleeps; false wakes"}})),
-		tool("cat", "Get or edit a persistent animated cat. Use device_id for get, update, load_saved, reset_blank; use slug for load_saved or delete_saved. List saved cats without a device.",
-			schema(object{"op": object{"enum": []string{"get", "update", "list_saved", "load_saved", "reset_blank", "delete_saved"}},
-				"device_id": str("Exact EchoEar device ID"), "slug": str("Saved cat slug"), "name": object{"type": "string", "maxLength": 40},
-				"face_bg": bg, "mark_color": str("Forehead mark color as #RRGGBB"), "accent_color": str("UI accent as #RRGGBB"),
-				"personality": object{"type": "string", "maxLength": 160}, "voice": str("Kokoro voice ID (e.g. af_heart, bm_fable)"),
-				"extras": extras, "configured": object{"type": "boolean"}, "save_profile": object{"type": "boolean"}}, "op")),
-		tool("memory", "List, get, set or delete persistent JSON for a device, shared, or a game room. Use expected_version to prevent lost updates.",
-			schema(object{"op": object{"enum": []string{"list", "get", "set", "delete"}}, "scope": str("shared, a device ID, or game:<slug>"),
-				"key": str("Memory key"), "value": object{}, "expected_version": integer("Zero requires a new key; otherwise require this version", 0, 1<<53-1)}, "op", "scope")),
-		tool("asset", "Save, list, get or delete reusable scene visuals and local reactions by name.",
-			withSceneDefs(schema(object{"op": object{"enum": []string{"save", "list", "get", "delete"}}, "name": str("Asset slug"),
-				"kind": object{"enum": []string{"scene", "nodes"}}, "author": str("Optional author"), "bg": bg, "title": title, "nodes": nodes, "states": states}, "op"))),
-		tool("timer", "Set, list or cancel restart-safe timers. Default firing is local; wake_agent starts a new bounded turn instead.",
-			withID(object{"op": object{"enum": []string{"set", "list", "cancel"}}, "id": str("Timer ID to cancel"), "all": object{"type": "boolean"},
-				"in_seconds": integer("Delay in seconds; at least 30 for wake_agent", 1, 86400), "at": str("RFC3339 time within 24 hours, instead of in_seconds"),
-				"label": str("Short timer label"), "say": say, "chime": chime, "wake_agent": object{"type": "boolean"}}, "op")),
-		tool("wait_event", "Wait for input needed by the current turn; use local reactions for regular controls. On timeout or cancellation, event is null.",
-			withID(object{"after_cursor": integer("Last cursor seen; defaults to current cursor", 0, 1<<53-1),
-				"timeout_ms": integer("Defaults to 15000; clamped to 60000", 0, 60000)})),
+		tool("inspect", "Read live cat, clock, peers, screen, app, timers, memory keys, and saved cats/apps. Omit device_id for discovery.",
+			schema(object{"device_id": text})),
+		tool("run_app", "Display a 360×360 SVG, run a sandboxed JS app, load/save by slug, or exit back to the cat face. One shared app state across devices, render(state, player) per device.",
+			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
+				"load": text, "save_as": text, "tick_ms": number, "max_ticks": number, "exit": flag}, "devices")),
+		tool("act", "Send a spoken intercom, play a melody/chime, change device controls, set/cancel a timer, or design/load a cat.",
+			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"), "notes": notes, "chime": enum("tap", "think", "intercom", "celebrate"),
+				"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "sleep": flag,
+				"timer": schema(object{"op": enum("set", "cancel"), "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag}, "op"),
+				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
+					"personality": text, "voice": text, "svg_extras": text, "extras": array(object{"type": "object"}), "slug": text, "configured": flag}, "op")}, "to")),
+		tool("store", "Read/write persistent JSON in a device, shared, game:<name>, or app:<name> scope. expected_version is atomic; zero means no key exists.",
+			schema(object{"op": enum("get", "set", "delete", "list"), "scope": text, "key": text, "value": object{}, "expected_version": number}, "op", "scope")),
 	}
 }()
 
@@ -495,6 +407,201 @@ func mcpUint(args object, key string) (*uint64, error) {
 }
 
 func (b *bridge) callMCP(ctx context.Context, name string, args object) (object, error) {
+	switch name {
+	case "inspect":
+		return b.inspect(ctx, str(args["device_id"]))
+	case "run_app":
+		return b.runApp(ctx, args)
+	case "act":
+		return b.act(ctx, args)
+	case "store":
+		return b.memory(ctx, args, false)
+	default:
+		return nil, problem(400, "Unknown tool")
+	}
+}
+
+func (b *bridge) inspect(ctx context.Context, id string) (object, error) {
+	devices, err := b.deviceList()
+	if err != nil {
+		return nil, err
+	}
+	out := object{"me": nil, "now": time.Now().Format(time.RFC3339), "peers": []object{}, "screen": nil, "active_app": nil,
+		"timers": []savedTimer{}, "memory_keys": []object{}, "saved_cats": []object{}, "saved_apps": []object{}}
+	list := []object{}
+	for _, entry := range devices {
+		p := object{"device_id": entry["device_id"], "name": entry["character"], "online": entry["online"], "kind": entry["kind"]}
+		if str(entry["device_id"]) == id {
+			p["mode"], p["volume"], p["battery_pct"], p["ws_connected"] = entry["mode"], entry["volume"], entry["battery_pct"], entry["ws_connected"]
+			out["me"] = p
+		} else {
+			list = append(list, p)
+		}
+	}
+	if id != "" {
+		if out["me"] == nil {
+			return nil, problem(404, "Device not found")
+		}
+		who, err := b.lookupDevice(id)
+		if err != nil {
+			return nil, err
+		}
+		out["me"].(object)["cat"] = b.catFor(who)
+		if h := b.ws; h != nil {
+			h.mu.Lock()
+			if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
+				title := d.scene.title
+				if title == "" {
+					title = "Cat"
+				}
+				hits := []string{}
+				for _, hit := range d.svg.hits {
+					if !slices.Contains(hits, hit.id) {
+						hits = append(hits, hit.id)
+					}
+				}
+				out["screen"] = object{"title": title, "rev": d.rev, "hit_ids": hits}
+				if a := d.app; a != nil {
+					players := []string{}
+					for _, p := range a.devices {
+						if p != nil && h.active(p) {
+							players = append(players, p.who.DeviceID)
+						}
+					}
+					out["active_app"] = object{"name": a.spec.Name, "title": a.spec.Title, "kind": a.spec.Kind, "devices": players, "ticks_left": a.remaining}
+				}
+			}
+			h.mu.Unlock()
+		}
+	}
+	out["peers"] = list
+	if b.timers != nil {
+		out["timers"], err = b.timers.list(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if b.db != nil {
+		if id != "" {
+			for _, scope := range []string{id, "shared"} {
+				m, err := b.memory(ctx, object{"op": "list", "scope": scope}, false)
+				if err != nil {
+					return nil, err
+				}
+				out["memory_keys"] = append(out["memory_keys"].([]object), object{"scope": scope, "entries": m["entries"]})
+			}
+		}
+		cats, err := b.catTool(ctx, object{"op": "list_saved"})
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range cats["cats"].([]savedCat) {
+			out["saved_cats"] = append(out["saved_cats"].([]object), object{"slug": c.Slug, "name": c.Name})
+		}
+		out["saved_apps"], err = b.listApps(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (b *bridge) act(ctx context.Context, args object) (object, error) {
+	to := str(args["to"])
+	if !deviceIDRE.MatchString(to) {
+		return nil, problem(400, "Expected exact device ID or all")
+	}
+	if to == "all" && (len(args) != 2 || args["intercom"] == nil) {
+		return nil, problem(400, "Use all only for intercom")
+	}
+	out := object{"ok": true, "to": to}
+	var pcm []byte
+	kind := str(args["chime"])
+	if raw, ok := args["chime"]; ok && !validChime(str(raw)) {
+		return nil, fieldError("chime", "unknown kind")
+	}
+	if raw, ok := args["notes"]; ok {
+		_, p, err := melodyInput(raw, "notes")
+		if err != nil {
+			return nil, err
+		}
+		pcm = p
+	}
+	if args["volume"] != nil || args["sleep"] != nil {
+		if b.ws == nil {
+			return nil, problem(503, "Device hub unavailable")
+		}
+		r, err := b.ws.mcpControl(to, args)
+		if err != nil {
+			return nil, err
+		}
+		out["volume"], out["sleeping"] = r["volume"], r["sleeping"]
+	}
+	if raw, ok := args["cat"]; ok {
+		c, ok := raw.(object)
+		if !ok {
+			return nil, fieldError("cat", "expected an object")
+		}
+		c = withDevice(c, to)
+		switch str(c["op"]) {
+		case "load":
+			c["op"] = "load_saved"
+			if str(c["slug"]) == "" {
+				c["slug"] = catSlug(str(c["name"]))
+			}
+		case "delete_saved":
+			if str(c["slug"]) == "" {
+				c["slug"] = catSlug(str(c["name"]))
+			}
+		case "update", "reset_blank":
+		default:
+			return nil, fieldError("cat.op", "unknown operation")
+		}
+		r, err := b.catTool(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		out["cat"] = r["cat"]
+	}
+	if raw, ok := args["timer"]; ok {
+		t, ok := raw.(object)
+		if !ok || t["op"] != "set" && t["op"] != "cancel" {
+			return nil, fieldError("timer", "expected op set or cancel")
+		}
+		r, err := b.timerMCP(ctx, withDevice(t, to))
+		if err != nil {
+			return nil, err
+		}
+		out["timer"] = r
+	}
+	if raw, ok := args["intercom"]; ok {
+		i, ok := raw.(object)
+		if !ok {
+			return nil, fieldError("intercom", "expected from and text")
+		}
+		r, err := b.mcpIntercom(ctx, object{"from_device_id": i["from"], "to_device_id": to, "text": i["text"]})
+		if err != nil {
+			return nil, err
+		}
+		out["intercom"] = r
+	}
+	if kind != "" || len(pcm) != 0 {
+		who, err := b.lookupDevice(to)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := b.mcpChime(ctx, who, kind, pcm); err != nil {
+			return nil, err
+		}
+		out["played"] = true
+	}
+	if len(out) == 2 {
+		return nil, problem(400, "Expected an action")
+	}
+	return out, nil
+}
+
+func (b *bridge) callLegacyMCP(ctx context.Context, name string, args object) (object, error) {
 	switch name {
 	case "cat":
 		return b.catTool(ctx, args)

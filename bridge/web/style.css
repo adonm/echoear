@@ -127,9 +127,9 @@ label, legend { font-size: .8rem; color: var(--muted); }
 #stage { display: block; width: 100%; height: 100%; border-radius: 50%; user-select: none; }
 #stage[data-interactive="true"] { touch-action: none; }
 #stage[data-dim="true"] { filter: brightness(.57); }
-#stage text { font-family: system-ui, sans-serif; font-weight: 800; pointer-events: none; }
+#nodes > g text { font-family: system-ui, sans-serif; font-weight: 800; pointer-events: none; }
 #nodes > g:not([data-on]) { pointer-events: none; }
-#nodes [data-on] { cursor: pointer; }
+#nodes [data-id] { cursor: pointer; }
 .screen-status { text-align: center; margin-top: .75rem; }
 .volume { width: min(100%, 22rem); margin-top: .55rem; }
 .volume output { min-width: 3ch; text-align: right; font-size: .82rem; font-variant-numeric: tabular-nums; }
@@ -162,7 +162,7 @@ label, legend { font-size: .8rem; color: var(--muted); }
   background: var(--deep);
   overflow-wrap: anywhere;
 }
-.bubble.assistant { border-inline-start: 3px solid var(--cat-accent); }
+.bubble.cat { border-inline-start: 3px solid var(--cat-accent); }
 .bubble.user { align-self: end; background: #38314e; border-radius: .9rem .9rem .28rem .9rem; }
 .bubble.intercom { border-style: dashed; border-color: #779e98; border-radius: .65rem; background: #1d3239; }
 .bubble-head, .bubble-meta { gap: .3rem .5rem; font-size: .74rem; }

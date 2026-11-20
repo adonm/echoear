@@ -1,0 +1,594 @@
+package main
+
+import (
+	"encoding/binary"
+	"encoding/xml"
+	"fmt"
+	"image"
+	imagecolor "image/color"
+	"image/draw"
+	"io"
+	"math"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/srwiley/oksvg"
+	"github.com/srwiley/rasterx"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/sfnt"
+	"golang.org/x/image/math/fixed"
+)
+
+const screenSize = 360
+const maxSVG = 64 << 10
+
+type framebuffer = [screenSize * screenSize]uint16
+type hitBox struct {
+	id             string
+	x1, y1, x2, y2 int
+}
+
+func hitID(hits []hitBox, x, y int) string {
+	if (x-180)*(x-180)+(y-180)*(y-180) > 180*180 {
+		return ""
+	}
+	for _, h := range hits {
+		if x >= h.x1 && x <= h.x2 && y >= h.y1 && y <= h.y2 {
+			return h.id
+		}
+	}
+	return ""
+}
+
+type svgNode struct {
+	tag, text string
+	attr      map[string]string
+	children  []*svgNode
+}
+
+var (
+	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight text-anchor data-id data-hit data-on")
+	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
+	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
+	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
+	svgList           = regexp.MustCompile(`^[0-9Ee.,+\s-]+$`)
+	svgPaint          = regexp.MustCompile(`^(?:[A-Za-z]+|#[0-9A-Fa-f]{3}|#[0-9A-Fa-f]{6}|rgb\([0-9.,% ]+\))$`)
+	svgRef            = regexp.MustCompile(`^url\(#([A-Za-z0-9_.-]{1,64})\)$`)
+	svgID             = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+	svgTransform      = regexp.MustCompile(`^\s*(matrix|translate|scale|rotate|skewX|skewY)\s*\(([0-9Ee.,+\s-]+)\)\s*,?`)
+	regularSVGFont, _ = sfnt.Parse(goregular.TTF)
+	boldSVGFont, _    = sfnt.Parse(gobold.TTF)
+)
+
+func wordSet(words string) map[string]bool {
+	m := map[string]bool{}
+	for _, word := range strings.Fields(words) {
+		m[word] = true
+	}
+	return m
+}
+
+func svgNums(s string) []float64 {
+	var nums []float64
+	for _, raw := range svgNumber.FindAllString(s, -1) {
+		v, _ := strconv.ParseFloat(raw, 64)
+		nums = append(nums, v)
+	}
+	return nums
+}
+
+func svgNum(s string) float64 {
+	v, _ := strconv.ParseFloat(strings.TrimSuffix(s, "px"), 64)
+	return v
+}
+
+func svgMatrix(raw string) (rasterx.Matrix2D, bool) {
+	m := rasterx.Identity
+	for len(strings.TrimSpace(raw)) != 0 {
+		part := svgTransform.FindStringSubmatch(raw)
+		if part == nil {
+			return m, false
+		}
+		n := svgNums(part[2])
+		raw = raw[len(part[0]):]
+		switch part[1] {
+		case "matrix":
+			if len(n) != 6 {
+				return m, false
+			}
+			m = m.Mult(rasterx.Matrix2D{A: n[0], B: n[1], C: n[2], D: n[3], E: n[4], F: n[5]})
+		case "translate":
+			if len(n) < 1 || len(n) > 2 {
+				return m, false
+			}
+			m = m.Translate(n[0], append(n, 0)[1])
+		case "scale":
+			if len(n) < 1 || len(n) > 2 {
+				return m, false
+			}
+			m = m.Scale(n[0], append(n, n[0])[1])
+		case "rotate":
+			if len(n) != 1 && len(n) != 3 {
+				return m, false
+			}
+			if len(n) == 3 {
+				m = m.Translate(n[1], n[2])
+			}
+			m = m.Rotate(n[0] * math.Pi / 180)
+			if len(n) == 3 {
+				m = m.Translate(-n[1], -n[2])
+			}
+		case "skewX", "skewY":
+			if len(n) != 1 {
+				return m, false
+			}
+			t := math.Tan(n[0] * math.Pi / 180)
+			if part[1] == "skewX" {
+				m = m.Mult(rasterx.Matrix2D{A: 1, C: t, D: 1})
+			} else {
+				m = m.Mult(rasterx.Matrix2D{A: 1, B: t, D: 1})
+			}
+		}
+	}
+	return m, boundedSVGMatrix(m)
+}
+
+func boundedSVGMatrix(m rasterx.Matrix2D) bool {
+	for _, n := range []float64{m.A, m.B, m.C, m.D} {
+		if !(math.Abs(n) <= 12) {
+			return false
+		}
+	}
+	return math.Abs(m.E) <= 4096 && math.Abs(m.F) <= 4096
+}
+
+func cleanSVGAttr(k, v string) (string, bool) {
+	switch k {
+	case "id":
+		return v, svgID.MatchString(v)
+	case "data-id":
+		return v, svgID.MatchString(v)
+	case "data-on":
+		return v, v == "tap" || v == "drag"
+	case "fill", "stroke", "stop-color":
+		return v, svgPaint.MatchString(v) || k != "stop-color" && svgRef.MatchString(v)
+	case "fill-rule", "stroke-linecap", "stroke-linejoin", "gradientUnits", "spreadMethod", "font-weight", "text-anchor":
+		return v, svgPaint.MatchString(v) || k == "font-weight" && svgScalar.MatchString(v)
+	case "transform", "gradientTransform":
+		_, ok := svgMatrix(v)
+		return v, ok
+	case "d":
+		if !svgPath.MatchString(v) {
+			return "", false
+		}
+	case "stroke-dasharray":
+		if v == "none" {
+			return v, true
+		}
+		if !svgList.MatchString(v) {
+			return "", false
+		}
+		for _, n := range svgNums(v) {
+			if n < 0 || n > 360 {
+				return "", false
+			}
+		}
+		if !slices.ContainsFunc(svgNums(v), func(n float64) bool { return n >= 1 }) {
+			return "", false
+		}
+	case "points", "data-hit":
+		if !svgList.MatchString(v) {
+			return "", false
+		}
+	default:
+		if !svgScalar.MatchString(v) {
+			return "", false
+		}
+	}
+	for _, n := range svgNums(v) {
+		if math.Abs(n) > 4096 {
+			return "", false
+		}
+	}
+	return v, true
+}
+
+func parseSVG(raw string) (*svgNode, error) {
+	if len(raw) > maxSVG {
+		return nil, fmt.Errorf("SVG exceeds 64 KB")
+	}
+	dec := xml.NewDecoder(strings.NewReader(raw))
+	var root *svgNode
+	var stack []*svgNode
+	nodes := 0
+	for {
+		token, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("SVG: %w", err)
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if len(stack) == 0 && (root != nil || t.Name.Local != "svg") {
+				return nil, fmt.Errorf("SVG requires one <svg viewBox=\"0 0 360 360\"> root")
+			}
+			tag := t.Name.Local
+			if len(stack) > 24 || nodes >= 512 {
+				return nil, fmt.Errorf("SVG too complex")
+			}
+			if !svgTags[tag] || t.Name.Space != "" && t.Name.Space != "http://www.w3.org/2000/svg" ||
+				len(stack) != 0 && (tag == "svg" || stack[len(stack)-1].tag == "text") {
+				if len(stack) == 0 {
+					return nil, fmt.Errorf("Invalid SVG namespace")
+				}
+				if err := dec.Skip(); err != nil {
+					return nil, fmt.Errorf("SVG: %w", err)
+				}
+				continue
+			}
+			n := &svgNode{tag: tag, attr: map[string]string{}}
+			for _, a := range t.Attr {
+				k, v := a.Name.Local, strings.TrimSpace(a.Value)
+				if a.Name.Space != "" {
+					continue
+				}
+				if len(stack) == 0 && k == "viewBox" && !slices.Equal(svgNums(v), []float64{0, 0, 360, 360}) {
+					return nil, fmt.Errorf(`SVG viewBox must be "0 0 360 360"`)
+				}
+				if svgAttrs[k] || k == "id" && (tag == "linearGradient" || tag == "radialGradient") {
+					if v, ok := cleanSVGAttr(k, v); ok {
+						n.attr[k] = v
+					}
+				}
+			}
+			if len(stack) == 0 {
+				root = n
+				root.attr["viewBox"] = "0 0 360 360"
+				root.attr["xmlns"] = "http://www.w3.org/2000/svg"
+				delete(root.attr, "width")
+				delete(root.attr, "height")
+			} else {
+				parent := stack[len(stack)-1]
+				if parent.tag == "defs" && tag != "linearGradient" && tag != "radialGradient" ||
+					(parent.tag == "linearGradient" || parent.tag == "radialGradient") && tag != "stop" {
+					if err := dec.Skip(); err != nil {
+						return nil, fmt.Errorf("SVG: %w", err)
+					}
+					continue
+				}
+				parent.children = append(parent.children, n)
+			}
+			stack = append(stack, n)
+			nodes++
+		case xml.EndElement:
+			stack = stack[:len(stack)-1]
+		case xml.CharData:
+			if len(stack) > 0 && stack[len(stack)-1].tag == "text" {
+				n := stack[len(stack)-1]
+				n.text += string(t)
+				if runeLen(n.text) > 256 {
+					return nil, fmt.Errorf("SVG text exceeds 256 characters")
+				}
+			} else if len(stack) == 0 && strings.TrimSpace(string(t)) != "" {
+				return nil, fmt.Errorf("Unexpected text outside SVG")
+			}
+		}
+	}
+	if root == nil {
+		return nil, fmt.Errorf("Missing SVG")
+	}
+	return root, nil
+}
+
+func (n *svgNode) encode(enc *xml.Encoder) {
+	start := xml.StartElement{Name: xml.Name{Local: n.tag}}
+	keys := make([]string, 0, len(n.attr))
+	for k := range n.attr {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: k}, Value: n.attr[k]})
+	}
+	_ = enc.EncodeToken(start)
+	if n.text != "" {
+		_ = enc.EncodeToken(xml.CharData(n.text))
+	}
+	for _, child := range n.children {
+		child.encode(enc)
+	}
+	_ = enc.EncodeToken(start.End())
+}
+
+func svgString(n *svgNode) string {
+	var out strings.Builder
+	enc := xml.NewEncoder(&out)
+	n.encode(enc)
+	_ = enc.Flush()
+	return out.String()
+}
+
+type svgBounds struct{ x1, y1, x2, y2 float64 }
+
+func (n *svgNode) bounds() (svgBounds, bool) {
+	v := func(k string) float64 { return svgNum(n.attr[k]) }
+	x, y := v("x"), v("y")
+	if p := svgNums(n.attr["data-hit"]); len(p) == 4 && p[2] > 0 && p[3] > 0 {
+		return svgBounds{p[0], p[1], p[0] + p[2], p[1] + p[3]}, true
+	}
+	switch n.tag {
+	case "rect":
+		return svgBounds{x, y, x + v("width"), y + v("height")}, v("width") > 0 && v("height") > 0
+	case "circle", "ellipse":
+		x, y = v("cx"), v("cy")
+		rx, ry := v("r"), v("r")
+		if n.tag == "ellipse" {
+			rx, ry = v("rx"), v("ry")
+		}
+		return svgBounds{x - rx, y - ry, x + rx, y + ry}, rx > 0 && ry > 0
+	case "polygon", "polyline":
+		p := svgNums(n.attr["points"])
+		if len(p) < 4 || len(p)%2 != 0 {
+			break
+		}
+		b := svgBounds{p[0], p[1], p[0], p[1]}
+		for i := 2; i < len(p); i += 2 {
+			b = svgBounds{min(b.x1, p[i]), min(b.y1, p[i+1]), max(b.x2, p[i]), max(b.y2, p[i+1])}
+		}
+		return b, true
+	case "line":
+		return svgBounds{min(v("x1"), v("x2")), min(v("y1"), v("y2")), max(v("x1"), v("x2")), max(v("y1"), v("y2"))}, true
+	}
+	return svgBounds{}, false
+}
+
+// Outlining text at its original z-order gives browser and board identical Go
+// font metrics without requiring a font download or a separate text renderer.
+func outlineText(n *svgNode, inherited map[string]string) (svgBounds, bool) {
+	f := regularSVGFont
+	weight := inherited["font-weight"]
+	if weight == "bold" || svgNum(weight) >= 600 {
+		f = boldSVGFont
+	}
+	size := svgNum(inherited["font-size"])
+	if size == 0 {
+		size = 16
+	}
+	size = min(120, max(1, size))
+	ppem := fixed.Int26_6(size * 64)
+	x, y := svgNum(n.attr["x"]), svgNum(n.attr["y"])
+	b := svgBounds{math.Inf(1), y - size, math.Inf(-1), y + size*.22}
+	var buf sfnt.Buffer
+	var d strings.Builder
+	compact := func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
+	for _, line := range strings.Split(strings.TrimSpace(n.text), "\n") {
+		chars := []rune(strings.Join(strings.Fields(line), " "))
+		glyphs := make([]sfnt.GlyphIndex, len(chars))
+		offsets := make([]fixed.Int26_6, len(chars))
+		var width fixed.Int26_6
+		for i, r := range chars {
+			glyphs[i], _ = f.GlyphIndex(&buf, r)
+			if i > 0 {
+				k, _ := f.Kern(&buf, glyphs[i-1], glyphs[i], ppem, font.HintingNone)
+				width += k
+			}
+			offsets[i] = width
+			w, _ := f.GlyphAdvance(&buf, glyphs[i], ppem, font.HintingNone)
+			width += w
+		}
+		start := x
+		w := float64(width) / 64
+		switch inherited["text-anchor"] {
+		case "middle":
+			start -= w / 2
+		case "end":
+			start -= w
+		}
+		b.x1, b.x2, b.y2 = min(b.x1, start), max(b.x2, start+w), y+size*.22
+		for i, glyph := range glyphs {
+			segments, _ := f.LoadGlyph(&buf, glyph, ppem, nil)
+			for j, s := range segments {
+				if j > 0 && s.Op == sfnt.SegmentOpMoveTo {
+					d.WriteByte('Z')
+				}
+				d.WriteByte("MLQC"[s.Op])
+				count := 1
+				if s.Op >= sfnt.SegmentOpQuadTo {
+					count = int(s.Op)
+				}
+				for _, p := range s.Args[:count] {
+					d.WriteString(compact(start + float64(offsets[i]+p.X)/64))
+					d.WriteByte(' ')
+					d.WriteString(compact(y + float64(p.Y)/64))
+					d.WriteByte(' ')
+				}
+			}
+			if len(segments) != 0 {
+				d.WriteByte('Z')
+			}
+		}
+		y += size * 1.2
+	}
+	n.attr["aria-label"] = strings.Join(strings.Fields(n.text), " ")
+	n.tag, n.text, n.attr["d"] = "path", "", d.String()
+	return b, b.x2 > b.x1
+}
+
+func prepareSVG(raw string, exit bool) (string, []hitBox, error) {
+	root, err := parseSVG(raw)
+	if err != nil {
+		return "", nil, err
+	}
+	if exit {
+		// Match only rendered, hittable elements, not IDs hidden in definitions or comments.
+		var hasExit func(*svgNode) bool
+		hasExit = func(n *svgNode) bool {
+			_, hasBounds := n.bounds()
+			return n.tag != "defs" && (n.attr["data-id"] == exitNode && (hasBounds || n.tag == "text" && strings.TrimSpace(n.text) != "") ||
+				slices.ContainsFunc(n.children, hasExit))
+		}
+		if !hasExit(root) {
+			pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,300,86,36"><rect x="137" y="300" width="86" height="36" rx="18" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="324" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Cat</text></g></svg>`)
+			root.children = append(root.children, pill.children...)
+		}
+	}
+	var hits []hitBox
+	var walk func(*svgNode, rasterx.Matrix2D, map[string]string, bool) error
+	walk = func(n *svgNode, m rasterx.Matrix2D, style map[string]string, defs bool) error {
+		defs = defs || n.tag == "defs" || n.tag == "linearGradient" || n.tag == "radialGradient"
+		local, _ := svgMatrix(n.attr["transform"])
+		m = m.Mult(local)
+		if !boundedSVGMatrix(m) {
+			return fmt.Errorf("SVG combined transform is too large")
+		}
+		if n.attr["id"] != "" && !strings.HasPrefix(n.attr["id"], "echoear-paint-") {
+			n.attr["id"] = "echoear-paint-" + n.attr["id"]
+		}
+		for _, k := range []string{"fill", "stroke"} {
+			if parts := svgRef.FindStringSubmatch(n.attr[k]); parts != nil && !strings.HasPrefix(parts[1], "echoear-paint-") {
+				n.attr[k] = "url(#echoear-paint-" + parts[1] + ")"
+			}
+		}
+		next := make(map[string]string, 3)
+		for _, k := range []string{"font-size", "font-weight", "text-anchor"} {
+			next[k] = style[k]
+			if v := n.attr[k]; v != "" {
+				next[k] = v
+			}
+			delete(n.attr, k)
+		}
+		b, ok := n.bounds()
+		if n.tag == "text" {
+			metrics, measured := outlineText(n, next)
+			if !ok {
+				b, ok = metrics, measured
+			}
+			if len(n.attr["d"]) > 64<<10 {
+				return fmt.Errorf("SVG text outlines too large")
+			}
+		}
+		if id := n.attr["data-id"]; !defs && id != "" && ok {
+			out := svgBounds{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
+			for _, p := range [][2]float64{{b.x1, b.y1}, {b.x2, b.y1}, {b.x1, b.y2}, {b.x2, b.y2}} {
+				x, y := m.Transform(p[0], p[1])
+				out = svgBounds{min(x, out.x1), min(y, out.y1), max(x, out.x2), max(y, out.y2)}
+			}
+			hits = append(hits, hitBox{id, max(0, int(math.Floor(out.x1))-8), max(0, int(math.Floor(out.y1))-8),
+				min(359, int(math.Ceil(out.x2))+8), min(359, int(math.Ceil(out.y2))+8)})
+		}
+		for _, child := range n.children {
+			if err := walk(child, m, next, defs); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(root, rasterx.Identity, nil, false); err != nil {
+		return "", nil, err
+	}
+	slices.Reverse(hits)
+	return svgString(root), hits, nil
+}
+
+func rasterSVG(svg string) (fb framebuffer, err error) {
+	// oksvg and rasterx are also fed untrusted geometry.
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("Invalid SVG geometry")
+		}
+	}()
+	icon, err := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.StrictErrorMode)
+	if err != nil {
+		return fb, fmt.Errorf("SVG: %w", err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, screenSize, screenSize))
+	draw.Draw(img, img.Bounds(), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
+	scan := rasterx.NewScannerGV(screenSize, screenSize, img, img.Bounds())
+	icon.Draw(rasterx.NewDasher(screenSize, screenSize, scan), 1)
+	for y := range screenSize {
+		for x := range screenSize {
+			if (x-180)*(x-180)+(y-180)*(y-180) <= 180*180 {
+				i := y*img.Stride + x*4
+				fb[y*screenSize+x] = uint16(img.Pix[i]&0xf8)<<8 | uint16(img.Pix[i+1]&0xfc)<<3 | uint16(img.Pix[i+2])>>3
+			}
+		}
+	}
+	return fb, nil
+}
+
+func renderSVG(raw string) (fb [360 * 360]uint16, hits []hitBox, err error) {
+	svg, hits, err := prepareSVG(raw, false)
+	if err == nil {
+		fb, err = rasterSVG(svg)
+	}
+	return fb, hits, err
+}
+
+func dirtyRect(prev, next *framebuffer) image.Rectangle {
+	if prev == nil {
+		return image.Rect(0, 0, 360, 360)
+	}
+	minX, minY, maxX, maxY := 360, 360, 0, 0
+	for i, pixel := range next {
+		if pixel != prev[i] {
+			x, y := i%360, i/360
+			minX, minY, maxX, maxY = min(minX, x), min(minY, y), max(maxX, x+1), max(maxY, y+1)
+		}
+	}
+	if minX >= maxX {
+		return image.Rectangle{}
+	}
+	return image.Rect(minX, minY, maxX, maxY)
+}
+
+func encodeRLE565(p []uint16) []byte {
+	out := make([]byte, 0, len(p)*2)
+	for i := 0; i < len(p); {
+		start := i
+		i++
+		if i < len(p) && p[i] == p[start] {
+			for i < len(p) && i-start < 128 && p[i] == p[start] {
+				i++
+			}
+			out = append(out, 0x80|byte(i-start-1), byte(p[start]>>8), byte(p[start]))
+		} else {
+			for i < len(p) && i-start < 128 && (i+1 == len(p) || p[i] != p[i+1]) {
+				i++
+			}
+			out = append(out, byte(i-start-1))
+			for _, v := range p[start:i] {
+				out = binary.BigEndian.AppendUint16(out, v)
+			}
+		}
+	}
+	return out
+}
+
+func displayFrame(fb *framebuffer, r image.Rectangle, rev uint64) wsFrame {
+	p := make([]uint16, 0, r.Dx()*r.Dy())
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		p = append(p, fb[y*360+r.Min.X:y*360+r.Max.X]...)
+	}
+	out := make([]byte, 12, 12+len(p)*2)
+	out[0] = 0x03
+	for i, v := range []int{r.Min.X, r.Min.Y, r.Dx(), r.Dy()} {
+		binary.LittleEndian.PutUint16(out[1+i*2:], uint16(v))
+	}
+	binary.LittleEndian.PutUint16(out[10:], uint16(rev))
+	if encoded := encodeRLE565(p); len(encoded) <= len(p)*2 {
+		out[9] = 1
+		out = append(out, encoded...)
+	} else {
+		for _, v := range p {
+			out = binary.BigEndian.AppendUint16(out, v)
+		}
+	}
+	return wsFrame{wsBinary, out}
+}

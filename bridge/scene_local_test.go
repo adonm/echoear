@@ -189,7 +189,7 @@ func TestLocalSceneReactions(t *testing.T) {
 	watch.json(t, object{"ev": "hello", "role": "web"})
 	watch.until(t, hasWS("peers", id))
 	watch.json(t, object{"ev": "watch", "device_id": id})
-	watch.until(t, hasWS("scene", ""))
+	watch.until(t, hasWS("svg", ""))
 
 	scene := toolTest(t, base, "scene", object{"device_id": id, "nodes": []object{
 		localButton("bounce", object{"tap": object{"chime": "celebrate", "speak": "Found you!",
@@ -239,7 +239,7 @@ func TestLocalSceneReactions(t *testing.T) {
 	}
 	c.until(t, hasWS("chime", `"kind":"intercom"`))
 	patched := c.until(t, hasWS("patch", `"s":"Peek"`))
-	if mirror := watch.until(t, hasWS("patch", `"s":"Peek"`)); !bytes.Equal(mirror.data, patched.data) {
+	if mirror := watch.until(t, hasWS("svg", "Peek")); testObject(t, mirror.data)["rev"] != testObject(t, patched.data)["rev"] {
 		t.Fatal("local patch did not mirror")
 	}
 	if testObject(t, patched.data)["rev"] == scene["rev"] {

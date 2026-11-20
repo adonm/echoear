@@ -17,8 +17,10 @@ var (
 )
 
 func validScope(scope string) bool {
-	if room, ok := strings.CutPrefix(scope, "game:"); ok {
-		return slugRE.MatchString(room)
+	for _, prefix := range []string{"game:", "app:"} {
+		if name, ok := strings.CutPrefix(scope, prefix); ok {
+			return slugRE.MatchString(name)
+		}
 	}
 	return deviceIDRE.MatchString(scope)
 }
@@ -146,14 +148,53 @@ func (b *bridge) memory(ctx context.Context, args object, values bool) (object, 
 		}
 		return object{"ok": true, "scope": scope, "key": key, "version": version}, nil
 	case "delete":
-		deleted, err := deleteRow(ctx, b.db, "DELETE FROM memory WHERE scope=? AND key=?", scope, key)
+		expected, err := mcpUint(args, "expected_version")
 		if err != nil {
+			return nil, err
+		}
+		deleted, err := b.db.deleteMemory(ctx, scope, key, expected)
+		if err != nil {
+			var conflict *versionConflict
+			if errors.As(err, &conflict) {
+				return nil, err
+			}
 			return nil, dbError
 		}
 		return object{"ok": true, "scope": scope, "key": key, "deleted": deleted}, nil
 	default:
 		return nil, problem(400, "Unknown memory operation")
 	}
+}
+
+func (d *bridgeDB) deleteMemory(ctx context.Context, scope, key string, expected *uint64) (bool, error) {
+	if expected == nil {
+		return deleteRow(ctx, d, "DELETE FROM memory WHERE scope=? AND key=?", scope, key)
+	}
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var current int64
+	err = tx.QueryRowContext(ctx, "SELECT version FROM memory WHERE scope=? AND key=?", scope, key).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if uint64(current) != *expected {
+		return false, &versionConflict{current}
+	}
+	if current == 0 {
+		return false, nil
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM memory WHERE scope=? AND key=? AND version=?", scope, key, current)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n != 0, tx.Commit()
 }
 
 func deleteRow(ctx context.Context, d *bridgeDB, query string, args ...any) (bool, error) {

@@ -257,12 +257,7 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		return
 	}
 	gen, err := h.b.generateReply(ctx, ctx, d.who, text, turnOptions{source: source, web: d.virtual(),
-		publish: func(stream *AudioStream) { h.publish(d, id, ctx, stream) },
-		agentSpoke: func() bool {
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			return h.active(d) && d.turn == id && d.agentSpoke
-		}})
+		publish: func(stream *AudioStream) { h.publish(d, id, ctx, stream) }})
 	if err != nil {
 		h.turnError(d, id, "Could not finish that turn.")
 		return
@@ -274,7 +269,7 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 	if gen.screen != nil {
 		v := screenScene(gen.screen, h.b.catFor(d.who).AccentColor)
 		view = &v
-	} else if gen.audio == nil && gen.reply != "" && !gen.spoken {
+	} else if gen.audio == nil && gen.reply != "" {
 		v := noticeScene("Answer", shortText(gen.reply, maxMessage, true))
 		view = &v
 	}
@@ -345,11 +340,6 @@ func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *Aud
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.active(d) || d.turn != id || ctx.Err() != nil {
-		return
-	}
-	if stream == nil {
-		h.stopPlayback(d, true)
-		h.render(d, time.Now(), false)
 		return
 	}
 	h.play(d, ctx, stream)
@@ -494,7 +484,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 				h.clearRecording(d)
 			}
 			d.drawer, d.pending = false, nil
-			if d.customScene {
+			if d.customScene || d.app != nil {
 				d.card = &view
 			} else {
 				d.view = &view

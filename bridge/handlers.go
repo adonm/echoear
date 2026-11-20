@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -492,21 +491,6 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string, body []byte
 		return b.relay(ctx, sender, others, direct.target, direct.text, pcm)
 	}
 	options := turnOptions{source: source}
-	if b.ws != nil {
-		key := strings.ToLower(sender.DeviceID)
-		spoke := new(atomic.Bool)
-		options.agentSpoke = spoke.Load
-		options.begin = func() func() {
-			b.ws.mu.Lock()
-			b.ws.httpSpeech[key] = spoke
-			b.ws.mu.Unlock()
-			return func() {
-				b.ws.mu.Lock()
-				delete(b.ws.httpSpeech, key)
-				b.ws.mu.Unlock()
-			}
-		}
-	}
 	gen, err := b.generateReply(ctx, b.root, sender, text, options)
 	if err != nil {
 		return answer{}, err
@@ -530,15 +514,12 @@ type generatedReply struct {
 	audio      *AudioStream
 	openMS     int64
 	ttsStart   time.Time
-	spoken     bool
 }
 
 type turnOptions struct {
-	source     string
-	web        bool
-	publish    func(*AudioStream)
-	agentSpoke func() bool
-	begin      func() func()
+	source  string
+	web     bool
+	publish func(*AudioStream)
 }
 
 type turnContext struct {
@@ -547,107 +528,81 @@ type turnContext struct {
 	timers                     int
 }
 
-func turnPrompt(sender peer, web bool, source, text string, cat catState, live turnContext) string {
+func turnPrompt(sender peer, web bool, source, text string, cat catState, _ turnContext) string {
 	kind := "hardware"
 	if web || webDeviceID(strings.ToLower(sender.DeviceID)) {
 		kind = "web"
 	}
-	if live.screen == "" {
-		live.screen = "face"
-	}
 	extra := ""
-	if live.room != "" {
-		extra += ", room=" + live.room
+	if !cat.Configured {
+		extra += " · setup"
 	}
-	if live.timers > 0 {
-		extra += fmt.Sprintf(", timers=%d", live.timers)
+	if cat.Personality != "" {
+		extra += " · vibe: " + cat.Personality
 	}
-	if live.lastIntercom != "" {
-		extra += ", last_intercom=" + live.lastIntercom
-	}
-	return fmt.Sprintf("[EchoEar: %s (%s), %s, %s, time=%s, screen=%s%s%s]\n%s", cat.Name, sender.DeviceID, kind,
-		source, live.at.Format("15:04 MST"), live.screen, extra, catPromptContext(cat), text)
+	return fmt.Sprintf("[%s (%s) · %s · %s%s]\n%s", cat.Name, sender.DeviceID, kind, source, extra, text)
 }
 
-// HTTP verifies the final text before publishing an audio URL. A WebSocket can
-// play the speculative stream; nil tells it to interrupt a superseded stream.
+// SSE overlaps synthesis with the turn. Only the verified final reply is audible.
 func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text string, options turnOptions) (generatedReply, error) {
-	publish := options.publish
-	agentSpoke := func() bool { return options.agentSpoke != nil && options.agentSpoke() }
 	makeSpeech := func() *speechTurn {
-		deadline, _ := ctx.Deadline()
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(turnTimeout)
+		}
 		audioCtx, cancel := context.WithDeadline(audioBase, deadline)
 		return newSpeechTurn(audioCtx, cancel, b.worker, b.voiceFor(sender))
 	}
 	var eager *speechTurn
-	publishEager := func() {
-		if publish != nil {
-			publish(eager.stream)
-		}
-	}
-	discard := func() {
-		eager.discard()
-		if publish != nil && !agentSpoke() {
-			publish(nil)
-		}
-	}
 	onSentence := func(s string) {
-		if b.worker == nil || !b.worker.ready.Load() || agentSpoke() {
+		if b.worker == nil || !b.worker.ready.Load() {
 			return
 		}
 		if eager == nil {
 			eager = makeSpeech()
-			publishEager()
 		}
 		eager.send(s)
 	}
 	start := time.Now()
 	prepare := func() (string, string) {
 		cat := b.catFor(sender)
-		live := turnContext{at: time.Now()}
-		if b.ws != nil {
-			b.ws.turnScreen(sender.DeviceID, &live)
-		}
-		if b.timers != nil {
-			live.timers = b.timers.activeCount(ctx, sender.DeviceID)
-		}
-		return cat.Name, turnPrompt(sender, options.web, options.source, text, cat, live)
+		return cat.Name, turnPrompt(sender, options.web, options.source, text, cat, turnContext{})
 	}
-	raw, sid, err := b.oc.askPrepared(ctx, sender.DeviceID, prepare, onSentence, options.source, options.begin, func(entry chatEntry) {
+	raw, sid, err := b.oc.askPrepared(ctx, sender.DeviceID, prepare, onSentence, options.source, nil, func(entry chatEntry) {
 		if entry.Role == "assistant" {
 			entry.Sender = b.catFor(sender).Name
 		}
-		b.chat(sender.DeviceID, entry, false)
+		b.chat(sender.DeviceID, entry, true)
 	})
 	openMS := time.Since(start).Milliseconds()
 	if err != nil {
 		if eager != nil {
-			discard()
+			eager.discard()
 		}
 		return generatedReply{}, err
 	}
 	reply, screen, message := extractPayloads(raw)
-	spoken := agentSpoke()
 	ttsStart := time.Now()
 	var stream *AudioStream
 	clean, speechErr := spokenText(fenced.ReplaceAllString(reply, ""))
-	if !spoken && speechErr == nil && (eager != nil || b.worker != nil && b.worker.ready.Load()) {
+	if speechErr == nil && (eager != nil || b.worker != nil && b.worker.ready.Load()) {
 		final := SplitSentences(clean)
 		if eager == nil {
 			eager = makeSpeech()
-			publishEager()
 		}
 		if !eager.complete(final) {
-			discard()
+			eager.discard()
 			eager = makeSpeech()
 			eager.complete(final)
-			publishEager()
 		}
 		stream = eager.stream
+		if options.publish != nil {
+			options.publish(stream)
+		}
 	} else if eager != nil {
-		discard()
+		eager.discard()
 	}
-	return generatedReply{reply, sid, screen, message, stream, openMS, ttsStart, spoken}, nil
+	return generatedReply{reply, sid, screen, message, stream, openMS, ttsStart}, nil
 }
 
 func (b *bridge) voice(ctx context.Context, r *http.Request, intercom bool) (any, error) {
@@ -711,6 +666,8 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		return b.memoryAPI(w, r, path)
 	case path == "/api/assets" || strings.HasPrefix(path, "/api/assets/"):
 		return b.assetAPI(w, r, path)
+	case path == "/api/apps" || strings.HasPrefix(path, "/api/apps/"):
+		return b.appAPI(w, r, path)
 	case path == "/api/timers" || strings.HasPrefix(path, "/api/timers/"):
 		return b.timerAPI(w, r, path, "")
 	case path == "/api/virtual-clients" || strings.HasPrefix(path, "/api/virtual-clients/"):

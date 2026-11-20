@@ -26,6 +26,7 @@ type wsEvent struct {
 	DeviceID  string `json:"device_id"`
 	Character string `json:"character"`
 	Firmware  string `json:"firmware"`
+	Proto     int    `json:"proto"`
 	ID        string `json:"id"`
 	X         int    `json:"x"`
 	Y         int    `json:"y"`
@@ -62,6 +63,7 @@ type wsDevice struct {
 	who      peer
 	key      string
 	firmware string
+	proto    int
 	theme    string
 	cat      catState
 	vol      int
@@ -69,6 +71,10 @@ type wsDevice struct {
 	mV       int
 	rssi     int
 	charging bool
+	svg      svgScreen
+	svgRaw   string
+	app      *appInstance
+	appView  svgScreen
 
 	scene            sceneView
 	view             *sceneView
@@ -280,6 +286,7 @@ func (h *wsHub) detach(c *wsClient) {
 	defer h.mu.Unlock()
 	delete(h.clients, c)
 	if d := c.device; d != nil && h.devices[d.key] == d {
+		h.dropApp(d)
 		delete(h.devices, d.key)
 		h.cancelTurn(d)
 		h.stopSceneTimers(d)
@@ -292,6 +299,7 @@ func (h *wsHub) disconnectDevice(id string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if d := h.devices[id]; d != nil {
+		h.dropApp(d)
 		d.client.cancel()
 		delete(h.devices, id)
 		h.cancelTurn(d)
@@ -487,6 +495,13 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	character := strings.TrimSpace(ev.Character)
 	if v.ID != "" {
 		character = v.Character
+	} else if character == "" && ev.Role == "device" && ev.Proto >= 2 {
+		character = "New Cat"
+		if h.b.peers.store != nil {
+			if prior, ok, _ := h.b.peers.get(ev.DeviceID); ok {
+				character = prior.Character
+			}
+		}
 	}
 	if !characterRE.MatchString(character) {
 		return
@@ -497,10 +512,11 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	}
 	ip, _ := lanIP(host, true) // Advertised IP never replaces an HTTP registration.
 	d := &wsDevice{client: c, key: strings.ToLower(ev.DeviceID), who: peer{DeviceID: ev.DeviceID, Character: character, IP: ip},
-		firmware: shortText(ev.Firmware, 24, false), theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
+		firmware: shortText(ev.Firmware, 24, false), proto: ev.Proto, theme: v.Theme, pct: -1, vol: 80, last: now, moodAt: now}
 	d.cat = h.b.catFor(d.who)
 	d.status(ev.wsStatus)
 	if old := h.devices[d.key]; old != nil {
+		h.dropApp(old)
 		h.cancelTurn(old)
 		h.stopSceneTimers(old)
 		h.stopPlayback(old, true)
@@ -579,33 +595,42 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	}
 	pose := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 	pose.blink = pose.blink || now.Before(d.pet)
+	d.pose = pose
 	var view sceneView
+	var svg string
 	switch {
 	case d.drawer && mood == "idle":
 		peers, _ := h.combinedPeers(d.who.DeviceID)
 		peers = slices.DeleteFunc(peers, func(p peer) bool { return now.Unix()-p.LastSeen > 180 })
 		view = drawerScene(d.cat, h.b.voices.get(d.who.DeviceID, d.voiceTheme()), peers)
+		svg = drawerSVG(view)
 	case d.card != nil && (mood == "idle" || mood == "speaking" || mood != "sleepy" && d.card.actions["cat"].kind == "dismiss"):
 		view = *d.card
+	case d.app != nil && mood != "sleepy":
+		d.svgRaw = ""
+		d.scene = sceneView{title: d.app.spec.Title}
+		h.pushScreen(d, d.appView, nil, full)
+		return
 	case d.customScene && mood != "sleepy":
 		view = d.view.withActivity(mood)
 	case d.view != nil && mood != "sleepy" && mood != "listening":
 		view = *d.view
 	default:
 		view = catScene(d.cat, pose)
+		svg = catSVG(view, d.cat)
 	}
-	d.pose = pose
-	d.rev++
-	v := view.full(d.rev)
-	if !full && d.rev > 1 {
-		v = sceneDiff(d.scene, view, d.rev)
+	var legacy object
+	if d.client.role != "web" && d.proto < 2 {
+		legacy = view.full(d.rev + 1)
+		if !full && d.rev > 0 {
+			legacy = sceneDiff(d.scene, view, d.rev+1)
+		}
 	}
 	d.scene = view
-	if v == nil {
-		d.rev--
-		return
+	if svg == "" {
+		svg = sceneSVG(view, "")
 	}
-	h.push(d, v, true)
+	h.renderSVGView(d, svg, legacy, full)
 }
 
 func (h *wsHub) wake(d *wsDevice, now time.Time) {
@@ -638,6 +663,7 @@ func (h *wsHub) animate(ctx context.Context) {
 				h.mu.Unlock()
 				return
 			}
+			h.tickApps(now)
 			for _, d := range h.devices {
 				switch {
 				case !d.recAt.IsZero() && now.Sub(d.recAt) > 65*time.Second:
@@ -650,7 +676,7 @@ func (h *wsHub) animate(ctx context.Context) {
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
 					h.setSleeping(d, true)
 					h.render(d, now, false)
-				case !d.drawer && (d.view == nil || d.asleep || !d.recAt.IsZero()):
+				case !d.drawer && (d.app == nil && d.view == nil || d.asleep || !d.recAt.IsZero()):
 					p := poseFrame(now, d.moodAt, d.last, d.pose.mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 					p.blink = p.blink || now.Before(d.pet)
 					if p != d.pose {
@@ -693,7 +719,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			}
 			c.watch = strings.ToLower(ev.DeviceID)
 			if d := h.devices[c.watch]; d != nil && h.active(d) {
-				c.enqueue(textFrame(d.scene.full(d.rev)))
+				c.enqueue(h.svgFrame(d))
 				c.enqueue(textFrame(object{"op": "volume", "level": d.vol}))
 				brightness := 85
 				if d.asleep {
@@ -717,7 +743,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		return
 	}
 	if c.scope != nil && ev.Event == "watch" && ev.DeviceID == c.scope.ID {
-		c.enqueue(textFrame(d.scene.full(d.rev)))
+		c.enqueue(h.svgFrame(d))
 		return
 	}
 	switch ev.Event {
@@ -796,7 +822,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 }
 
 func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
-	if ev.X < 0 || ev.X > 359 || ev.Y < 0 || ev.Y > 359 || len(ev.ID) > 24 {
+	if ev.X < 0 || ev.X > 359 || ev.Y < 0 || ev.Y > 359 || len(ev.ID) > 64 {
 		return
 	}
 	wasAsleep := d.asleep
@@ -804,6 +830,29 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time) {
 	if wasAsleep {
 		h.render(d, now, false)
 		return
+	}
+	v2 := d.proto >= 2 || d.virtual()
+	if v2 && (ev.Event == "tap" || ev.Event == "drag" && d.drag == "") {
+		ev.ID = ""
+		for _, hit := range d.svg.hits {
+			if (d.scene.actions[hit.id].kind == "volume") == (ev.Event == "drag") {
+				if ev.ID = hitID([]hitBox{hit}, ev.X, ev.Y); ev.ID != "" {
+					break
+				}
+			}
+		}
+	}
+	if v2 && ev.Event == "tap" {
+		if d.app != nil && d.svg.source == d.appView.source {
+			i := slices.Index(d.app.devices, d)
+			if i >= 0 {
+				h.updateApp(d.app, i, hitID(d.svg.hits, ev.X, ev.Y), ev.X, ev.Y, now)
+			}
+			return
+		}
+		if ev.ID == "" {
+			return
+		}
 	}
 	if ev.Event != "tap" {
 		if ev.Event == "drag" || d.drag != "" {
@@ -896,6 +945,7 @@ func (h *wsHub) leaveScene(d *wsDevice, waiting bool, now time.Time) {
 }
 
 func (h *wsHub) clearView(d *wsDevice) {
+	h.dropApp(d)
 	h.clearLocalScene(d)
 	d.drawer, d.view, d.pending, d.card, d.customScene = false, nil, nil, nil, false
 }

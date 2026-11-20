@@ -145,7 +145,11 @@ func (s *testWS) read(t *testing.T) wsFrame {
 
 func (s *testWS) until(t *testing.T, match func(wsFrame) bool) wsFrame {
 	t.Helper()
+	deadline := time.Now().Add(6 * time.Second)
 	for range 256 {
+		if time.Now().After(deadline) {
+			break
+		}
 		f := s.read(t)
 		if match(f) {
 			return f
@@ -168,8 +172,12 @@ func hasWS(op, sample string) func(wsFrame) bool {
 
 func (s *testWS) hello(t *testing.T, id, character string) wsFrame {
 	t.Helper()
-	s.json(t, object{"ev": "hello", "role": "device", "device_id": id, "character": character, "firmware": "0.7.0", "battery_pct": 100, "volume": 80})
-	return s.until(t, hasWS("scene", ""))
+	role, op := "device", "scene"
+	if webDeviceID(id) {
+		role, op = "web", "svg"
+	}
+	s.json(t, object{"ev": "hello", "role": role, "device_id": id, "character": character, "firmware": "0.7.0", "battery_pct": 100, "volume": 80})
+	return s.until(t, hasWS(op, ""))
 }
 
 func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
@@ -177,12 +185,12 @@ func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	db := testDB(t, filepath.Join(dir, "echoear.db"), "")
-	b := &bridge{root: ctx, token: "unit", db: db, peers: peers{deviceStore(db)}, peerHTTP: pooledClient()}
+	b := &bridge{root: ctx, token: "unit", db: db, peers: peers{deviceStore(db)}, peerHTTP: pooledClient(), history: &chatHistory{db}}
 	if setup != nil {
 		setup(b, dir)
 	}
 	b.ws = newWSHub(b)
-	srv := httptest.NewServer(b)
+	srv := httptest.NewServer(legacyTestServer(b))
 	t.Cleanup(func() {
 		b.ws.shutdown()
 		cancel()
@@ -206,15 +214,14 @@ func TestLiveTurnContext(t *testing.T) {
 	b.ws.turnScreen(a, &ctx)
 	ctx.timers = b.timers.activeCount(t.Context(), a)
 	if got := turnPrompt(peer{DeviceID: a}, false, "tap", "pick", legacyCat("Cake", "cake"), ctx); ctx.timers != 1 ||
-		!strings.Contains(got, `, screen=scene "Stars ]" rev=`) || !strings.HasSuffix(got, ", room=sky, timers=1]\npick") ||
-		stripEchoEarHeader(got) != "pick" {
+		got != "[Cake ("+a+") · hardware · tap]\npick" || stripEchoEarHeader(got) != "pick" {
 		t.Fatal(got)
 	}
 	toolTest(t, base, "intercom", object{"from_device_id": other, "to_device_id": a, "text": "Hi"}, false)
 	toolTest(t, base, "scene", object{"device_id": a, "preset": "face"}, false)
 	ctx = turnContext{at: time.Now()}
 	b.ws.turnScreen(a, &ctx)
-	if got := turnPrompt(peer{DeviceID: a}, false, "typed", "hi", blankCat(), ctx); !strings.HasSuffix(got, ", screen=face, last_intercom=Mint, setup]\nhi") ||
+	if got := turnPrompt(peer{DeviceID: a}, false, "typed", "hi", blankCat(), ctx); !strings.HasSuffix(got, " · hardware · typed · setup]\nhi") ||
 		stripEchoEarHeader(got) != "hi" {
 		t.Fatal(got)
 	}
@@ -405,18 +412,18 @@ func TestWSMirrorAndControls(t *testing.T) {
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.until(t, hasWS("peers", `"ws":true`))
 	web.json(t, object{"ev": "watch", "device_id": "echoear-33d8"})
-	if f := web.until(t, hasWS("scene", "")); !bytes.Equal(first.data, f.data) {
-		t.Fatal("watch does not receive the exact device scene")
+	if f := web.until(t, hasWS("svg", "cat-ring")); testObject(t, first.data)["rev"] != testObject(t, f.data)["rev"] {
+		t.Fatal("watch does not receive the current device revision")
 	}
 	dev.json(t, object{"ev": "status", "battery_pct": 25, "battery_mv": 3530, "charging": false, "volume": 80, "rssi": -45})
 	pick := hasWS("patch", `"battery-fill"`)
-	onDevice, onWeb := dev.until(t, pick), web.until(t, pick)
-	if !bytes.Equal(onDevice.data, onWeb.data) {
-		t.Fatal("mirror patch differs from device")
+	onDevice, onWeb := dev.until(t, pick), web.until(t, hasWS("svg", "#39D1A0"))
+	if testObject(t, onDevice.data)["rev"] != testObject(t, onWeb.data)["rev"] {
+		t.Fatal("mirror revision differs from device")
 	}
 	web.json(t, object{"ev": "tap", "x": 180, "y": 300})
 	drawer := func(f wsFrame) bool { return f.op == wsText && bytes.Contains(f.data, []byte(`"drawer-title"`)) }
-	if a, b := dev.until(t, drawer), web.until(t, drawer); !bytes.Equal(a.data, b.data) ||
+	if a, b := dev.until(t, drawer), web.until(t, hasWS("svg", "Voice:")); testObject(t, a.data)["rev"] != testObject(t, b.data)["rev"] ||
 		bytes.Contains(a.data, []byte(`"id":"new"`)) || !bytes.Contains(a.data, []byte(`"id":"voice"`)) {
 		t.Fatal("drawer did not mirror voice controls without New")
 	}
@@ -537,7 +544,8 @@ func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
 	b, base := wsHarness(t, nil)
 	const id = "phone-a123"
 	phone := testConnectWS(t, base, "unit", true)
-	phone.hello(t, id, "Plum")
+	phone.json(t, object{"ev": "hello", "role": "web", "device_id": id, "character": "Plum"})
+	phone.until(t, hasWS("svg", "cat-ring"))
 	stream := newAudioStream()
 	stream.append(bytes.Repeat([]byte{12, 0}, sampleRate))
 	stream.finish(nil)
@@ -564,13 +572,14 @@ func TestVirtualWSModeFollowsPlaybackAck(t *testing.T) {
 	phone.until(t, hasWS("mode", `"mode":"idle"`))
 }
 
-func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
+func TestWSVoiceSynthesizesEarlyButPlaysOnlyFinal(t *testing.T) {
 	release := make(chan struct{})
 	closeRelease := syncOnceClose(release)
 	defer closeRelease()
 	pcm := bytes.Repeat([]byte{9, 0}, 350)
 	speech := bytes.Repeat([]byte{2, 3}, 220)
 	kick := make(chan struct{})
+	synthesized := make(chan struct{}, 1)
 	const first = "Stars release their own light. "
 	const last = "That lights nearby planets."
 	const raw = first + last + "\n```echoear-screen\n{\"title\":\"Night sky\",\"shapes\":[{\"t\":\"btn\",\"x\":121,\"y\":212,\"w\":118,\"h\":34,\"c\":\"#ffaa33\",\"s\":\"Fact\",\"tap\":\"Stars are bright.\"}]}\n```"
@@ -592,6 +601,9 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 				case <-b.root.Done():
 					return
 				case req := <-b.worker.requests:
+					if req.text == strings.TrimSpace(first) {
+						synthesized <- struct{}{}
+					}
 					req.done <- ttsResult{pcm: speech}
 				}
 			}
@@ -628,8 +640,7 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 			case "/api/session/ses-ws/prompt":
 				var prompt struct{ Text string }
 				if err := json.NewDecoder(r.Body).Decode(&prompt); err != nil ||
-					!strings.HasPrefix(prompt.Text, "[EchoEar: Cake (echoear-a), hardware, voice, time=") ||
-					!strings.Contains(prompt.Text, ", screen=face]") || stripEchoEarHeader(prompt.Text) != "What are stars?" {
+					prompt.Text != "[Cake (echoear-a) · hardware · voice]\nWhat are stars?" {
 					t.Errorf("unexpected voice prompt: %q (%v)", prompt.Text, err)
 				}
 				close(kick)
@@ -656,12 +667,24 @@ func TestWSVoiceStreamsBeforeOpenCodeCompletes(t *testing.T) {
 	dev.json(t, object{"ev": "rec_start"})
 	dev.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm...)))
 	dev.json(t, object{"ev": "rec_end", "cancelled": false})
+	select {
+	case <-synthesized:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kokoro did not overlap the OpenCode turn")
+	}
+	dev.json(t, object{"ev": "status", "volume": 47})
+	dev.until(t, func(f wsFrame) bool {
+		if f.op == wsBinary || hasWS("tts", `"state":"start"`)(f) {
+			t.Fatal("unverified speech was played")
+		}
+		return hasWS("volume", `"level":47`)(f)
+	})
+	closeRelease()
 	dev.until(t, hasWS("tts", `"state":"start"`))
 	got := dev.until(t, func(f wsFrame) bool { return f.op == wsBinary })
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], speech) {
 		t.Fatal("did not receive eager Kokoro frame")
 	}
-	closeRelease()
 	got = dev.until(t, func(f wsFrame) bool { return f.op == wsBinary })
 	if len(got.data) != 1+sampleRate/5+len(speech) || !bytes.HasSuffix(got.data, speech) {
 		t.Fatal("did not receive tail sentence")

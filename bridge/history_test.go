@@ -61,13 +61,13 @@ func TestListDeviceSessionsFallback(t *testing.T) {
 	}
 }
 
-func TestSessionMessagePaginationLimit(t *testing.T) {
+func TestSessionMessageBackfillExceedsOldPaginationLimit(t *testing.T) {
 	o := historyOpenCode(t, func(w http.ResponseWriter, r *http.Request) {
 		offset := 0
 		if cursor := r.URL.Query().Get("cursor"); cursor != "" {
 			var err error
 			offset, err = strconv.Atoi(cursor)
-			if err != nil || offset >= 500 {
+			if err != nil || offset > 500 {
 				t.Error("unexpected cursor", cursor)
 				http.Error(w, "unexpected cursor", 400)
 				return
@@ -78,11 +78,15 @@ func TestSessionMessagePaginationLimit(t *testing.T) {
 			data[i] = object{"id": fmt.Sprintf("msg_%d", offset+i), "type": "user",
 				"text": "Example", "time": object{"created": offset + i}}
 		}
-		_ = json.NewEncoder(w).Encode(object{"data": data, "cursor": object{"next": strconv.Itoa(offset + len(data))}})
+		next := ""
+		if offset < 500 {
+			next = strconv.Itoa(offset + len(data))
+		}
+		_ = json.NewEncoder(w).Encode(object{"data": data, "cursor": object{"next": next}})
 	})
 	messages, err := o.GetSessionMessages(t.Context(), "ses_test")
-	if err != nil || len(messages) != 500 || messages[0].ID != "msg_0" || messages[499].ID != "msg_499" {
-		t.Fatalf("expected first 500 session messages, got %d (%v)", len(messages), err)
+	if err != nil || len(messages) != 550 || messages[0].ID != "msg_0" || messages[549].ID != "msg_549" {
+		t.Fatalf("expected all 550 session messages, got %d (%v)", len(messages), err)
 	}
 }
 

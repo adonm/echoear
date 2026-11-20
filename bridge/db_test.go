@@ -87,8 +87,8 @@ func TestTursoMigration(t *testing.T) {
 			t.Fatalf("%s rows = %d, want %d: %v", name, count, n, err)
 		}
 	}
-	for name, n := range map[string]int{"meta": 2, "cats": 3, "saved_cats": 3, "devices": 2, "virtual_clients": 1, "tunnels": 1, "sessions": 3,
-		"voices": 2, "chat_events": 2, "memory": 0, "assets": 0, "timers": 0} {
+	for name, n := range map[string]int{"meta": 4, "cats": 3, "saved_cats": 3, "devices": 2, "virtual_clients": 1, "tunnels": 1, "sessions": 3,
+		"voices": 2, "chat_events": 2, "messages": 1, "memory": 0, "assets": 0, "apps": 0, "timers": 0} {
 		assertRows(name, n)
 	}
 	if got, _, err := deviceStore(db).get(cake.DeviceID); err != nil || got != cake {
@@ -106,8 +106,9 @@ func TestTursoMigration(t *testing.T) {
 	if got, err := voiceStore(db).all(); err != nil || !reflect.DeepEqual(got, voices) {
 		t.Fatal("voices did not migrate", err)
 	}
-	if got, err := (&chatHistory{db}).list(t.Context(), greg.ID); err != nil || len(got) != 2 || got[0] != chat {
-		t.Fatal("chat events did not migrate", err)
+	if got, err := (&chatHistory{db}).list(t.Context(), greg.ID); err != nil || len(got) != 1 ||
+		got[0].ID != chat.ID || got[0].Role != "card" || got[0].SceneTitle != "Quiz" || got[0].Text != "Drew: Quiz" {
+		t.Fatal("chat events did not migrate", got, err)
 	}
 	for backup, original := range backups {
 		after, err := os.ReadFile(backup)

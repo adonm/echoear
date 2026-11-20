@@ -34,7 +34,7 @@ func openCodeSettings(agent, spec string) (ocSettings, error) {
 	}
 	s := ocSettings{agent, ocModel{m[1], m[2], m[3]}, []ocPermission{{"*", "*", "deny"}}}
 	if agent == "echoear" {
-		s.Permissions = append(s.Permissions, ocPermission{"webfetch", "*", "allow"},
+		s.Permissions = append(s.Permissions, ocPermission{"websearch", "*", "allow"},
 			ocPermission{"echoear_*", "*", "allow"}, ocPermission{"execute", "*", "allow"})
 	}
 	return s, nil
@@ -111,6 +111,27 @@ func run() error {
 		virtual: virtualStore(db), history: &chatHistory{db},
 		ota: otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")}}
 	b.ws = newWSHub(b)
+	// Session history is a one-time, retryable backfill; the LAN service and
+	// local history remain available while OpenCode is offline.
+	historyDone := make(chan struct{})
+	go func() {
+		defer close(historyDone)
+		for {
+			ctx, cancel := context.WithTimeout(root, 45*time.Second)
+			err := b.migrateSessionMessages(ctx)
+			cancel()
+			if err == nil || root.Err() != nil {
+				return
+			}
+			log.Printf("EchoEar history backfill pending: %v", err)
+			select {
+			case <-root.Done():
+				return
+			case <-time.After(time.Minute):
+			}
+		}
+	}()
+	defer func() { finish(); <-historyDone }()
 	bin := findTunnelCLI(home)
 	var runner tunnelRunner
 	if bin != "" {

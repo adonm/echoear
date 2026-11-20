@@ -119,19 +119,20 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		blank["accent_color"] != "#60A5FA" || blank["voice"] != heartVoice || len(blank["extras"].([]any)) != 0 {
 		t.Fatal("invalid blank starter", blank)
 	}
-	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat(), turnContext{}); got != "[EchoEar: New Cat ("+id+"), web, voice, time=00:00 UTC, screen=face, setup]\nHi" {
+	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat(), turnContext{}); got != "[New Cat ("+id+") · web · voice · setup]\nHi" {
 		t.Fatal(got)
 	}
 	dev := testConnectWS(t, base, "unit", false)
-	f := dev.hello(t, id, "Ignored")
-	if !hasWS("scene", "Say hi to design me!")(f) || hasWS("scene", `"stripe-mid"`)(f) {
+	dev.json(t, object{"ev": "hello", "role": "web", "device_id": id})
+	f := dev.until(t, hasWS("svg", "Say hi to design me!"))
+	if strings.Contains(string(f.data), "#F59E0B") {
 		t.Fatal("starter face did not show its setup cue")
 	}
 	web := testConnectWS(t, base, "unit", true)
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.until(t, hasWS("peers", id))
 	web.json(t, object{"ev": "watch", "device_id": id})
-	web.until(t, hasWS("scene", "Say hi to design me!"))
+	web.until(t, hasWS("svg", "Say hi to design me!"))
 	for _, fields := range []object{
 		{"face_bg": "navy"}, {"voice": "unknown"}, {"name": strings.Repeat("x", 41)},
 		{"personality": strings.Repeat("x", 161)}, {"configured": "false"},
@@ -156,11 +157,11 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		t.Fatal("unexpected configured cat", cosmo)
 	}
 	expectValue(t, title, "EchoEar: Cosmo ("+id+")")
-	frame := dev.until(t, hasWS("scene", `"bg":"#172344"`))
-	if !hasWS("scene", `"id":"extra-1"`)(frame) || !hasWS("scene", `"id":"eye-l"`)(frame) {
+	frame := dev.until(t, hasWS("svg", "#172344"))
+	if !hasWS("svg", "#C0FFEE")(frame) || !hasWS("svg", "#1A1926")(frame) {
 		t.Fatal("live cat lost an extra or an animated eye")
 	}
-	web.until(t, hasWS("scene", `"bg":"#172344"`))
+	web.until(t, hasWS("svg", "#172344"))
 	web.until(t, hasWS("cat", `"character":"Cosmo"`))
 	web.until(t, hasWS("saved_cats", ""))
 	list := toolTest(t, base, "devices", object{}, false)["devices"].([]any)
@@ -172,20 +173,20 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		t.Fatal("profile was not saved", profiles)
 	}
 	stored := b.catFor(peer{DeviceID: id})
-	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored, turnContext{}); got != "[EchoEar: Cosmo ("+id+"), web, voice, time=00:00 UTC, screen=face, vibe: curious space explorer]\nHi" {
+	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", stored, turnContext{}); got != "[Cosmo ("+id+") · web · voice · vibe: curious space explorer]\nHi" {
 		t.Fatal(got)
 	}
 	if c := call(false, "reset_blank", object{})["cat"].(object); c["configured"] != false || c["personality"] != "" || len(c["extras"].([]any)) != 0 {
 		t.Fatal("reset_blank left configured state", c)
 	}
 	expectValue(t, title, "EchoEar: New Cat ("+id+")")
-	dev.until(t, hasWS("scene", "Say hi to design me!"))
+	dev.until(t, hasWS("svg", "Say hi to design me!"))
 	got := call(false, "load_saved", object{"slug": "cosmo"})["cat"]
 	if !reflect.DeepEqual(cosmo, got) {
 		t.Fatal("profile did not round-trip", got)
 	}
 	expectValue(t, title, "EchoEar: Cosmo ("+id+")")
-	dev.until(t, hasWS("scene", `"bg":"#172344"`))
+	dev.until(t, hasWS("svg", "#172344"))
 	catPath := "/api/devices/" + id + "/cat"
 	if out := post(catPath, object{"personality": "stargazer"}, 200); out["cat"].(object)["personality"] != "stargazer" {
 		t.Fatal(out)
@@ -221,7 +222,7 @@ func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	dev.hello(t, id, "Ignored")
 	toolTest(t, base, "scene", object{"device_id": id, "room": "party", "nodes": []object{{"id": "caption", "t": "text", "s": "Party"}}}, false)
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
-	dev.until(t, hasWS("scene", "Say hi to design me!"))
+	dev.until(t, hasWS("svg", "Say hi to design me!"))
 	s := toolTest(t, base, "snapshot", object{"device_id": id}, false)
 	if s["scene"].(object)["custom_scene"] != false || s["device"].(object)["room"] != "" {
 		t.Fatal("reset did not clear custom scene and room", s)
@@ -334,7 +335,7 @@ func TestCatReassign(t *testing.T) {
 			}
 			expectValue(t, titles, fromSID+":EchoEar: Source ("+toID+")")
 			from.until(t, hasWS("scene", `"bg":"`+wantBG+`"`))
-			to.until(t, hasWS("scene", `"bg":"#654321"`))
+			to.until(t, hasWS("svg", "#654321"))
 			if gets := toolTest(t, base, "cat", object{"op": "get", "device_id": toID}, false)["cat"]; !reflect.DeepEqual(gets, testObject(t, source)["cat"]) {
 				t.Fatal("target did not receive source design and voice", gets)
 			}

@@ -916,12 +916,22 @@ func (h *wsHub) applyReaction(d *wsDevice, r tapReaction, waiting bool, now time
 }
 
 func (h *wsHub) speakLocal(d *wsDevice, text string) {
+	h.speakLocalAfter(d, text, nil)
+}
+
+func (h *wsHub) speakLocalAfter(d *wsDevice, text string, prefix []byte) {
 	worker := h.b.worker
 	if worker == nil || !worker.ready.Load() {
+		if len(prefix) != 0 {
+			h.playPCM(d, prefix)
+		}
 		return
 	}
 	voice := h.b.voiceFor(d.who)
 	stream := newAudioStream()
+	if len(prefix) != 0 {
+		stream.append(prefix)
+	}
 	playback := h.play(d, d.client.ctx, stream)
 	go func() {
 		ctx, cancel := context.WithTimeout(playback, ttsWait)

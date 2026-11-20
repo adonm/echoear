@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -27,6 +28,7 @@ type savedTimer struct {
 	Say       string    `json:"say"`
 	Chime     string    `json:"chime"`
 	WakeAgent bool      `json:"wake_agent"`
+	Notes     []string  `json:"notes,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	FireAt    time.Time `json:"fire_at"`
 }
@@ -44,7 +46,7 @@ type timerManager struct {
 	fromTimerTurn int
 }
 
-const timerColumns = "id,device_id,label,say,chime,wake_agent,created_at,fire_at"
+const timerColumns = "id,device_id,label,say,chime,wake_agent,created_at,fire_at,notes_json"
 
 func newTimerManager(b *bridge) *timerManager {
 	ctx, cancel := context.WithCancel(b.root)
@@ -54,12 +56,15 @@ func newTimerManager(b *bridge) *timerManager {
 func scanTimer(r rowScanner) (savedTimer, error) {
 	var t savedTimer
 	var wake int
-	var created, fire string
-	err := r.Scan(&t.ID, &t.DeviceID, &t.Label, &t.Say, &t.Chime, &wake, &created, &fire)
+	var created, fire, notes string
+	err := r.Scan(&t.ID, &t.DeviceID, &t.Label, &t.Say, &t.Chime, &wake, &created, &fire, &notes)
 	if err != nil {
 		return t, err
 	}
 	t.WakeAgent = wake != 0
+	if err := json.Unmarshal([]byte(notes), &t.Notes); err != nil {
+		return t, err
+	}
 	t.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
 	if err == nil {
 		t.FireAt, err = time.Parse(time.RFC3339Nano, fire)
@@ -161,6 +166,12 @@ func parseTimer(args object, now time.Time) (savedTimer, error) {
 		}
 	}
 	t.ID = randomHex(12)
+	if raw, present := args["notes"]; present {
+		t.Notes, _, err = melodyInput(raw, "timer.notes")
+		if err != nil {
+			return t, err
+		}
+	}
 	return t, nil
 }
 
@@ -173,10 +184,11 @@ func (m *timerManager) set(ctx context.Context, t savedTimer) error {
 	if t.WakeAgent && m.fromTimerTurn != 0 {
 		return problem(409, "Cannot schedule a wake-agent timer during a timer-triggered turn")
 	}
+	notes, _ := json.Marshal(t.Notes)
 	result, err := m.b.db.ExecContext(ctx, `INSERT INTO timers (`+timerColumns+`)
-		SELECT ?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM timers WHERE device_id=?) < 8
+		SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM timers WHERE device_id=?) < 8
 		AND (SELECT count(*) FROM timers) < 32`, t.ID, t.DeviceID, t.Label, t.Say, t.Chime, t.WakeAgent,
-		t.CreatedAt.Format(time.RFC3339Nano), t.FireAt.Format(time.RFC3339Nano), t.DeviceID)
+		t.CreatedAt.Format(time.RFC3339Nano), t.FireAt.Format(time.RFC3339Nano), string(notes), t.DeviceID)
 	if err != nil {
 		return problem(502, "Cannot save timer")
 	}
@@ -328,7 +340,9 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		message += ": " + t.Say
 	}
 	if !t.WakeAgent {
-		b.chat(t.DeviceID, newChat("system", who.Character, "Time's up! "+message, "timer"), true)
+		entry := newChat("card", who.Character, "Time's up! "+message, "timer")
+		entry.SceneTitle = t.Label
+		b.chat(t.DeviceID, entry, true)
 	}
 	h := b.ws
 	h.mu.Lock()
@@ -350,13 +364,18 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 			return
 		}
 		h.wake(d, now)
-		h.chime(d, t.Chime)
+		pcm, _ := synthesizeMelody(t.Notes)
+		if len(pcm) != 0 && t.Say == "" {
+			h.playPCM(d, pcm)
+		} else if len(pcm) == 0 {
+			h.chime(d, t.Chime)
+		}
 		view := noticeScene("Time's up!", message)
 		view.nodes[len(view.nodes)-1]["s"] = "OK"
 		view.actions["cat"] = sceneAction{"dismiss", ""}
 		d.card, d.drawer = &view, false
 		if t.Say != "" {
-			h.speakLocal(d, t.Say)
+			h.speakLocalAfter(d, t.Say, pcm)
 		}
 		h.render(d, now, false)
 		h.mu.Unlock()
@@ -368,10 +387,19 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		defer cancel()
 		_, _ = b.generateReply(ctx, ctx, who, "Timer fired: "+message, turnOptions{source: "timer"})
 	} else if who.Port != 0 && !t.WakeAgent {
-		_, _ = b.mcpChime(ctx, who, t.Chime, nil)
-		if t.Say != "" {
-			_, _ = b.speakMCP(ctx, who, t.Say)
+		pcm, _ := synthesizeMelody(t.Notes)
+		if len(pcm) == 0 {
+			pcm = chimePCM(t.Chime)
 		}
+		if t.Say != "" && b.worker != nil && b.worker.ready.Load() {
+			speechCtx, cancel := context.WithTimeout(ctx, ttsWait)
+			spoken, err := b.worker.synthesize(speechCtx, b.voiceFor(who), t.Say)
+			cancel()
+			if err == nil {
+				pcm = append(pcm, spoken...)
+			}
+		}
+		b.postPeer(ctx, who, "/speak", pcmType, pcm)
 	}
 }
 
@@ -397,6 +425,10 @@ func (b *bridge) timerMCP(ctx context.Context, args object) (object, error) {
 			return nil, err
 		}
 		b.timerUpdate(id)
+		who, _ := b.lookupDevice(id)
+		entry := newChat("card", who.Character, "Timer: "+t.Label, "timer")
+		entry.SceneTitle = t.Label
+		b.chat(id, entry, true)
 		return object{"ok": true, "id": t.ID, "timer": t}, nil
 	case "list":
 		timers, err := m.list(ctx, id)

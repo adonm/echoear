@@ -219,12 +219,12 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	if chat["reply"] != "Hello!" || chat["device_id"] != id || chat["session_id"] != "ses_shared" || chat["audio_url"] != nil {
 		t.Fatal("tunneled chat did not return a scoped reply")
 	}
-	header := "[EchoEar: Plum (" + id + "), web, typed, time="
+	header := "[Plum (" + id + ") · web · typed]"
 	assertPrompt := func(text string) {
 		t.Helper()
 		select {
 		case got := <-prompts:
-			if !strings.HasPrefix(got, header) || !strings.Contains(got, ", screen=face]") || stripEchoEarHeader(got) != text {
+			if got != header+"\n"+text || stripEchoEarHeader(got) != text {
 				t.Fatal("virtual cat prompt identity or provenance is incorrect")
 			}
 		default:
@@ -272,7 +272,7 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	conn.json(t, object{"ev": "watch", "device_id": "echoear-private"})
 	conn.until(t, hasWS("error", `"status":403`))
 	conn.json(t, object{"ev": "watch", "device_id": id})
-	conn.until(t, hasWS("scene", ""))
+	conn.until(t, hasWS("svg", ""))
 	conn.json(t, object{"ev": "text", "text": "WebSocket question?"})
 	conn.until(t, chatFrame("Hello!"))
 	assertPrompt("WebSocket question?")
@@ -284,9 +284,9 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	physical.until(t, hasWS("patch", "Hi from WS intercom."))
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
-	conn.until(t, hasWS("scene", `"cat-ring"`))
+	conn.until(t, hasWS("svg", "cat-ring"))
 	conn.json(t, object{"ev": "tap", "id": "text", "x": 130, "y": 300})
-	conn.until(t, func(f wsFrame) bool { return hasWS("scene", "Msg Cake")(f) || hasWS("patch", "Msg Cake")(f) })
+	conn.until(t, hasWS("svg", "Msg Cake"))
 	conn.json(t, object{"ev": "tap", "id": "msg-0", "x": 180, "y": 150})
 	conn.until(t, hasWS("rec", `"target":"echoear-private"`))
 	conn.json(t, object{"ev": "rec_start", "target": "echoear-private"})
@@ -300,20 +300,20 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	physical.until(t, hasWS("patch", "Voice to Cake."))
 	conn.until(t, hasWS("mode", `"mode":"idle"`))
 	conn.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 316})
-	conn.until(t, hasWS("scene", `"cat-ring"`))
+	conn.until(t, hasWS("svg", "cat-ring"))
 	conn.json(t, object{"ev": "reset", "device_id": id})
 	conn.json(t, object{"ev": "tap", "id": "new", "x": 230, "y": 104})
 	conn.json(t, object{"ev": "watch", "device_id": id})
-	conn.until(t, hasWS("scene", `"bg":"#D8C7FF"`))
+	conn.until(t, hasWS("svg", "#D8C7FF"))
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
-	conn.until(t, hasWS("scene", `"bg":"#F3F4F6"`))
+	conn.until(t, hasWS("svg", "#F3F4F6"))
 	conn.until(t, hasWS("cat", `"configured":false`))
 	scope = testObject(t, testRequest(t, "GET", scoped+"/api/scope", token, nil, 200))
 	if scope["character"] != "New Cat" || scope["cat"].(object)["configured"] != false {
 		t.Fatal("scope retained the old cat after reset", scope)
 	}
-	if bytes.Contains(testRequest(t, "GET", base+history, "unit", nil, 200), []byte("Hello!")) {
-		t.Fatal("LAN reset did not reset the shared conversation")
+	if !bytes.Contains(testRequest(t, "GET", base+history, "unit", nil, 200), []byte("Hello!")) {
+		t.Fatal("LAN reset discarded canonical conversation history")
 	}
 	restored.shutdown()
 	conn.until(t, func(f wsFrame) bool { return f.op == wsClose })
@@ -357,7 +357,7 @@ func TestVirtualCatSessionAliasMigration(t *testing.T) {
 	}
 }
 
-func TestChatHistoryPaginationAndMerge(t *testing.T) {
+func TestCanonicalMessagesMigrationAndSQLRead(t *testing.T) {
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		sendPage := func(data []object, next any) {
@@ -436,7 +436,7 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 		sendPage(data, next)
 	}))
 	defer upstreamServer.Close()
-	_, base := wsHarness(t, func(b *bridge, dir string) {
+	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.history = &chatHistory{b.db}
 		file := filepath.Join(dir, "service.json")
 		if err := writeMap(file, object{"url": upstreamServer.URL, "password": "unit"}); err != nil {
@@ -452,10 +452,15 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 		entry.Timestamp = time.Unix(2, 0).UTC()
 		b.history.add("echoear-history", entry)
 		b.history.add("echoear-history", entry)
-		b.history.add("echoear-history", chatEntry{ID: "msg2", Role: "assistant", Text: "Local duplicate."})
 	})
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, "echoear-history", "Cake")
+	for range 2 {
+		if err := b.migrateSessionMessages(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upstreamServer.Close()
 	raw := testRequest(t, "GET", base+"/api/devices/echoear-history/messages", "unit", nil, 200)
 	var data struct{ Messages []chatEntry }
 	if err := json.Unmarshal(raw, &data); err != nil {
@@ -465,28 +470,21 @@ func TestChatHistoryPaginationAndMerge(t *testing.T) {
 	for _, message := range data.Messages {
 		ids = append(ids, message.ID)
 	}
-	if want := []string{"msg1", "bridge-dinner", "msg2", "divider-ses_active", "msg_active", "divider-ses_latest", "msg_latest"}; !slices.Equal(ids, want) {
+	if want := []string{"msg1", "bridge-dinner", "msg2", "msg_active", "msg_latest"}; !slices.Equal(ids, want) {
 		t.Fatalf("message order = %v, want %v", ids, want)
 	}
 	messages := data.Messages
 	if messages[0].Text != "Why is the sky blue?" || messages[0].Source != "voice" ||
 		messages[1].Role != "intercom" || messages[1].Text != "Dinner is ready!" ||
-		messages[2].Sender != "Cake" || messages[2].Text != "Air scatters blue light." ||
-		messages[2].SceneTitle != "Blue sky" || messages[2].ToolSummary != "Showed a scene" ||
-		messages[4].Text != "Continuing." || messages[4].Source != "tap" ||
-		messages[6].Text != "Latest." || messages[6].Source != "text" {
+		messages[2].Role != "cat" || messages[2].Sender != "Cake" || messages[2].Text != "Air scatters blue light." ||
+		messages[2].SceneTitle != "" || messages[2].ToolSummary != "" ||
+		messages[3].Text != "Continuing." || messages[3].Source != "tap" ||
+		messages[4].Text != "Latest." || messages[4].Source != "text" {
 		t.Fatal(string(raw))
-	}
-	for _, i := range []int{3, 5} {
-		divider := messages[i]
-		if divider.Role != "system" || divider.Sender != "System" || divider.Source != "system" ||
-			divider.Text != "Started a new chat" || !divider.Timestamp.Equal(messages[i+1].Timestamp) {
-			t.Errorf("invalid new chat divider: %+v", divider)
-		}
 	}
 }
 
-func TestAgentSpeechSuppressesTerminalProse(t *testing.T) {
+func TestNoSpeakToolAndFinalVoiceIsPersisted(t *testing.T) {
 	var synthesis atomic.Int32
 	var b *bridge
 	var base string
@@ -497,8 +495,8 @@ func TestAgentSpeechSuppressesTerminalProse(t *testing.T) {
 			_, _ = io.WriteString(w, `{"data":{"id":"ses_speech"}}`)
 		case "/api/session/ses_speech/prompt":
 			_, err := b.callMCP(r.Context(), "speak", object{"device_id": id, "text": "Already spoken."})
-			if err != nil {
-				t.Error(err)
+			if err == nil {
+				t.Error("obsolete speak tool remains callable")
 			}
 			_, _ = io.WriteString(w, `{"data":{"id":"msg-user"}}`)
 		case "/api/experimental/session/ses_speech/wait":
@@ -525,11 +523,10 @@ func TestAgentSpeechSuppressesTerminalProse(t *testing.T) {
 	w.json(t, object{"ev": "hello", "role": "web"})
 	w.until(t, hasWS("peers", id))
 	w.json(t, object{"ev": "watch", "device_id": id})
-	w.until(t, hasWS("scene", ""))
+	w.until(t, hasWS("svg", ""))
 	eventually(t, func() bool { return synthesis.Load() >= 3 }) // Character warm-up.
 	before := synthesis.Load()
 	c.json(t, object{"ev": "text", "text": "Say something."})
-	w.until(t, chatFrame("Already spoken."))
 	w.until(t, chatFrame("Say something."))
 	w.until(t, chatFrame("Done."))
 	eventually(t, func() bool {
@@ -538,6 +535,6 @@ func TestAgentSpeechSuppressesTerminalProse(t *testing.T) {
 		return !b.ws.devices[id].busy
 	})
 	if synthesis.Load() != before+1 {
-		t.Fatal("terminal prose was synthesized again")
+		t.Fatal("the final prose was not synthesized exactly once")
 	}
 }

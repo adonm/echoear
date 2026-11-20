@@ -481,7 +481,7 @@ func TestLive(t *testing.T) {
 		assertLiveActor(t, oc, ai.SessionID, settings)
 		prompt, err := ocData[[]struct{ Text string }](t.Context(), oc, http.MethodGet, "/api/session/"+ai.SessionID+"/message?order=desc&limit=1&type=user", nil)
 		if err != nil || len(prompt) != 1 || !strings.HasPrefix(prompt[0].Text,
-			"[EchoEar: Cake ("+sender+"), hardware, typed, time=") || !strings.Contains(prompt[0].Text, ", screen=face]") {
+			"[Cake ("+sender+") · hardware · typed]\n") {
 			t.Fatal("OpenCode prompt identity or provenance is incorrect")
 		}
 		reg := liveJSON[struct {

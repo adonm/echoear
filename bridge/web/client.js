@@ -194,9 +194,9 @@ async function loadSaved() {
   say("saved-note", "Loading…");
   $("saved-items").replaceChildren();
   try {
-    const [{scopes}, {assets}] = await Promise.all([api(current, "/api/memory/scopes"), api(current, "/api/assets")]);
+    const [{scopes}, {apps}] = await Promise.all([api(current, "/api/memory/scopes"), api(current, "/api/apps")]);
     if (!active()) return;
-    const names = [...new Set(["shared", ...(cat?.id ? [cat.id] : []), ...scopes.map(s => s.scope).filter(s => s.startsWith("game:"))])];
+    const names = [...new Set(["shared", ...(cat?.id ? [cat.id] : []), ...scopes.map(s => s.scope).filter(s => /^(game|app):/.test(s))])];
     const memory = await Promise.all(names.map(scope => api(current, `/api/memory?scope=${encodeURIComponent(scope)}`)));
     if (!active()) return;
     const remove = (path, label) => removeButton("Delete", label, async () => {
@@ -220,10 +220,25 @@ async function loadSaved() {
       item.append(row, node("pre", "saved-value", JSON.stringify(entry.value, null, 2)));
       return item;
     })));
-    groups.push(section("Visual assets", assets.map(asset => {
+    groups.push(section("Saved Apps", apps.map(saved => {
       const item = node("li", "compact-item");
-      item.append(node("span", "compact-label", `${asset.name} · ${asset.kind}`),
-        remove(`/api/assets/${encodeURIComponent(asset.name)}`, asset.name));
+      const run = node("button", "small", "Run");
+      run.type = "button";
+      run.disabled = !cat?.id;
+      run.setAttribute("aria-label", `Run ${saved.title}`);
+      run.onclick = async () => {
+        run.disabled = true;
+        try {
+          await api(current, "/api/apps/run", {method:"POST", body:{device_id:cat.id,name:saved.name}});
+          if (active()) say("saved-note", `Running ${saved.title}.`);
+        } catch (error) {
+          if (active()) say("saved-note", error.message || "Could not run the saved app.");
+        } finally {
+          run.disabled = false;
+        }
+      };
+      item.append(node("span", "compact-label", `${saved.title} · ${saved.kind}`), run,
+        remove(`/api/apps/${encodeURIComponent(saved.name)}`, saved.title));
       return item;
     })));
     $("saved-items").replaceChildren(...groups);
@@ -759,6 +774,10 @@ function updateCat({device_id, character, cat, voice}) {
 }
 
 function command(msg) {
+  if (msg.type === "saved_apps") {
+    loadSaved();
+    return;
+  }
   if (msg.type === "timers") {
     if (msg.device_id === view.id) loadTimers();
     return;
@@ -794,15 +813,22 @@ function command(msg) {
       }
       break;
     }
+    case "svg":
     case "scene": {
       const first = !rev;
+      let svg;
+      if (msg.op === "svg") {
+        svg = new DOMParser().parseFromString(msg.svg, "image/svg+xml").documentElement;
+        if (svg.localName !== "svg" || svg.namespaceURI !== svgNS || svg.getAttribute("viewBox") !== "0 0 360 360") return;
+      }
       keyed.clear();
       nodes.replaceChildren();
       rev = msg.rev;
-      $("canvas-bg").setAttribute("fill", msg.bg);
+      $("canvas-bg").setAttribute("fill", svg ? "#000000" : msg.bg);
       $("screen-placeholder").setAttribute("display", "none");
       screen.dataset.interactive = "true";
-      for (const n of msg.nodes) put(n);
+      if (svg) nodes.append(document.importNode(svg, true));
+      else for (const n of msg.nodes) put(n);
       if (first) {
         say("link-state", app.scope ? "Private live cat" : "LAN dashboard");
         updateStatus(view.virtual ? `${view.device.character} · Live Virtual Cat` : `Mirroring ${view.device.character}`);
@@ -863,12 +889,12 @@ function command(msg) {
 const dayFormat = new Intl.DateTimeFormat(undefined, {dateStyle:"medium"});
 const timeFormat = new Intl.DateTimeFormat(undefined, {hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
 function bubble(entry) {
-  if (entry.role === "system") {
+  if (entry.role === "card" || entry.role === "system") {
     const item = node("li", "pill chat-divider", entry.text);
     item.dataset.entry = entry.id;
     return item;
   }
-  const role = ["assistant", "user", "intercom"].includes(entry.role) ? entry.role : "assistant";
+  const role = ["user", "intercom"].includes(entry.role) ? entry.role : "cat";
   const item = node("li", `bubble ${role}`);
   item.dataset.entry = entry.id;
   const catName = view.device.character;
@@ -886,12 +912,6 @@ function bubble(entry) {
     header.append(time);
   }
   item.append(header, node("p", "bubble-text", entry.text));
-  if (entry.scene_title || entry.tool_summary) {
-    const meta = node("div", "row wrap bubble-meta");
-    if (entry.scene_title) meta.append(node("span", "pill", `Scene: ${entry.scene_title}`));
-    if (entry.tool_summary) meta.append(node("span", "pill", `Tool: ${entry.tool_summary}`));
-    item.append(meta);
-  }
   return item;
 }
 
@@ -1065,7 +1085,7 @@ function xy(e) {
 }
 screen.addEventListener("pointerdown", e => {
   if (e.button !== 0 || pointer || !rev) return;
-  const g = e.target.closest("[data-on]");
+  const g = e.target.closest("[data-id]");
   pointer = {pointer:e.pointerId,id:g?.dataset.id || "",drag:g?.dataset.on === "drag",last:0};
   screen.setPointerCapture(e.pointerId);
   if (pointer.drag) send({ev:"drag",id:pointer.id,...xy(e)});

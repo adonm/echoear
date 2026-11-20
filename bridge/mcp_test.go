@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -72,12 +73,51 @@ func rpcTest(t *testing.T, base, method string, params object) object {
 
 func toolTest(t *testing.T, base, tool string, args object, failed bool) object {
 	t.Helper()
+	if tool == "memory" {
+		tool = "store"
+	}
+	if !slices.Contains([]string{"inspect", "run_app", "act", "store"}, tool) {
+		result := testObject(t, testRequest(t, "POST", base+"/test-legacy", "unit", object{"name": tool, "args": args}, 200))
+		if (result["error"] != nil) != failed {
+			t.Fatalf("%s: %v (expected error=%v)", tool, result, failed)
+		}
+		return result
+	}
 	result := rpcTest(t, base, "tools/call", object{"name": tool, "arguments": args})
 	value, _ := result["structuredContent"].(object)
 	if value == nil || result["isError"] != failed {
 		t.Fatalf("%s: %+v (expected error: %v)", tool, result, failed)
 	}
 	return value
+}
+
+// Exercise the legacy scene engine below the public MCP transport.
+func legacyTestServer(b *bridge) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/test-legacy" {
+			b.ServeHTTP(w, r)
+			return
+		}
+		req, err := jsonBody(r)
+		if err != nil {
+			sendError(w, err)
+			return
+		}
+		args, _ := req["args"].(object)
+		out, err := b.callLegacyMCP(r.Context(), str(req["name"]), args)
+		if err != nil {
+			out = object{"error": err.Error()}
+			var version *versionConflict
+			var scene *sceneConflict
+			if errors.As(err, &version) {
+				out["version"] = version.version
+			}
+			if errors.As(err, &scene) {
+				out["rev"] = scene.rev
+			}
+		}
+		sendJSON(w, 200, out)
+	})
 }
 
 func fakeTTS(ctx context.Context, requests *atomic.Int32) *synthWorker {
@@ -127,8 +167,21 @@ func TestMCPProtocolAndScene(t *testing.T) {
 			t.Fatal(tool)
 		}
 	}
-	if !slices.Equal(names, []string{"devices", "snapshot", "scene", "patch", "speak", "chime", "intercom", "control", "cat", "memory", "asset", "timer", "wait_event"}) {
+	if !slices.Equal(names, []string{"inspect", "run_app", "act", "store"}) {
 		t.Fatal(names)
+	}
+	old := testObject(t, testRequest(t, "POST", base+"/mcp", "unit", object{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": object{"name": "speak"}}, 200))
+	if old["error"].(object)["code"] != json.Number("-32602") {
+		t.Fatal(old)
+	}
+	snap := toolTest(t, base, "inspect", object{"device_id": id}, false)
+	if len(snap) != 9 || snap["me"].(object)["name"] != "Cake" || snap["screen"].(object)["title"] != "Cat" {
+		t.Fatal(snap)
+	}
+	toolTest(t, base, "act", object{"to": id, "volume": 40}, false)
+	toolTest(t, base, "store", object{"op": "set", "scope": "app:scores", "key": "best", "value": 7, "expected_version": 0}, false)
+	if v := toolTest(t, base, "store", object{"op": "delete", "scope": "app:scores", "key": "best", "expected_version": 0}, true); v["version"] != json.Number("1") {
+		t.Fatal(v)
 	}
 	list := toolTest(t, base, "devices", object{}, false)
 	d := list["devices"].([]any)[0].(object)
@@ -171,11 +224,11 @@ func TestMCPProtocolAndScene(t *testing.T) {
 		t.Fatal("node cap did not preserve Cat exit")
 	}
 	messages := testObject(t, testRequest(t, "GET", base+"/api/devices/"+id+"/messages", "unit", nil, 200))["messages"].([]any)
-	if first := messages[0].(object); first["scene_title"] != "Quiz" || first["source"] != "mcp" {
+	if first := messages[0].(object); first["card_title"] != "Quiz" || first["source"] != "mcp" {
 		t.Fatal(first)
 	}
 	entries, err := b.history.list(t.Context(), id)
-	if err != nil || len(entries) != 3 {
+	if err != nil || len(entries) != 1 {
 		t.Fatal(entries, err)
 	}
 }
@@ -406,7 +459,7 @@ func TestMCPSceneInlineChimeAndSay(t *testing.T) {
 	toolTest(t, base, "scene", object{
 		"device_id": id, "title": "Look!", "say": "Hello, fish!", "chime": "celebrate",
 	}, false)
-	c.until(t, hasWS("scene", `"s":"Look!"`))
+	c.until(t, hasWS("svg", "Look!"))
 	c.until(t, hasWS("chime", `"kind":"intercom"`))
 	expectChatAndPCM(t, c, "Hello, fish!")
 	b.ws.mu.Lock()
@@ -416,7 +469,7 @@ func TestMCPSceneInlineChimeAndSay(t *testing.T) {
 		t.Fatal("inline say did not suppress the turn's final text playback")
 	}
 	toolTest(t, base, "scene", object{"device_id": id, "preset": "face", "chime": "tap"}, false)
-	c.until(t, hasWS("scene", `"id":"cat-ring"`))
+	c.until(t, hasWS("svg", "cat-ring"))
 	c.until(t, hasWS("chime", `"kind":"tap"`))
 }
 
@@ -436,7 +489,7 @@ func TestMCPSpeakChimeAndIntercom(t *testing.T) {
 	watcher.json(t, object{"ev": "hello", "role": "web"})
 	watcher.until(t, hasWS("peers", to))
 	watcher.json(t, object{"ev": "watch", "device_id": to})
-	watcher.until(t, hasWS("scene", ""))
+	watcher.until(t, hasWS("svg", ""))
 	b.ws.mu.Lock()
 	d := b.ws.devices[to]
 	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})

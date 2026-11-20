@@ -505,6 +505,10 @@ func sessionMatchesDevice(title, deviceID string) bool {
 }
 
 func (o *openCode) ListDeviceSessions(ctx context.Context, deviceID, activeSID string) ([]string, error) {
+	return o.listDeviceSessions(ctx, deviceID, activeSID, true)
+}
+
+func (o *openCode) listDeviceSessions(ctx context.Context, deviceID, activeSID string, fallback bool) ([]string, error) {
 	type session struct {
 		ID, Title string
 		Time      struct{ Created int64 }
@@ -516,10 +520,10 @@ func (o *openCode) ListDeviceSessions(ctx context.Context, deviceID, activeSID s
 	var matches []session
 	seenIDs, seenCursors := make(map[string]bool), make(map[string]bool)
 	params := url.Values{"limit": {"200"}}
-	for range 5 {
+	for {
 		var result page
 		if err := o.jsonCall(ctx, http.MethodGet, "/api/session?"+params.Encode(), nil, &result); err != nil {
-			if activeSID != "" {
+			if fallback && activeSID != "" {
 				return []string{activeSID}, nil
 			}
 			return nil, err
@@ -631,18 +635,19 @@ func (o *openCode) GetSessionMessages(ctx context.Context, sid string) ([]chatEn
 		Data   []ocMessage
 		Cursor struct{ Next string }
 	}
-	const messageLimit = 500
 	params := url.Values{"order": {"asc"}, "limit": {"50"}}
 	entries := []chatEntry{}
 	source := "text"
 	seen := make(map[string]bool)
-	for count := 0; count < messageLimit; {
+	for {
 		var result page
 		if err := o.jsonCall(ctx, http.MethodGet, "/api/session/"+sid+"/message?"+params.Encode(), nil, &result); err != nil {
 			return nil, err
 		}
-		for _, message := range result.Data[:min(len(result.Data), messageLimit-count)] {
-			count++
+		for _, message := range result.Data {
+			if message.Type == "assistant" && message.Finish != "" && message.Finish != "stop" && message.Finish != "length" {
+				continue
+			}
 			if message.Type == "user" {
 				switch message.Metadata.EchoEarSource {
 				case "typed", "voice", "tap":

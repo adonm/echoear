@@ -42,7 +42,7 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 	web := testConnectWS(t, base, "unit", false)
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.json(t, object{"ev": "watch", "device_id": id})
-	web.until(t, hasWS("scene", ""))
+	web.until(t, hasWS("svg", ""))
 	toolTest(t, base, "control", object{"device_id": id, "sleep": true}, false)
 	dev.until(t, hasWS("power", `"brightness":12`))
 
@@ -68,7 +68,7 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 	dev.json(t, object{"ev": "tap", "id": "cat"})
 	dev.until(t, hasWS("patch", `"card"`))
 	entries := apiObjects(t, base+"/api/devices/"+id+"/messages", "messages")
-	if len(entries) != 1 || entries[0].(object)["source"] != "timer" {
+	if len(entries) != 2 || entries[0].(object)["text"] != "Timer: Cake break" || entries[1].(object)["source"] != "timer" {
 		t.Fatal(entries)
 	}
 	set["in_seconds"] = 3600
@@ -187,8 +187,7 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	go func() { defer close(finished); b.timers.fire(str(timer["id"])) }()
 	select {
 	case got := <-prompt:
-		if !strings.HasPrefix(got, "[EchoEar: Cake (echoear-timer), hardware, timer, time=") ||
-			!strings.Contains(got, ", screen=face]") || stripEchoEarHeader(got) != "Timer fired: Timer" {
+		if got != "[Cake (echoear-timer) · hardware · timer]\nTimer fired: Timer" {
 			t.Fatal(got)
 		}
 	case <-time.After(5 * time.Second):

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"image"
 	"net"
 	"os"
 	"strconv"
@@ -61,59 +62,54 @@ func TestLiveWebSocket(t *testing.T) {
 	phoneID := "phone-" + hex.EncodeToString(suffix[:])
 	deviceID := "echoear-ws-test-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	from := testConnectWS(t, base, token, false)
-	first := from.hello(t, deviceID, "Cake")
-	if bytes.Contains(first.data, []byte(`"id":"new"`)) {
-		t.Fatal("live cat face exposed the New button")
+	first, rev, _ := decodeDisplay(t, from.helloV2(t, deviceID, "Cake"))
+	if first != image.Rect(0, 0, 360, 360) {
+		t.Fatalf("live board did not receive full initial frame: %v", first)
 	}
 	viewer := testConnectWS(t, base, token, true)
 	viewer.json(t, object{"ev": "hello", "role": "web"})
 	viewer.until(t, hasWS("peers", deviceID))
 	viewer.json(t, object{"ev": "watch", "device_id": deviceID})
-	if mirror := viewer.until(t, hasWS("scene", "")); !bytes.Equal(mirror.data, first.data) {
-		t.Fatal("live mirror scene differs from the device")
+	if mirror := testObject(t, viewer.until(t, hasWS("svg", "cat-ring")).data); str(mirror["rev"]) == "" {
+		// JSON revisions are numbers, not strings.
+		if mirror["rev"] == nil || rev == 0 {
+			t.Fatal("missing initial display revisions")
+		}
 	}
 	from.json(t, object{"ev": "status", "battery_pct": 48, "battery_mv": 3840, "charging": false, "volume": 80, "rssi": -43})
-	a := from.until(t, hasWS("patch", `"battery-fill"`))
-	b := viewer.until(t, hasWS("patch", `"battery-fill"`))
-	if !bytes.Equal(a.data, b.data) {
-		t.Fatal("live mirror patch differs from the device")
+	battery, _, _ := decodeDisplay(t, from.until(t, isDisplay))
+	viewer.until(t, hasWS("svg", "#39D1A0"))
+	if battery.Dx() > 50 || battery.Dy() > 25 {
+		t.Fatalf("battery update did not use a dirty rectangle: %v", battery)
 	}
 	from.json(t, object{"ev": "tap", "x": 180, "y": 300})
-	drawer := from.until(t, func(f wsFrame) bool {
-		return hasWS("patch", `"drawer-title"`)(f) || hasWS("scene", `"drawer-title"`)(f)
-	})
-	if bytes.Contains(drawer.data, []byte(`"id":"new"`)) {
+	drawer := viewer.until(t, hasWS("svg", "Voice:"))
+	if bytes.Contains(drawer.data, []byte(`data-id=\"new\"`)) {
 		t.Fatal("hardware drawer offered reset")
 	}
-	from.json(t, object{"ev": "tap", "id": "cat", "x": 180, "y": 106})
-	from.until(t, hasWS("scene", `"cat-ring"`))
-	then := object{"patch": localSet("caption", "Live reset")}
+	from.json(t, object{"ev": "tap", "x": 180, "y": 106})
+	viewer.until(t, hasWS("svg", "cat-ring"))
+	const code = `let text="Ready";
+function render(){return '<svg viewBox="0 0 360 360"><rect data-id="flip" x="140" y="95" width="80" height="50" fill="gold"/><text x="180" y="195" fill="white" text-anchor="middle">'+text+'</text></svg>';}
+function onTap(s,p,id){if(id==="flip")text="Live tap";}
+function onTick(){if(text==="Live tap")text="Live reset";}`
 	result := liveJSON[struct{ Result struct{ IsError bool } }](t, c, "/mcp", object{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-		"params": object{"name": "patch", "arguments": object{"device_id": deviceID, "add": []object{
-			{"id": "caption", "t": "text", "s": "Ready"},
-			localButton("flip", object{"tap": object{"patch": localSet("caption", "Live tap"), "after_ms": 50, "then": then}}),
-		}}}}, nil, "", nil)
+		"params": object{"name": "run_app", "arguments": object{"devices": deviceID, "title": "Live flip", "code": code, "tick_ms": 500, "max_ticks": 12}}}, nil, "", nil)
 	if result.Result.IsError {
-		t.Fatal("live MCP patch rejected local interactivity")
+		t.Fatal("live MCP run_app rejected local interactivity")
 	}
-	local := from.until(t, hasWS("patch", `"id":"flip"`))
-	if bytes.Contains(local.data, []byte(`"after_ms"`)) || !bytes.Contains(local.data, []byte(`"on":"tap"`)) {
-		t.Fatal("live scene did not strip local action metadata")
-	}
-	from.json(t, object{"ev": "tap", "id": "flip", "x": 180, "y": 120})
-	changed := from.until(t, hasWS("patch", `"s":"Live tap"`))
-	if mirrored := viewer.until(t, hasWS("patch", `"s":"Live tap"`)); !bytes.Equal(changed.data, mirrored.data) {
-		t.Fatal("live local patch differs from its mirror")
-	}
-	from.until(t, hasWS("patch", `"s":"Live reset"`))
-	from.json(t, object{"ev": "tap", "id": exitNode, "x": 180, "y": 316})
-	from.until(t, hasWS("scene", `"cat-ring"`))
-	t.Log("live cat drawer and local tap, timed patch, mirror, and exit verified")
+	viewer.until(t, hasWS("svg", "Ready"))
+	from.json(t, object{"ev": "tap", "x": 180, "y": 120})
+	viewer.until(t, hasWS("svg", "Live tap"))
+	viewer.until(t, hasWS("svg", "Live reset"))
+	from.json(t, object{"ev": "tap", "x": 180, "y": 316})
+	viewer.until(t, hasWS("svg", "cat-ring"))
+	t.Log("live cat drawer, raw tap, JS tick, dirty rectangle, SVG mirror, and exit verified")
 
 	phone := testConnectWS(t, base, token, true)
 	phone.json(t, object{"ev": "hello", "role": "web", "device_id": phoneID, "character": "New Cat", "firmware": "web", "volume": 65})
-	face := phone.until(t, hasWS("scene", `"cat-ring"`))
-	if !hasWS("scene", `"bg":"#F3F4F6"`)(face) || !hasWS("scene", "Say hi to design me!")(face) {
+	face := phone.until(t, hasWS("svg", "cat-ring"))
+	if !hasWS("svg", "#F3F4F6")(face) || !hasWS("svg", "Say hi to design me!")(face) {
 		t.Fatal("live Phone Cat did not start blank")
 	}
 	viewer.until(t, hasWS("peers", phoneID))
@@ -149,7 +145,7 @@ func TestLiveWebSocket(t *testing.T) {
 	}
 	phone.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
 	phone.until(t, hasWS("mode", `"mode":"idle"`))
-	t.Logf("live raw intercom rec_end to PCM: %.2f ms; HTML/SVG and exact scene/patch mirror verified",
+	t.Logf("live raw intercom rec_end to PCM: %.2f ms; HTML/SVG and framebuffer mirror verified",
 		float64(elapsed)/float64(time.Millisecond))
 	for _, s := range []*testWS{from, phone, viewer} {
 		s.write(t, maskedFrame(wsClose, true, wsCloseFrame(1000).data))
