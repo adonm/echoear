@@ -474,7 +474,7 @@ func (o *openCode) ReconnectMCP(ctx context.Context, name string) error {
 	return o.jsonCall(ctx, http.MethodPost, path, nil, nil)
 }
 
-// CompactSession returns false without an error for an empty, removed, or replaced mapping.
+// CompactSession returns false without an error for an ineligible or stale session.
 func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool, error) {
 	if sid == "" {
 		return false, nil
@@ -526,12 +526,19 @@ func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool
 	if err != nil {
 		return false, err
 	}
-	message, err := ocData[struct{ ID, Type, Status string }](ctx, o.upstream, http.MethodGet, path+"/message/"+url.PathEscape(item.ID), nil)
+	message, err := ocData[struct {
+		ID, Type, Status string
+		Error            struct{ Type, Message string }
+	}](ctx, o.upstream, http.MethodGet, path+"/message/"+url.PathEscape(item.ID), nil)
 	if err != nil {
 		return false, err
 	}
 	if message.ID != item.ID || message.Type != "compaction" {
 		return false, o.invalid()
+	}
+	// OpenCode reports this when the session has no history beyond its last compaction.
+	if message.Status == "failed" && message.Error.Type == "compaction.unavailable" && message.Error.Message == "Nothing to compact yet" {
+		return false, nil
 	}
 	if message.Status != "completed" {
 		return false, problem(502, "OpenCode did not complete session compaction")
@@ -718,12 +725,12 @@ func (m ocMessage) chat(source string) chatEntry {
 			name = p.Tool
 		}
 		if action, ok := strings.CutPrefix(name, "echoear_"); p.Type == "tool" && ok {
-			label := map[string]string{"inspect": "Checked the cats and screen", "run_app": "Opened an app",
-				"act": "Used a device control", "store": "Used saved memory"}[action]
+			label := map[string]string{"state": "Checked live state", "patch": "Changed saved or device state",
+				"app": "Used an app", "emit": "Sent a signal"}[action]
 			if label != "" && !slices.Contains(notes, label) {
 				notes = append(notes, label)
 			}
-			if action == "run_app" {
+			if action == "app" {
 				entry.SceneTitle = shortText(p.State.Input.Title, 48, false)
 			}
 		}

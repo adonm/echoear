@@ -23,7 +23,7 @@ const (
 	mcpLimit    = 128 << 10
 	exitNode    = "echoear-exit"
 
-	mcpInstructions = "Use the exact EchoEar device ID. Inspect live context, run an SVG drawing or sandboxed JS app, act on a device, or store persistent JSON. Only final assistant prose is spoken."
+	mcpInstructions = "Use exact EchoEar device IDs. Read keyed snapshots with state, change device/cat/memory/timers with patch, run or update screens with app, and send live audio with emit. Only final assistant prose is spoken."
 )
 
 func mcpSchemaHash() string {
@@ -190,20 +190,26 @@ var mcpTools = func() []object {
 	}
 	notes := object{"anyOf": []object{text, array(text)}, "description": "PITCH:MS separated by spaces or an array, e.g. C5:150 E5:150"}
 	chimes := append([]string{"tap", "think", "intercom", "celebrate"}, slices.Sorted(maps.Keys(sfxPresets))...)
+	memory := schema(object{"op": enum("set", "delete"), "scope": text, "key": text, "value": object{},
+		"expected_version": object{"type": "integer", "minimum": 0, "description": "Require this version; 0 means absent"}}, "scope", "key")
+	jsonObject := object{"type": "object", "additionalProperties": true}
 	return []object{
-		tool("inspect", "Read the live cat and its editable face_svg, clock, peers, screen, app, timers, memory keys, and saved cats/apps. Omit device_id for discovery.",
-			schema(object{"device_id": text})),
-		tool("run_app", "Display a 360×360 SVG, run a sandboxed JS app, load/save by slug, or exit back to the cat face. One shared app state across devices, render(state, player) per device.",
-			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
-				"load": text, "save_as": text, "tick_ms": number, "max_ticks": number, "exit": flag}, "devices")),
-		tool("act", "Send a spoken intercom, play a melody/chime, change device controls, set/cancel a timer, or design/load a cat.",
-			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"), "notes": notes, "chime": enum(chimes...),
-				"volume": object{"type": "integer", "minimum": 0, "maximum": 100, "description": "Set manual volume"}, "auto_volume": flag, "sleep": flag,
-				"timer": schema(object{"op": enum("set", "cancel"), "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag, "app": text}, "op"),
+		tool("state", "Read keyed device, cat, saved app, timer, and JSON memory snapshots. With device_id, always includes me.device, me.cat, and me.active_app. Use include for specific slices or recent messages and diagnostics.",
+			schema(object{"device_id": text, "include": array(enum(stateSlices...)), "memory_scopes": array(text),
+				"include_code": flag, "messages_limit": object{"type": "integer", "minimum": 1, "maximum": 30, "default": 10}})),
+		tool("patch", "Change device controls, cat appearance, persistent JSON memory, or a timer. Memory edits in one call commit atomically. Cat edits default to update; timer creation accepts in_seconds or at.",
+			schema(object{"device_id": text,
+				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": text}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
-					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"}, "slug": text, "configured": flag}, "op")}, "to")),
-		tool("store", "Read/write persistent JSON in a device, shared, game:<name>, or app:<name> scope. expected_version is atomic; zero means no key exists.",
-			schema(object{"op": enum("get", "set", "delete", "list"), "scope": text, "key": text, "value": object{}, "expected_version": number}, "op", "scope")),
+					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"}, "slug": text, "configured": flag}),
+				"memory": object{"anyOf": []object{memory, array(memory)}},
+				"timer":  schema(object{"op": enum("set", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "notes": notes, "wake_agent": flag, "app": text})})),
+		tool("app", "Display SVG, launch/load/save/delete an app or drawing, exit to the cat, or shallow-patch one running JS app without restarting. One shared state renders separately for each player.",
+			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
+				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
+		tool("emit", "Send a spoken intercom and card, play a melody, or play a sound effect. Use an exact device ID or all.",
+			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"),
+				"notes": notes, "sfx": enum(chimes...), "chime": enum(chimes...)}, "to")),
 	}
 }()
 
@@ -228,7 +234,7 @@ func (b *bridge) lookupDevice(id string) (peer, error) {
 	return peer{}, problem(404, "Device not found")
 }
 
-func (h *wsHub) deviceStatus(entry object, id string) {
+func (h *wsHub) deviceStatus(entry object, id string, full bool) {
 	key := strings.ToLower(id)
 	entry["ws_connected"], entry["ws"], entry["mode"] = false, false, "offline"
 	entry["battery_pct"], entry["volume"], entry["scene_rev"] = nil, nil, uint64(0)
@@ -244,6 +250,27 @@ func (h *wsHub) deviceStatus(entry object, id string) {
 		}
 		if d.pct >= 0 {
 			entry["battery_pct"] = d.pct
+		}
+		if full {
+			cat := d.cat
+			cat.Voice = d.voice
+			entry["cat"], entry["voice"] = cat, d.voice
+			title := d.scene.title
+			if title == "" {
+				title = "Cat"
+			}
+			entry["screen"] = object{"title": title, "shape": d.screen.shape, "rev": d.rev, "hit_ids": appHitIDs(d.svg)}
+			entry["width"], entry["height"] = d.screen.width, d.screen.height
+			entry["wifi_rssi"], entry["cpu_pct"] = d.telemetry.WiFi, d.telemetry.CPU
+			if d.telemetry.WiFi == nil {
+				entry["wifi_rssi"] = d.telemetry.RSSI
+			}
+			if a := d.app; a != nil {
+				entry["active_app"] = h.activeAppState(a)
+				if a.snapshot != nil {
+					entry["active_app_state"] = a.snapshot
+				}
+			}
 		}
 		h.mu.Unlock()
 		return
@@ -271,180 +298,50 @@ func mcpUint(args object, key string) (*uint64, error) {
 
 func (b *bridge) callMCP(ctx context.Context, name string, args object) (object, error) {
 	switch name {
-	case "inspect":
-		return b.inspect(ctx, str(args["device_id"]))
-	case "run_app":
+	case "state":
+		return b.mcpState(ctx, args)
+	case "patch":
+		return b.mcpPatch(ctx, args)
+	case "app":
 		return b.runApp(ctx, args)
-	case "act":
-		return b.act(ctx, args)
-	case "store":
-		return b.memory(ctx, args, false)
+	case "emit":
+		return b.mcpEmit(ctx, args)
 	default:
 		return nil, problem(400, "Unknown tool")
 	}
 }
 
-func (b *bridge) inspect(ctx context.Context, id string) (object, error) {
-	devices, err := b.deviceList()
-	if err != nil {
-		return nil, err
-	}
-	out := object{"me": nil, "now": time.Now().Format(time.RFC3339), "peers": []object{}, "screen": nil, "active_app": nil,
-		"timers": []savedTimer{}, "memory_keys": []object{}, "saved_cats": []object{}, "saved_apps": []object{}}
-	list := []object{}
-	for _, entry := range devices {
-		p := object{"device_id": entry["device_id"], "name": entry["character"], "online": entry["online"], "kind": entry["kind"]}
-		if str(entry["device_id"]) == id {
-			p["mode"], p["volume"], p["battery_pct"], p["ws_connected"] = entry["mode"], entry["volume"], entry["battery_pct"], entry["ws_connected"]
-			p["auto_volume"], p["sleeping"], p["voice"] = entry["auto_volume"], entry["sleeping"], entry["voice"]
-			out["me"] = p
-		} else {
-			list = append(list, p)
-		}
-	}
-	if id != "" {
-		if out["me"] == nil {
-			return nil, problem(404, "Device not found")
-		}
-		who, err := b.lookupDevice(id)
-		if err != nil {
-			return nil, err
-		}
-		cat, me := b.catFor(who), out["me"].(object)
-		me["cat"], me["configured"], me["personality"], me["face_svg"] = cat.catLook, cat.Configured, cat.Personality, cat.FaceSVG
-		if h := b.ws; h != nil {
-			h.mu.Lock()
-			if d := h.devices[strings.ToLower(id)]; d != nil && h.active(d) {
-				title := d.scene.title
-				if title == "" {
-					title = "Cat"
-				}
-				hits := []string{}
-				for _, hit := range d.svg.hits {
-					if !slices.Contains(hits, hit.id) {
-						hits = append(hits, hit.id)
-					}
-				}
-				out["screen"] = object{"title": title, "rev": d.rev, "hit_ids": hits}
-				if a := d.app; a != nil {
-					players := []string{}
-					for _, p := range a.devices {
-						if p != nil && h.active(p) {
-							players = append(players, p.who.DeviceID)
-						}
-					}
-					out["active_app"] = object{"name": a.spec.Name, "title": a.spec.Title, "kind": a.spec.Kind, "devices": players, "ticks_left": a.remaining}
-				}
-			}
-			h.mu.Unlock()
-		}
-	}
-	out["peers"] = list
-	if b.timers != nil {
-		out["timers"], err = b.timers.list(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if b.db != nil {
-		if id != "" {
-			for _, scope := range []string{id, "shared"} {
-				m, err := b.memory(ctx, object{"op": "list", "scope": scope}, false)
-				if err != nil {
-					return nil, err
-				}
-				out["memory_keys"] = append(out["memory_keys"].([]object), object{"scope": scope, "entries": m["entries"]})
-			}
-		}
-		cats, err := b.catTool(ctx, object{"op": "list_saved"})
-		if err != nil {
-			return nil, err
-		}
-		for _, c := range cats["cats"].([]savedCat) {
-			out["saved_cats"] = append(out["saved_cats"].([]object), object{"slug": c.Slug, "name": c.Name})
-		}
-		out["saved_apps"], err = b.listApps(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
-func (b *bridge) act(ctx context.Context, args object) (object, error) {
+func (b *bridge) mcpEmit(ctx context.Context, args object) (object, error) {
 	to := str(args["to"])
 	if !deviceIDRE.MatchString(to) {
 		return nil, problem(400, "Expected exact device ID or all")
 	}
-	if to == "all" && (len(args) != 2 || args["intercom"] == nil) {
-		return nil, problem(400, "Use all only for intercom")
-	}
 	out := object{"ok": true, "to": to}
 	var pcm []byte
-	kind := str(args["chime"])
-	if _, ok := args["chime"]; ok && !validChime(kind) {
-		var err error
-		pcm, err = sfxPCM(kind)
-		if err != nil {
-			return nil, fieldError("chime", "unknown kind")
-		}
-	}
-	if raw, ok := args["notes"]; ok {
-		_, p, err := melodyInput(raw, "notes")
-		if err != nil {
-			return nil, err
-		}
-		pcm = p
-	}
-	_, volumeSet := args["volume"]
-	_, autoSet := args["auto_volume"]
-	_, sleepSet := args["sleep"]
-	if volumeSet || autoSet || sleepSet {
-		if b.ws == nil {
-			return nil, problem(503, "Device hub unavailable")
-		}
-		r, err := b.ws.mcpControl(ctx, to, args)
-		if err != nil {
-			return nil, err
-		}
-		out["volume"], out["auto_volume"], out["sleeping"] = r["volume"], r["auto_volume"], r["sleeping"]
-	}
-	if raw, ok := args["cat"]; ok {
-		c, ok := raw.(object)
+	var kind string
+	var audioField string
+	for _, key := range []string{"notes", "sfx", "chime"} {
+		raw, ok := args[key]
 		if !ok {
-			return nil, fieldError("cat", "expected an object")
+			continue
 		}
-		c = withDevice(c, to)
-		switch str(c["op"]) {
-		case "load":
-			c["op"] = "load_saved"
-			if str(c["slug"]) == "" {
-				c["slug"] = catSlug(str(c["name"]))
+		if audioField != "" {
+			return nil, problem(400, "Use only one of notes, sfx, or chime")
+		}
+		audioField = key
+		if key == "notes" {
+			var err error
+			_, pcm, err = melodyInput(raw, "notes")
+			if err != nil {
+				return nil, err
 			}
-		case "delete_saved":
-			if str(c["slug"]) == "" {
-				c["slug"] = catSlug(str(c["name"]))
+		} else if kind = str(raw); !validChime(kind) {
+			var err error
+			pcm, err = sfxPCM(kind)
+			if err != nil {
+				return nil, fieldError(key, "unknown kind")
 			}
-		case "update", "reset_blank":
-		default:
-			return nil, fieldError("cat.op", "unknown operation")
 		}
-		r, err := b.catTool(ctx, c)
-		if err != nil {
-			return nil, err
-		}
-		out["cat"] = r["cat"]
-	}
-	if raw, ok := args["timer"]; ok {
-		t, ok := raw.(object)
-		if !ok || t["op"] != "set" && t["op"] != "cancel" {
-			return nil, fieldError("timer", "expected op set or cancel")
-		}
-		r, err := b.timerMCP(ctx, withDevice(t, to))
-		if err != nil {
-			return nil, err
-		}
-		out["timer"] = r
 	}
 	if raw, ok := args["intercom"]; ok {
 		i, ok := raw.(object)
@@ -457,12 +354,8 @@ func (b *bridge) act(ctx context.Context, args object) (object, error) {
 		}
 		out["intercom"] = r
 	}
-	if kind != "" || len(pcm) != 0 {
-		who, err := b.lookupDevice(to)
-		if err != nil {
-			return nil, err
-		}
-		if err := b.playChime(who.DeviceID, kind, pcm); err != nil {
+	if audioField != "" {
+		if err := b.playChime(to, kind, pcm); err != nil {
 			return nil, err
 		}
 		out["played"] = true
@@ -483,8 +376,8 @@ func volumeCommand(args object, key string) (auto bool, level int, set bool, err
 		if err != nil {
 			return false, 0, false, err
 		}
-		if auto == (volume != nil) {
-			return false, 0, false, problem(400, "Use auto without volume, or provide a manual volume")
+		if auto && volume != nil {
+			return false, 0, false, problem(400, "Use auto without manual volume")
 		}
 	}
 	if auto {
@@ -492,6 +385,9 @@ func volumeCommand(args object, key string) (auto bool, level int, set bool, err
 	}
 	if volume != nil {
 		return false, int(*volume), true, nil
+	}
+	if _, present := args[key]; present {
+		return false, -1, true, nil // Hold the current level when disabling auto-volume.
 	}
 	return false, 0, false, nil
 }
@@ -525,6 +421,9 @@ func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object,
 		}
 		h.mu.Unlock()
 		h.settingsMu.Lock()
+		if level < 0 {
+			_, level = h.b.volumePrefs(id)
+		}
 		err := h.b.saveVolumePrefs(ctx, id, auto, level)
 		h.settingsMu.Unlock()
 		h.mu.Lock()
@@ -565,16 +464,33 @@ func (b *bridge) playChime(id, kind string, pcm []byte) error {
 	h := b.ws
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if id == "all" {
+		played := false
+		for _, d := range h.devices {
+			if h.active(d) {
+				h.playSignal(d, kind, pcm)
+				played = true
+			}
+		}
+		if !played {
+			return problem(409, "No devices connected")
+		}
+		return nil
+	}
 	d := h.devices[strings.ToLower(id)]
-	if d == nil || !h.active(d) {
+	if d == nil || !h.active(d) || d.who.DeviceID != id {
 		return problem(409, "Device is not connected")
 	}
+	h.playSignal(d, kind, pcm)
+	return nil
+}
+
+func (h *wsHub) playSignal(d *wsDevice, kind string, pcm []byte) {
 	if len(pcm) > 0 {
 		h.playPCM(d, pcm)
 	} else {
 		h.chime(d, kind)
 	}
-	return nil
 }
 
 func (b *bridge) mcpIntercom(ctx context.Context, args object) (object, error) {

@@ -48,7 +48,8 @@ func (s *sceneView) control(id, action, value string, x, y, w, h int, text, sub,
 	}
 	art := svgRect(x, y, w, h, r, bg, fg, 2)
 	if path := uiIcons[icon]; path != "" {
-		art += fmt.Sprintf(`<path d="%s" transform="translate(%d %d) scale(%.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, float64(is)/24, fg)
+		scale := float64(is) / 24
+		art += fmt.Sprintf(`<path d="%s" transform="translate(%d %d) scale(%.4f %.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, scale, scale, fg)
 	}
 	if icon != "plus" && icon != "minus" {
 		art += svgLabel(tx, ty, size, text, fg)

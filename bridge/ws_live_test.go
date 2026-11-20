@@ -85,7 +85,7 @@ function render(){return '<svg viewBox="0 0 360 360"><rect data-id="flip" x="140
 function onTap(s,p,id){if(id==="flip")text="Live tap";}
 function onTick(){if(text==="Live tap")text="Live reset";}`
 	result := liveJSON[struct{ Result struct{ IsError bool } }](t, iso, "/mcp", object{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-		"params": object{"name": "run_app", "arguments": object{"devices": deviceID, "title": "Live flip", "code": code, "tick_ms": 500, "max_ticks": 12}}}, nil, "", nil)
+		"params": object{"name": "app", "arguments": object{"devices": deviceID, "title": "Live flip", "code": code, "tick_ms": 500, "max_ticks": 12}}}, nil, "", nil)
 	if result.Result.IsError {
 		t.Fatal("live MCP run_app rejected local interactivity")
 	}

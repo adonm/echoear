@@ -165,6 +165,10 @@ func deviceTheme(character string) string {
 }
 
 func (b *bridge) deviceList() ([]object, error) {
+	return b.deviceEntries(false)
+}
+
+func (b *bridge) deviceEntries(full bool) ([]object, error) {
 	others, err := b.peerSnapshot("")
 	if err != nil {
 		return nil, err
@@ -197,14 +201,17 @@ func (b *bridge) deviceList() ([]object, error) {
 		cat := b.catFor(who)
 		entry["character"], entry["cat"] = cat.Name, cat.catLook
 		entry["voice"] = b.voices.get(id, str(entry["theme"]))
-		if details := b.tunnels.info(id); details != nil {
+		if full {
+			cat.Voice = str(entry["voice"])
+			entry["cat"] = cat
+		} else if details := b.tunnels.info(id); details != nil {
 			entry["tunnel"] = details
 		}
 		if b.ws != nil {
-			b.ws.deviceStatus(entry, id)
+			b.ws.deviceStatus(entry, id, full)
 		} else {
 			entry["auto_volume"], entry["volume"] = b.volumePrefs(id)
-			entry["sleeping"] = false
+			entry["sleeping"], entry["ws_connected"], entry["mode"] = false, false, "offline"
 		}
 		if entry["kind"] == "virtual" {
 			entry["online"] = entry["ws_connected"] == true

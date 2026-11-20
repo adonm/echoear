@@ -56,8 +56,8 @@ func TestWSMelody(t *testing.T) {
 		}
 		c.json(t, object{"ev": "tts_ack", "state": "done", "audio": audio})
 	}
-	toolTest(t, base, "act", object{"to": id}, true)
-	toolTest(t, base, "act", object{"to": id, "notes": notes}, false)
+	toolTest(t, base, "emit", object{"to": id}, true)
+	toolTest(t, base, "emit", object{"to": id, "notes": notes}, false)
 	check()
 
 }

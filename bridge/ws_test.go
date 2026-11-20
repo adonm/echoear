@@ -355,7 +355,7 @@ func TestWSWebOnlyDisplayAndIdenticalAppRender(t *testing.T) {
 	const code = `function render() {
 		return '<svg><circle data-id="app-dot" cx="180" cy="180" r="35" fill="#3579da"/></svg>';
 	} function onTap(s,p,id) { if (id === "app-dot") chime("tap"); }`
-	toolTest(t, base, "run_app", object{"devices": id, "code": code}, false)
+	toolTest(t, base, "app", object{"devices": id, "code": code}, false)
 	web.until(t, func(f wsFrame) bool {
 		if isDisplay(f) {
 			t.Fatal("web-only app received RGB565")

@@ -178,13 +178,13 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	call := func(fail bool, op string, args object) object {
 		t.Helper()
 		if op == "get" {
-			return object{"cat": catObject(t, b, id)}
+			return stateMe(t, base, id)
 		}
 		if op == "load_saved" {
 			op = "load"
 		}
 		args["op"] = op
-		return toolTest(t, base, "act", object{"to": id, "cat": args}, fail)
+		return toolTest(t, base, "patch", object{"device_id": id, "cat": args}, fail)
 	}
 	blank := call(false, "get", object{})["cat"].(object)
 	if blank["name"] != "New Cat" || blank["face_bg"] != "#F3F4F6" || blank["mark_color"] != "#CBD5E1" ||
@@ -213,7 +213,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	} {
 		call(true, "update", fields)
 	}
-	toolTest(t, base, "act", object{"to": id, "cat": object{"op": "update", "face_svg": strings.Repeat(" ", 16<<10+1)}}, true)
+	toolTest(t, base, "patch", object{"device_id": id, "cat": object{"face_svg": strings.Repeat(" ", 16<<10+1)}}, true)
 	if got := call(false, "get", object{})["cat"]; !reflect.DeepEqual(got, blank) {
 		t.Fatal("invalid update changed the stored starter", got)
 	}
@@ -295,11 +295,11 @@ func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	}
 	dev := testConnectWS(t, base, "unit", false)
 	dev.hello(t, id, "Ignored")
-	toolTest(t, base, "run_app", object{"devices": id, "svg": `<svg><text x="180" y="180">Party</text></svg>`}, false)
+	toolTest(t, base, "app", object{"devices": id, "svg": `<svg><text x="180" y="180">Party</text></svg>`}, false)
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
 	dev.until(t, hasWS("svg", "Say hi to design me!"))
-	s := toolTest(t, base, "inspect", object{"device_id": id}, false)
-	if s["active_app"] != nil || s["screen"].(object)["title"] != "Cat" {
+	s := stateMe(t, base, id)
+	if s["active_app"] != nil || s["device"].(object)["screen"].(object)["title"] != "Cat" {
 		t.Fatal("reset did not close app", s)
 	}
 	if sid, err := b.oc.get(id); err != nil || sid != "" {
@@ -351,11 +351,10 @@ func TestFaceSVGPoseFilterAndChrome(t *testing.T) {
 }
 
 func TestUpdateCatLegacyFaceFields(t *testing.T) {
-	const guidance = "svg_extras was replaced by face_svg; call inspect({device_id}) to read the current face_svg and pass the edited <svg> in cat.face_svg"
 	for _, field := range []string{"svg_extras", "extras"} {
 		_, _, err := updateCat(blankCat(), object{field: "<svg/>"}, deviceVoices{})
-		if e, ok := err.(*apiError); !ok || e.status != 400 || e.Error() != guidance {
-			t.Errorf("updateCat with %s: want 400 and %q, got %#v", field, guidance, err)
+		if e, ok := err.(*apiError); !ok || e.status != 400 || e.Error() != "Unknown cat field "+field {
+			t.Errorf("updateCat accepted legacy field %s: %v", field, err)
 		}
 	}
 }
@@ -386,30 +385,31 @@ func TestCakeFaceSVGEditAndSleep(t *testing.T) {
 	dev := testConnectWS(t, base, "unit", false)
 	dev.json(t, object{"ev": "hello", "role": "device", "device_id": id, "character": "Cake", "proto": 2})
 	dev.until(t, hasWS("volume", `"level":55`))
-	me := func() object { return toolTest(t, base, "inspect", object{"device_id": id}, false)["me"].(object) }
-	before := me()
+	before := stateMe(t, base, id)
+	device, look := before["device"].(object), before["cat"].(object)
 	old := `<rect x="95" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
     <rect x="231" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
     <circle cx="107" cy="134" r="5" fill="#FFFAEE"/>
     <circle cx="243" cy="134" r="5" fill="#FFFAEE"/>`
-	face := str(before["face_svg"])
+	face := str(look["face_svg"])
 	edit := strings.Replace(face, old, `<circle cx="112" cy="142" r="17" fill="#123ABC"/><circle cx="248" cy="142" r="17" fill="#123ABC"/>`, 1)
-	if face == edit || before["auto_volume"] != true || before["sleeping"] != false || before["configured"] != true {
-		t.Fatal("inspect didn't return the editable starter face and device state")
+	if face == edit || device["auto_volume"] != true || device["sleeping"] != false || look["configured"] != true {
+		t.Fatal("state didn't return the editable starter face and device state")
 	}
-	update := object{"op": "update", "face_svg": edit}
-	result := toolTest(t, base, "act", object{"to": id, "sleep": true, "cat": update}, false)
-	if result["sleeping"] != true {
-		t.Fatal("combined act did not set sleep", result)
+	update := object{"face_svg": edit}
+	result := toolTest(t, base, "patch", object{"device_id": id, "device": object{"sleep": true}, "cat": update}, false)
+	if result["device"].(object)["sleeping"] != true {
+		t.Fatal("combined patch did not set sleep", result)
 	}
 	dev.until(t, hasWS("power", `"brightness":12`))
-	toolTest(t, base, "act", object{"to": id, "cat": update}, false)
-	after := me()
-	if after["sleeping"] != true || after["mode"] != "sleepy" || after["face_svg"] == face {
+	toolTest(t, base, "patch", object{"device_id": id, "cat": update}, false)
+	after := stateMe(t, base, id)
+	device, look = after["device"].(object), after["cat"].(object)
+	if device["sleeping"] != true || device["mode"] != "sleepy" || look["face_svg"] == face {
 		t.Fatal("appearance edit woke the cat or failed to save")
 	}
 	cat := legacyCat("Cake", "cake")
-	cat.FaceSVG = str(after["face_svg"])
+	cat.FaceSVG = str(look["face_svg"])
 	awake := catSVG(cat, catPose{mood: "idle"})
 	if strings.Count(awake, "#123ABC") != 2 || strings.Contains(awake, `x="95" y="123"`) ||
 		strings.Contains(awake, "M95 142H129") || strings.Contains(awake, `<circle cx="107"`) {

@@ -149,11 +149,11 @@ func TestVolumeAPIAndScopedPersistence(t *testing.T) {
 	ws := testConnectWS(t, base, "unit", false)
 	ws.hello(t, id, "Cat")
 	ws.until(t, hasWS("volume", `"level":65`))
-	manual := toolTest(t, base, "act", object{"to": id, "volume": 70}, false)
+	manual := patchControl(t, base, id, object{"volume": 70})
 	if manual["auto_volume"] != false || manual["volume"] != json.Number("70") {
 		t.Fatal(manual)
 	}
-	auto := toolTest(t, base, "act", object{"to": id, "auto_volume": true}, false)
+	auto := patchControl(t, base, id, object{"auto_volume": true})
 	if auto["auto_volume"] != true || auto["volume"] != json.Number("55") {
 		t.Fatal(auto)
 	}

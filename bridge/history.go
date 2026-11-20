@@ -91,8 +91,19 @@ func (h *chatHistory) add(id string, e chatEntry) {
 }
 
 func (h *chatHistory) list(ctx context.Context, id string) ([]chatEntry, error) {
-	rows, err := h.db.QueryContext(ctx, `SELECT id,role,sender,text,source,card_title,ts_ms
-		FROM messages WHERE device_id=? ORDER BY ts_ms,rowid`, strings.ToLower(id))
+	return h.read(ctx, id, 0)
+}
+
+func (h *chatHistory) read(ctx context.Context, id string, limit int) ([]chatEntry, error) {
+	query := `SELECT id,role,sender,text,source,card_title,ts_ms FROM messages WHERE device_id=?`
+	args := []any{strings.ToLower(id)}
+	if limit > 0 {
+		query += ` ORDER BY ts_ms DESC,rowid DESC LIMIT ?`
+		args = append(args, limit)
+	} else {
+		query += ` ORDER BY ts_ms,rowid`
+	}
+	rows, err := h.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, problem(502, "Cannot read chat events")
 	}
@@ -109,6 +120,9 @@ func (h *chatHistory) list(ctx context.Context, id string) ([]chatEntry, error) 
 	}
 	if rows.Err() != nil {
 		return nil, problem(502, "Cannot read chat events")
+	}
+	if limit > 0 {
+		slices.Reverse(entries)
 	}
 	return entries, nil
 }

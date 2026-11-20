@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
@@ -15,12 +16,12 @@ import (
 	"time"
 )
 
-func actTimer(t *testing.T, base string, args object, failed bool) object {
+func patchTimerTest(t *testing.T, base string, args object, failed bool) object {
 	t.Helper()
 	id := str(args["device_id"])
 	args = maps.Clone(args)
 	delete(args, "device_id")
-	result := toolTest(t, base, "act", object{"to": id, "timer": args}, failed)
+	result := toolTest(t, base, "patch", object{"device_id": id, "timer": args}, failed)
 	if failed {
 		return result
 	}
@@ -57,11 +58,11 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.json(t, object{"ev": "watch", "device_id": id})
 	web.until(t, hasWS("svg", ""))
-	toolTest(t, base, "act", object{"to": id, "sleep": true}, false)
+	patchControl(t, base, id, object{"sleep": true})
 	dev.until(t, hasWS("power", `"brightness":12`))
 
-	set := object{"op": "set", "device_id": id, "in_seconds": 1, "label": "Cake break", "say": "Take a break."}
-	timer := actTimer(t, base, set, false)
+	set := object{"device_id": id, "in_seconds": 1, "label": "Cake break", "say": "Take a break."}
+	timer := patchTimerTest(t, base, set, false)
 	hasUpdate := func(f wsFrame) bool { return bytes.Contains(f.data, []byte(`"type":"timers"`)) }
 	web.until(t, hasUpdate)
 	if got := apiObjects(t, base+"/api/timers?device_id="+id, "timers"); len(got) != 1 || got[0].(object)["id"] != timer["id"] {
@@ -93,8 +94,14 @@ func TestTimerLocalFireAndCancel(t *testing.T) {
 		t.Fatal(entries)
 	}
 	set["in_seconds"] = 3600
-	timer = actTimer(t, base, set, false)
-	actTimer(t, base, object{"op": "cancel", "device_id": id, "id": timer["id"]}, false)
+	timer = toolTest(t, base, "patch", object{"timer": set}, false)["timer"].(object)
+	s := toolTest(t, base, "state", object{"device_id": id, "include": []string{"timers"}}, false)["timers"].([]any)
+	if len(s) != 1 || s[0].(object)["id"] != timer["id"] || s[0].(object)["remaining_s"] != json.Number("3600") {
+		t.Fatal(s)
+	}
+	if cancelled := patchTimerTest(t, base, object{"op": "cancel", "device_id": id, "id": timer["id"]}, false); cancelled["cancelled"] != true {
+		t.Fatal(cancelled)
+	}
 	if got := apiObjects(t, base+"/api/timers?device_id="+id, "timers"); len(got) != 0 {
 		t.Fatal(got)
 	}
@@ -112,19 +119,19 @@ func TestTimerLaunchesSavedApp(t *testing.T) {
 	web.json(t, object{"ev": "watch", "device_id": id})
 	web.until(t, hasWS("svg", "cat-ring"))
 	set := object{"op": "set", "device_id": id, "in_seconds": 1, "app": name}
-	if out := actTimer(t, base, set, true); !strings.Contains(str(out["error"]), "App not found") {
+	if out := patchTimerTest(t, base, set, true); !strings.Contains(str(out["error"]), "App not found") {
 		t.Fatal(out)
 	}
 	if err := b.saveApp(t.Context(), savedApp{Name: name, Title: "Stretch", Kind: "app",
 		Code: `function render(){return '<svg><text x="80" y="180">Stretch now</text></svg>';}`}); err != nil {
 		t.Fatal(err)
 	}
-	if out := actTimer(t, base, set, false); out["timer"].(object)["app"] != name {
+	if out := patchTimerTest(t, base, set, false); out["app"] != name {
 		t.Fatal(out)
 	}
 	dev.until(t, hasWS("chime", `"kind":"intercom"`))
 	web.until(t, hasWS("svg", "Stretch now"))
-	if a := toolTest(t, base, "inspect", object{"device_id": id}, false)["active_app"].(object); a["name"] != name {
+	if a := stateMe(t, base, id)["active_app"].(object); a["name"] != name {
 		t.Fatal(a)
 	}
 }
@@ -260,12 +267,12 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	c := testConnectWS(t, base, "unit", false)
 	c.hello(t, device, "Cake")
 	args := object{"device_id": device, "op": "set", "wake_agent": true, "in_seconds": 29}
-	actTimer(t, base, args, true)
+	patchTimerTest(t, base, args, true)
 	args["in_seconds"] = 30
 	args["at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
-	actTimer(t, base, args, true)
+	patchTimerTest(t, base, args, true)
 	delete(args, "at")
-	timer := actTimer(t, base, args, false)
+	timer := patchTimerTest(t, base, args, false)
 	// Invoke the real callback now rather than waiting 30 seconds.
 	finished := make(chan struct{})
 	go func() { defer close(finished); b.timers.fire(str(timer["id"])) }()
@@ -277,17 +284,17 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("missing timer prompt")
 	}
-	conflict := actTimer(t, base, args, true)
+	conflict := patchTimerTest(t, base, args, true)
 	if !strings.Contains(str(conflict["error"]), "timer-triggered") {
 		t.Fatal(conflict)
 	}
 	args["wake_agent"] = false
-	actTimer(t, base, args, false)
+	patchTimerTest(t, base, args, false)
 	close(release)
 	expectValue(t, finished, struct{}{})
 	args["wake_agent"] = true
-	actTimer(t, base, args, false)
-	actTimer(t, base, object{"device_id": device, "op": "cancel", "all": true}, false)
+	patchTimerTest(t, base, args, false)
+	patchTimerTest(t, base, object{"device_id": device, "op": "cancel", "all": true}, false)
 }
 
 func TestScopedTimerIsolationAndCaps(t *testing.T) {
@@ -302,8 +309,8 @@ func TestScopedTimerIsolationAndCaps(t *testing.T) {
 			}
 		}
 	})
-	ownTimer := actTimer(t, base, object{"device_id": owner, "op": "set", "in_seconds": 3600}, false)
-	otherTimer := actTimer(t, base, object{"device_id": other, "op": "set", "in_seconds": 3600}, false)
+	ownTimer := patchTimerTest(t, base, object{"device_id": owner, "op": "set", "in_seconds": 3600}, false)
+	otherTimer := patchTimerTest(t, base, object{"device_id": other, "op": "set", "in_seconds": 3600}, false)
 	v, _ := b.virtualByID(owner)
 	scope := httptest.NewServer(b.scoped(v, "scoped"))
 	defer scope.Close()

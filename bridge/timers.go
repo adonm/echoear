@@ -94,6 +94,31 @@ func (m *timerManager) list(ctx context.Context, id string) ([]savedTimer, error
 	return out, nil
 }
 
+func (t savedTimer) state(now time.Time) object {
+	remaining := max(time.Duration(0), t.FireAt.Sub(now))
+	notes := t.Notes
+	if notes == nil {
+		notes = []string{}
+	}
+	return object{"id": t.ID, "device_id": t.DeviceID, "label": t.Label, "say": t.Say, "notes": notes,
+		"app": t.AppName, "wake_agent": t.WakeAgent, "fire_at": t.FireAt, "remaining_s": (remaining + time.Second - 1) / time.Second}
+}
+
+func (b *bridge) timerState(ctx context.Context, id string, now time.Time) ([]object, error) {
+	out := []object{}
+	if b.timers == nil {
+		return out, nil
+	}
+	timers, err := b.timers.list(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range timers {
+		out = append(out, t.state(now))
+	}
+	return out, nil
+}
+
 func (m *timerManager) activeCount(ctx context.Context, id string) int {
 	var count int
 	_ = m.b.db.QueryRowContext(ctx, "SELECT count(*) FROM timers WHERE device_id=?", id).Scan(&count)
@@ -406,21 +431,31 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 	}
 }
 
-func (b *bridge) timerMCP(ctx context.Context, args object) (object, error) {
+func (b *bridge) patchTimer(ctx context.Context, id string, args object) (object, error) {
 	m := b.timers
 	if m == nil {
 		return nil, problem(503, "Timers unavailable")
 	}
-	id := str(args["device_id"])
+	if raw, exists := args["device_id"]; exists {
+		id = str(raw)
+	}
 	if !deviceIDRE.MatchString(id) {
 		return nil, problem(400, "Invalid timer device_id")
 	}
-	switch str(args["op"]) {
+	op, present := args["op"]
+	_, secs := args["in_seconds"]
+	_, at := args["at"]
+	if !present && (secs || at) {
+		op = "set"
+	}
+	switch op {
 	case "set":
-		if _, err := b.lookupDevice(id); err != nil {
+		who, err := b.lookupDevice(id)
+		if err != nil {
 			return nil, err
 		}
-		t, err := parseTimer(args, time.Now())
+		now := time.Now()
+		t, err := parseTimer(withDevice(args, id), now)
 		if err != nil {
 			return nil, err
 		}
@@ -428,14 +463,10 @@ func (b *bridge) timerMCP(ctx context.Context, args object) (object, error) {
 			return nil, err
 		}
 		b.timerUpdate(id)
-		who, _ := b.lookupDevice(id)
 		entry := newChat("card", who.Character, "Timer: "+t.Label, "timer")
 		entry.SceneTitle = t.Label
 		b.chat(id, entry, true)
-		return object{"ok": true, "id": t.ID, "timer": t}, nil
-	case "list":
-		timers, err := m.list(ctx, id)
-		return object{"timers": timers}, err
+		return t.state(now), nil
 	case "cancel":
 		timerID, all := str(args["id"]), args["all"] == true
 		if all && timerID != "" || !all && !timerIDRE.MatchString(timerID) {
@@ -445,7 +476,7 @@ func (b *bridge) timerMCP(ctx context.Context, args object) (object, error) {
 			return nil, err
 		}
 		b.timerUpdate(id)
-		return object{"ok": true}, nil
+		return object{"device_id": id, "id": timerID, "all": all, "cancelled": true}, nil
 	}
 	return nil, problem(400, "Unknown timer operation")
 }

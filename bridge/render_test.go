@@ -82,6 +82,24 @@ func TestScreenCacheSeparatesGeometryAndEvicts(t *testing.T) {
 	}
 }
 
+func TestSVGSingleArgumentScalePreservesRasterHeight(t *testing.T) {
+	const svg = `<svg><defs><linearGradient id="shade" gradientTransform="scale(.8333)"><stop stop-color="#FFFFFF"/></linearGradient></defs>
+		<path d="M12 3v16" stroke="#FFFFFF" fill="none" stroke-width="2.6" transform="translate(100 100) scale(0.8333)"/></svg>`
+	screen, err := buildScreenUncached(svg, false, roundScreen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	height := 0
+	for y := 100; y < 120; y++ {
+		if slices.ContainsFunc(screen.fb[y*360+106:y*360+114], func(px uint16) bool { return px != 0 }) {
+			height++
+		}
+	}
+	if height <= 8 || !strings.Contains(screen.source, `gradientTransform="matrix(0.8333 0 0 0.8333 0 0)"`) {
+		t.Fatalf("scaled icon occupies %d rows; gradient transform not normalized: %t", height, !strings.Contains(screen.source, `gradientTransform="matrix(0.8333 0 0 0.8333 0 0)"`))
+	}
+}
+
 func BenchmarkFacePoseCache(b *testing.B) {
 	poses := facePoseSVGs()
 	for _, display := range []struct {
@@ -371,7 +389,7 @@ func TestBox3HelloAndRawAppTaps(t *testing.T) {
 	function render(s){ return '<svg><rect width="360" height="360" fill="#123456"/>'+
 		'<rect width="30" height="30" fill="red" data-id="corner"/><text x="100" y="180">'+s.hits+'</text></svg>' }
 	function onTap(s,p,id,x,y){ s.hits=id+":"+x+","+y; }`
-	toolTest(t, base, "run_app", object{"devices": []string{boxID, roundID}, "code": code}, false)
+	toolTest(t, base, "app", object{"devices": []string{boxID, roundID}, "code": code}, false)
 	web.until(t, hasWS("svg", "untouched"))
 	if r, _, _ := decodeDisplay(t, box.until(t, isDisplay)); !r.In(image.Rect(0, 0, 320, 240)) {
 		t.Fatalf("BOX-3 app sent an out-of-bounds frame: %v", r)

@@ -36,7 +36,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	for _, tool := range catalog.Result.Tools {
 		names = append(names, tool.Name)
 	}
-	if !slices.Equal(names, []string{"inspect", "run_app", "act", "store"}) {
+	if !slices.Equal(names, []string{"state", "patch", "app", "emit"}) {
 		t.Fatal("unexpected live MCP catalog", names)
 	}
 	t.Logf("MCP catalog: %v", names)
@@ -100,10 +100,10 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	liveSessions(t, api, prefix)
 	o := newOpenCode(root, api, testDB(t, ":memory:", ""), liveOpenCodeDir(home, config), settings)
 	prompt := turnPrompt(peer{DeviceID: id, Character: character}, false, "typed",
-		"Run a live screen and controls check. Use Code Mode execute to call tools.echoear.inspect({device_id:'"+id+
-			"'}), tools.echoear.store({op:'list',scope:'"+id+"'}), tools.echoear.act({to:'"+id+
-			"',chime:'tap'}), and tools.echoear.run_app({devices:'"+id+
-			"',title:'Code Mode Check',svg:'<svg viewBox=\"0 0 360 360\"><circle cx=\"180\" cy=\"180\" r=\"60\" fill=\"gold\"/></svg>'}). Return all four tool results from execute, then say one short sentence. Do not call any other tool.",
+		"Run a live screen and controls check. Use Code Mode execute to call tools.echoear.state({device_id:'"+id+
+			"',include:['devices']}), tools.echoear.patch({device_id:'"+id+"',device:{sleep:false}}), tools.echoear.emit({to:'"+id+
+			"',chime:'tap'}), and tools.echoear.app({devices:'"+id+
+			"',exit:true}). Return all four tool results from execute, then say one short sentence. Do not call any other tool.",
 		legacyCat(character, "cake"))
 	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"inspect": "active_app", "run_app": "hit_ids", "act": "played", "store": "entries"}
+	want := map[string]string{"state": "active_app", "app": "hit_ids", "emit": "played", "patch": "sleeping"}
 	attempted := map[string]bool{}
 	var lastResult string
 	for _, msg := range msgs {
@@ -142,5 +142,8 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatalf("Code Mode results not seen: %v (tool references: %v; latest tool result: %s)", want, attempted, lastResult)
 	}
-	t.Log("echoear agent completed inspect, run_app, act, and store through execute")
+	if messages := liveJSON[struct{ Messages []chatEntry }](t, c, "/api/devices/"+id+"/messages", nil, nil, "", nil).Messages; len(messages) != 0 {
+		t.Fatal("Code Mode smoke test wrote to canonical chat history")
+	}
+	t.Log("echoear agent completed state, patch, app, and emit through execute")
 }

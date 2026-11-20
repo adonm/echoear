@@ -203,7 +203,7 @@ func TestOpenCodeFallbackTitlesAndChat(t *testing.T) {
 	mint.hello(t, "echoear-mint", "Mint")
 	mirror := testConnectWS(t, base, "unit", true)
 	mirror.watch(t, id)
-	toolTest(t, base, "act", object{"to": id, "chime": "tap"}, false)
+	toolTest(t, base, "emit", object{"to": id, "chime": "tap"}, false)
 	c.until(t, hasWS("chime", `"kind":"tap"`))
 	select {
 	case created := <-titles:

@@ -279,8 +279,12 @@ func cleanSVGAttr(k, v string) (string, bool) {
 	case "font-family":
 		return v, v == "monospace"
 	case "transform", "gradientTransform":
-		_, ok := svgMatrix(v)
-		return v, ok
+		m, ok := svgMatrix(v)
+		if !ok {
+			return "", false
+		}
+		// oksvg collapses a one-argument scale on Y; share our SVG matrix with the rasterizer.
+		return fmt.Sprintf("matrix(%g %g %g %g %g %g)", m.A, m.B, m.C, m.D, m.E, m.F), true
 	case "d":
 		if !svgPath.MatchString(v) {
 			return "", false

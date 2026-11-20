@@ -57,32 +57,74 @@ func (b *bridge) saveApp(ctx context.Context, a savedApp) error {
 	return err
 }
 
-func (b *bridge) listApps(ctx context.Context) ([]object, error) {
+func (b *bridge) listApps(ctx context.Context, includeCode bool) ([]object, error) {
 	out := []object{}
 	if b.db == nil {
 		return out, nil
 	}
-	rows, err := b.db.QueryContext(ctx, `SELECT name,title,kind,author,updated_at FROM apps ORDER BY name`)
+	columns := "name,title,kind,author,updated_at,tick_ms,max_ticks"
+	if includeCode {
+		columns += ",svg,code"
+	}
+	rows, err := b.db.QueryContext(ctx, "SELECT "+columns+" FROM apps ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var name, title, kind, author string
+		var a savedApp
 		var updated int64
-		if err := rows.Scan(&name, &title, &kind, &author, &updated); err != nil {
+		fields := []any{&a.Name, &a.Title, &a.Kind, &a.Author, &updated, &a.TickMS, &a.MaxTicks}
+		if includeCode {
+			fields = append(fields, &a.SVG, &a.Code)
+		}
+		if err := rows.Scan(fields...); err != nil {
 			return nil, err
 		}
-		out = append(out, object{"name": name, "title": title, "kind": kind, "author": author, "updated_at": updated})
+		entry := object{"name": a.Name, "title": a.Title, "kind": a.Kind, "author": a.Author, "updated_at": updated, "tick_ms": a.TickMS, "max_ticks": a.MaxTicks}
+		if a.SVG != "" {
+			entry["svg"] = a.SVG
+		}
+		if a.Code != "" {
+			entry["code"] = a.Code
+		}
+		out = append(out, entry)
 	}
 	return out, rows.Err()
+}
+
+func (b *bridge) appState(ctx context.Context, includeCode bool) (object, error) {
+	list, err := b.listApps(ctx, includeCode)
+	if err != nil {
+		return nil, err
+	}
+	out := object{}
+	for _, a := range list {
+		delete(a, "author")
+		out[str(a["name"])] = a
+	}
+	return out, nil
+}
+
+func (b *bridge) deleteSavedApp(ctx context.Context, name string) (bool, error) {
+	if !slugRE.MatchString(name) {
+		return false, problem(400, "Invalid app name")
+	}
+	if b.db == nil {
+		return false, problem(503, "Apps unavailable")
+	}
+	deleted, err := deleteRow(ctx, b.db, "DELETE FROM apps WHERE name=?", name)
+	if deleted {
+		b.appsChanged()
+	}
+	return deleted, err
 }
 
 func (b *bridge) appAPI(w http.ResponseWriter, r *http.Request, path string) (any, error) {
 	ctx := r.Context()
 	switch {
 	case path == "/api/apps" && r.Method == http.MethodGet:
-		list, err := b.listApps(ctx)
+		list, err := b.listApps(ctx, false)
 		return object{"apps": list}, err
 	case path == "/api/apps/run" && r.Method == http.MethodPost:
 		data, err := jsonBody(r)
@@ -92,13 +134,7 @@ func (b *bridge) appAPI(w http.ResponseWriter, r *http.Request, path string) (an
 		return b.runSavedApp(ctx, str(data["device_id"]), str(data["name"]))
 	case r.Method == http.MethodDelete:
 		name := strings.TrimPrefix(path, "/api/apps/")
-		if !slugRE.MatchString(name) {
-			return nil, problem(400, "Invalid app name")
-		}
-		if b.db == nil {
-			return nil, problem(503, "Apps unavailable")
-		}
-		_, err := deleteRow(ctx, b.db, "DELETE FROM apps WHERE name=?", name)
+		_, err := b.deleteSavedApp(ctx, name)
 		if err != nil {
 			return nil, err
 		}
@@ -129,6 +165,7 @@ type appInstance struct {
 	vm                                  *goja.Runtime
 	self, state                         goja.Value
 	render, parse, stringify, errorText goja.Callable
+	merge                               goja.Callable
 	hooks                               map[string]goja.Callable
 	scope                               string
 	memory                              map[string]json.RawMessage
@@ -142,12 +179,20 @@ type appInstance struct {
 	running, tickQueued                 bool
 	nextTick, timeOfSpeech              time.Time
 	remaining                           int
+	snapshot                            json.RawMessage // Immutable JSON published under the hub lock.
 }
 
 type appEvent struct {
 	i, x, y  int
 	kind, id string
 	now      time.Time
+	patch    json.RawMessage
+	done     chan appPatchResult
+}
+
+type appPatchResult struct {
+	out object
+	err error
 }
 
 func (a *appInstance) runJS(fn func() (goja.Value, error)) (goja.Value, error) {
@@ -200,7 +245,7 @@ func (a *appInstance) player(i int) goja.Value {
 	return v
 }
 
-func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice) (*appInstance, []svgScreen, error) {
+func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice, initial json.RawMessage) (*appInstance, []svgScreen, error) {
 	a := &appInstance{spec: spec, players: players, memory: memory, devices: devices, scope: "app:" + spec.Name,
 		geometry: make([]screenGeometry, len(players)), lastScreens: make([]svgScreen, len(players))}
 	for i := range players {
@@ -215,15 +260,18 @@ func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessa
 		if len(spec.Code) > 16<<10 {
 			return nil, nil, problem(400, "App code exceeds 16 KB")
 		}
-		if err := a.initVM(); err != nil {
+		if err := a.initVM(initial); err != nil {
 			return nil, nil, err
 		}
 	}
 	screens, err := a.screens(nil)
+	if err == nil {
+		a.snapshot, err = a.stateJSON()
+	}
 	return a, screens, err
 }
 
-func (a *appInstance) initVM() error {
+func (a *appInstance) initVM(initial json.RawMessage) error {
 	vm := goja.New()
 	a.vm = vm
 	vm.SetMaxCallStackSize(512)
@@ -231,6 +279,16 @@ func (a *appInstance) initVM() error {
 	hostJSON := vm.Get("JSON").ToObject(vm)
 	a.parse, _ = goja.AssertFunction(hostJSON.Get("parse"))
 	a.stringify, _ = goja.AssertFunction(hostJSON.Get("stringify"))
+	merge, err := vm.RunString(`(function (state, patch) {
+		if (state === null || typeof state !== "object" || Array.isArray(state)) {
+			throw new TypeError("state_patch requires an object app state");
+		}
+		return {...state, ...patch};
+	})`)
+	if err != nil {
+		return err
+	}
+	a.merge, _ = goja.AssertFunction(merge)
 	bad := func(err error) { panic(vm.NewTypeError("%s", err.Error())) }
 	asString := func(v goja.Value) (string, bool) {
 		s, ok := v.(goja.String)
@@ -375,6 +433,13 @@ func (a *appInstance) initVM() error {
 	}
 	_ = ctx.DefineDataProperty("players", vm.NewArray(players...), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
 	a.state = vm.NewObject()
+	if initial != nil {
+		a.state, err = a.call(a.parse, vm.ToValue(string(initial)))
+		if err != nil {
+			return err
+		}
+	}
+	_ = ctx.DefineDataProperty("initial_state", a.state, goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
 	_ = ctx.DefineDataProperty("state", a.state, goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE)
 	if init != nil {
 		state, err := a.call(init, ctx)
@@ -386,6 +451,44 @@ func (a *appInstance) initVM() error {
 		}
 	}
 	return nil
+}
+
+func (a *appInstance) stateJSON() (json.RawMessage, error) {
+	if a.vm == nil {
+		return nil, nil
+	}
+	v, err := a.call(a.stringify, a.state)
+	if err != nil {
+		return nil, fmt.Errorf("app state must be JSON: %w", err)
+	}
+	if s, ok := v.(goja.String); ok && s.Length() <= 64<<10 {
+		if raw := s.String(); len(raw) <= 64<<10 {
+			return json.RawMessage(raw), nil
+		}
+	}
+	return nil, problem(400, "App state must fit in 64 KB of JSON")
+}
+
+func (a *appInstance) applyStatePatch(raw json.RawMessage, connected []bool) ([]svgScreen, json.RawMessage, error) {
+	patch, err := a.call(a.parse, a.vm.ToValue(string(raw)))
+	if err != nil {
+		return nil, nil, err
+	}
+	next, err := a.call(a.merge, a.state, patch)
+	if err != nil {
+		return nil, nil, err
+	}
+	before := a.state
+	a.state = next
+	views, err := a.screens(connected)
+	var snapshot json.RawMessage
+	if err == nil {
+		snapshot, err = a.stateJSON()
+	}
+	if err != nil {
+		a.state = before
+	}
+	return views, snapshot, err
 }
 
 func (a *appInstance) screens(connected []bool) ([]svgScreen, error) {
@@ -475,6 +578,13 @@ func (b *bridge) runSavedApp(ctx context.Context, id, name string) (object, erro
 }
 
 func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
+	if name, present := args["delete_saved"]; present {
+		if len(args) != 1 {
+			return nil, problem(400, "Use delete_saved without other app fields")
+		}
+		deleted, err := b.deleteSavedApp(ctx, str(name))
+		return object{"ok": true, "delete_saved": name, "deleted": deleted, "devices": []string{}, "title": "", "hit_ids": []string{}}, err
+	}
 	ids, err := appDevices(args["devices"])
 	if err != nil {
 		return nil, err
@@ -482,6 +592,19 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 	h := b.ws
 	if h == nil {
 		return nil, problem(503, "Device hub unavailable")
+	}
+	if raw, present := args["state_patch"]; present {
+		if len(args) != 2 {
+			return nil, problem(400, "Use state_patch with devices only")
+		}
+		patch, err := appJSONObject(raw, "state_patch")
+		if err != nil {
+			return nil, err
+		}
+		return h.patchRunningApp(ctx, ids, patch)
+	}
+	if args["exit"] == true && len(args) != 2 {
+		return nil, problem(400, "Use exit with devices only")
 	}
 	h.mu.Lock()
 	players := make([]appPlayer, 0, len(ids))
@@ -580,16 +703,26 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		}
 	}
 	memory := map[string]json.RawMessage{}
-	if b.db != nil && a.Code != "" {
-		values, err := b.memory(ctx, object{"op": "list", "scope": "app:" + a.Name}, true)
+	var initial json.RawMessage
+	if raw, present := args["initial_state"]; present {
+		if a.Code == "" {
+			return nil, problem(400, "initial_state requires a JS app")
+		}
+		initial, err = appJSONObject(raw, "initial_state")
 		if err != nil {
 			return nil, err
 		}
-		for _, value := range values["entries"].([]object) {
+	}
+	if a.Code != "" {
+		values, err := b.memoryEntries(ctx, "app:"+a.Name)
+		if err != nil {
+			return nil, err
+		}
+		for _, value := range values {
 			memory[str(value["key"])] = value["value"].(json.RawMessage)
 		}
 	}
-	inst, screens, err := initApp(a, players, memory, devices)
+	inst, screens, err := initApp(a, players, memory, devices, initial)
 	if err != nil {
 		return nil, problem(400, err.Error())
 	}
@@ -615,8 +748,10 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		inst.remaining = a.MaxTicks
 		inst.nextTick = now.Add(time.Duration(a.TickMS) * time.Millisecond)
 	}
-	seen := map[string]bool{}
-	hits := []string{}
+	out := object{"ok": true, "devices": ids, "title": a.Title, "hit_ids": appHitIDs(screens...)}
+	if inst.snapshot != nil {
+		out["state"] = inst.snapshot
+	}
 	for _, d := range devices {
 		if d.app == nil {
 			continue
@@ -636,12 +771,6 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		d.app, d.appView, d.agentSetScene = inst, screens[i], d.busy
 		h.wake(d, now)
 		h.render(d, now, false)
-		for _, hit := range screens[i].hits {
-			if !seen[hit.id] {
-				seen[hit.id] = true
-				hits = append(hits, hit.id)
-			}
-		}
 	}
 	h.mu.Unlock()
 	if save != "" {
@@ -656,11 +785,80 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		entry.SceneTitle = a.Title
 		b.chat(p.id, entry, true)
 	}
-	out := object{"ok": true, "devices": ids, "title": a.Title, "hit_ids": hits}
 	if save != "" {
 		out["saved_as"] = save
 	}
 	return out, nil
+}
+
+func appJSONObject(raw any, field string) (json.RawMessage, error) {
+	if _, ok := raw.(object); !ok {
+		return nil, fieldError(field, "expected a JSON object")
+	}
+	data, err := json.Marshal(raw)
+	if err != nil || len(data) > 64<<10 {
+		return nil, fieldError(field, "expected at most 64 KB of JSON")
+	}
+	return data, nil
+}
+
+func appHitIDs(screens ...svgScreen) []string {
+	seen, hits := map[string]bool{}, []string{}
+	for _, screen := range screens {
+		for _, hit := range screen.hits {
+			if !seen[hit.id] {
+				seen[hit.id] = true
+				hits = append(hits, hit.id)
+			}
+		}
+	}
+	return hits
+}
+
+func (h *wsHub) activeAppState(a *appInstance) object {
+	ids := []string{}
+	for _, d := range a.devices {
+		if d != nil && h.active(d) {
+			ids = append(ids, d.who.DeviceID)
+		}
+	}
+	out := object{"name": a.spec.Name, "title": a.spec.Title, "kind": a.spec.Kind, "devices": ids, "ticks_left": a.remaining}
+	if a.snapshot != nil {
+		out["state"] = a.snapshot
+	}
+	return out
+}
+
+func (h *wsHub) patchRunningApp(ctx context.Context, ids []string, patch json.RawMessage) (object, error) {
+	h.mu.Lock()
+	var a *appInstance
+	for _, id := range ids {
+		d := h.devices[strings.ToLower(id)]
+		if d == nil || !h.active(d) || d.app == nil || d.app.vm == nil {
+			h.mu.Unlock()
+			return nil, problem(409, "No running JS app on "+id)
+		}
+		if a != nil && d.app != a {
+			h.mu.Unlock()
+			return nil, problem(409, "Devices must belong to the same running JS app")
+		}
+		a = d.app
+	}
+	done := make(chan appPatchResult, 1)
+	ev := appEvent{kind: "patch", i: -1, now: time.Now(), patch: patch, done: done}
+	ok := h.updateApp(a, ev)
+	h.mu.Unlock()
+	if !ok {
+		return nil, problem(409, "App event queue is full")
+	}
+	select {
+	case result := <-done:
+		return result.out, result.err
+	case <-a.ctx.Done():
+		return nil, problem(409, "App closed before applying state_patch")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (b *bridge) appsChanged() {
@@ -720,11 +918,11 @@ func (h *wsHub) updateApp(a *appInstance, ev appEvent) bool {
 		h.closeApp(a, ev.now)
 		return true
 	}
-	if a.hooks[ev.kind] == nil || len(a.events) >= 32 {
+	if (ev.kind != "patch" && a.hooks[ev.kind] == nil) || len(a.events) >= 32 {
 		return false
 	}
 	a.events = append(a.events, ev)
-	if ev.i < 0 {
+	if ev.kind == "tick" {
 		a.tickQueued = true
 	}
 	if !a.running {
@@ -748,15 +946,37 @@ func (h *wsHub) runAppEvents(a *appInstance) {
 			connected[i] = d != nil && h.active(d)
 		}
 		h.mu.Unlock()
+		if ev.kind == "patch" {
+			views, snapshot, err := a.applyStatePatch(ev.patch, connected[:len(a.devices)])
+			h.mu.Lock()
+			if err != nil {
+				ev.done <- appPatchResult{err: problem(400, err.Error())}
+			} else if !h.closed && a.ctx.Err() == nil {
+				a.snapshot = snapshot
+				h.publishAppViews(a, views)
+				active := h.activeAppState(a)
+				ev.done <- appPatchResult{out: object{"ok": true, "devices": active["devices"], "title": a.spec.Title, "state": snapshot, "hit_ids": appHitIDs(views...)}}
+			} else {
+				ev.done <- appPatchResult{err: problem(409, "App closed before applying state_patch")}
+			}
+			continue
+		}
 		views, err := a.update(ev, connected[:len(a.devices)])
+		var snapshot json.RawMessage
+		if err == nil && views != nil {
+			snapshot, err = a.stateJSON()
+		}
 		if err == nil {
 			err = h.storeAppEffects(a)
 		}
 		h.mu.Lock()
-		if ev.i < 0 {
+		if ev.kind == "tick" {
 			a.tickQueued = false
 		}
 		if !h.closed && a.ctx.Err() == nil {
+			if snapshot != nil {
+				a.snapshot = snapshot
+			}
 			h.commitAppEvent(a, ev, views, err)
 		}
 	}
@@ -826,6 +1046,10 @@ func (h *wsHub) commitAppEvent(a *appInstance, ev appEvent, views []svgScreen, e
 			}
 		}
 	}
+	h.publishAppViews(a, views)
+}
+
+func (h *wsHub) publishAppViews(a *appInstance, views []svgScreen) {
 	for j, screen := range views {
 		if d := a.devices[j]; d != nil && h.active(d) && screen.source != "" && d.appView.raw != screen.raw {
 			d.appView = screen

@@ -125,21 +125,116 @@ func TestMCPProtocol(t *testing.T) {
 			t.Fatal(tool)
 		}
 	}
-	if !slices.Equal(names, []string{"inspect", "run_app", "act", "store"}) {
+	if !slices.Equal(names, []string{"state", "patch", "app", "emit"}) {
 		t.Fatal(names)
 	}
-	old := testObject(t, testRequest(t, "POST", base+"/mcp", "unit", object{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": object{"name": "speak"}}, 200))
-	if old["error"].(object)["code"] != json.Number("-32602") {
-		t.Fatal(old)
+	for _, name := range []string{"speak", "inspect", "act", "run_app", "store"} {
+		old := testObject(t, testRequest(t, "POST", base+"/mcp", "unit", object{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": object{"name": name}}, 200))
+		if old["error"].(object)["code"] != json.Number("-32602") {
+			t.Fatal(old)
+		}
 	}
-	snap := toolTest(t, base, "inspect", object{"device_id": id}, false)
-	if len(snap) != 9 || snap["me"].(object)["name"] != "Cake" || snap["screen"].(object)["title"] != "Cat" {
+	snap := toolTest(t, base, "state", object{"device_id": id}, false)
+	me := snap["me"].(object)
+	if len(snap) != 7 || me["device"].(object)["name"] != "Cake" || me["device"].(object)["screen"].(object)["title"] != "Cat" {
 		t.Fatal(snap)
 	}
-	toolTest(t, base, "act", object{"to": id, "volume": 40}, false)
-	toolTest(t, base, "store", object{"op": "set", "scope": "app:scores", "key": "best", "value": 7, "expected_version": 0}, false)
-	if v := toolTest(t, base, "store", object{"op": "delete", "scope": "app:scores", "key": "best", "expected_version": 0}, true); v["version"] != json.Number("1") {
+	patchControl(t, base, id, object{"volume": 40})
+	toolTest(t, base, "patch", object{"memory": object{"scope": "app:scores", "key": "best", "value": 7, "expected_version": 0}}, false)
+	if v := toolTest(t, base, "patch", object{"memory": object{"op": "delete", "scope": "app:scores", "key": "best", "expected_version": 0}}, true); v["version"] != json.Number("1") {
 		t.Fatal(v)
+	}
+}
+
+func stateMe(t *testing.T, base, id string) object {
+	t.Helper()
+	return toolTest(t, base, "state", object{"device_id": id, "include": []string{}}, false)["me"].(object)
+}
+
+func patchControl(t *testing.T, base, id string, device object) object {
+	t.Helper()
+	return toolTest(t, base, "patch", object{"device_id": id, "device": device}, false)["device"].(object)
+}
+
+func TestMCPStateSlices(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.timers = newTimerManager(b)
+		t.Cleanup(b.timers.close)
+	})
+	const id = "echoear-slices"
+	board := testConnectWS(t, base, "unit", false)
+	board.hello(t, id, "Cake")
+	board.json(t, object{"ev": "status", "wifi_rssi": -62, "cpu_pct": 24, "battery_pct": 73})
+	eventually(t, func() bool {
+		b.ws.mu.Lock()
+		defer b.ws.mu.Unlock()
+		return b.ws.devices[id].telemetry.WiFi != nil
+	})
+	toolTest(t, base, "patch", object{"device_id": id, "cat": object{"name": "Slices"}, "timer": object{"in_seconds": 300},
+		"memory": []object{{"scope": "shared", "key": "score", "value": object{"points": 7}}, {"scope": id, "key": "seen", "value": []any{true, nil}}}}, false)
+	const code = `function render(s){return '<svg><text x="80" y="180">'+s.n+'</text></svg>';}`
+	toolTest(t, base, "app", object{"devices": id, "save_as": "slices", "code": code, "initial_state": object{"n": 8}}, false)
+	b.history.add(id, newChat("user", "You", "latest canonical message", "typed"))
+	b.diag.mu.Lock()
+	b.diag.metrics[diagE2E].add(12, 32)
+	b.diag.mu.Unlock()
+
+	args := object{"device_id": id, "include": []string{"devices", "cats", "apps", "timers", "memory", "saved_cats", "messages", "diagnostics"},
+		"include_code": true, "messages_limit": 1}
+	s := toolTest(t, base, "state", args, false)
+	dev, me := s["devices"].(object)[id].(object), s["me"].(object)
+	active, cat := me["active_app"].(object), s["cats"].(object)[id].(object)
+	if dev["wifi_rssi"] != json.Number("-62") || dev["cpu_pct"] != json.Number("24") || dev["battery_pct"] != json.Number("73") ||
+		dev["active_app_state"].(object)["n"] != json.Number("8") || active["state"].(object)["n"] != json.Number("8") ||
+		cat["name"] != "Slices" || !strings.Contains(str(cat["face_svg"]), "data-pose") {
+		t.Fatal("missing live device, cat or app state", dev)
+	}
+	if s["saved_cats"].(object)["slices"].(object)["face_svg"] != cat["face_svg"] ||
+		s["apps"].(object)["slices"].(object)["code"] != code || len(s["timers"].([]any)) != 1 {
+		t.Fatal("missing saved sources or timer")
+	}
+	mem, msgs := s["memory"].(object), s["messages"].([]any)
+	if mem["shared"].(object)["score"].(object)["value"].(object)["points"] != json.Number("7") ||
+		!slices.Equal(mem[id].(object)["seen"].(object)["value"].([]any), []any{true, nil}) ||
+		len(msgs) != 1 || msgs[0].(object)["text"] != "latest canonical message" {
+		t.Fatal(mem, msgs)
+	}
+	diag, now := s["diagnostics"].(object), s["now"].(object)
+	latency := diag["latency"].(object)[diagMetricNames[diagE2E]].(object)
+	if latency["p50"] != json.Number("12") || latency["p95"] != json.Number("12") ||
+		diag["bridge"] == nil || diag["tts_worker"] == nil || diag["host"] == nil || len(diag["devices"].([]any)) != 1 ||
+		now["unix_ms"] == nil || now["local"] == "" {
+		t.Fatal(diag, now)
+	}
+	only := toolTest(t, base, "state", object{"include": []string{"apps"}}, false)
+	if len(only) != 2 || only["apps"].(object)["slices"].(object)["code"] != nil {
+		t.Fatal("unrequested slice or source leaked", only)
+	}
+}
+
+func TestEmitIntercom(t *testing.T) {
+	_, base := wsHarness(t, func(b *bridge, _ string) {
+		b.worker = fakeTTS(b.root, nil)
+	})
+	const from, to, text = "echoear-sender", "phone-bee1", "Dinner is ready."
+	sender, recipient := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
+	sender.hello(t, from, "Cake")
+	recipient.hello(t, to, "Mint")
+	out := toolTest(t, base, "emit", object{"to": "all", "intercom": object{"from": from, "text": text}}, false)
+	if !slices.Equal(out["intercom"].(object)["sent_to"].([]any), []any{to}) {
+		t.Fatal(out)
+	}
+	var card, audio bool
+	recipient.until(t, func(f wsFrame) bool {
+		card, audio = card || hasWS("svg", text)(f), audio || isPlayback(f)
+		return card && audio
+	})
+	for _, id := range []string{from, to} {
+		s := toolTest(t, base, "state", object{"device_id": id, "include": []string{"messages"}}, false)
+		msgs := s["messages"].([]any)
+		if len(msgs) != 1 || msgs[0].(object)["source"] != "intercom" || msgs[0].(object)["text"] != text {
+			t.Fatal(msgs)
+		}
 	}
 }
 
@@ -155,18 +250,17 @@ func TestMCPControl(t *testing.T) {
 	watcher.until(t, hasWS("power", `"brightness":85`))
 
 	for _, invalid := range []object{
-		{"to": id}, {"to": id, "volume": -1}, {"to": id, "volume": 101},
-		{"to": id, "volume": 1.5}, {"to": id, "sleep": "true"},
+		{}, {"volume": -1}, {"volume": 101}, {"volume": 1.5}, {"sleep": "true"},
 	} {
-		toolTest(t, base, "act", invalid, true)
+		toolTest(t, base, "patch", object{"device_id": id, "device": invalid}, true)
 	}
 	b.ws.mu.Lock()
 	d := b.ws.devices[id]
 	b.ws.startTurn(d, time.Now(), false, func(context.Context, uint64) {})
 	turn := d.turn
 	b.ws.mu.Unlock()
-	out := toolTest(t, base, "act", object{"to": id, "volume": 0, "sleep": true}, false)
-	if out["ok"] != true || out["to"] != id || out["volume"] != json.Number("0") || out["sleeping"] != true {
+	out := patchControl(t, base, id, object{"volume": 0, "sleep": true})
+	if out["device_id"] != id || out["volume"] != json.Number("0") || out["sleeping"] != true {
 		t.Fatal(out)
 	}
 	for _, client := range []*testWS{c, watcher} {
@@ -176,17 +270,17 @@ func TestMCPControl(t *testing.T) {
 	b.ws.finishTurn(d, turn, nil)
 	checkStatus := func(mode, volume string) {
 		t.Helper()
-		device := toolTest(t, base, "inspect", object{"device_id": id}, false)["me"].(object)
+		device := stateMe(t, base, id)["device"].(object)
 		if device["mode"] != mode || device["volume"] != json.Number(volume) {
 			t.Fatal(device)
 		}
 	}
 	checkStatus("sleepy", "0")
-	if wake := toolTest(t, base, "act", object{"to": id, "sleep": false}, false); wake["sleeping"] != false || wake["volume"] != json.Number("0") {
+	if wake := patchControl(t, base, id, object{"sleep": false}); wake["sleeping"] != false || wake["volume"] != json.Number("0") {
 		t.Fatal(wake)
 	}
 	c.until(t, hasWS("power", `"brightness":85`))
-	if vol := toolTest(t, base, "act", object{"to": id, "volume": 42}, false); vol["sleeping"] != false || vol["volume"] != json.Number("42") {
+	if vol := patchControl(t, base, id, object{"volume": 42}); vol["sleeping"] != false || vol["volume"] != json.Number("42") {
 		t.Fatal(vol)
 	}
 	c.until(t, hasWS("volume", `"level":42`))

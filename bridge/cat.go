@@ -246,8 +246,6 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 			c.Voice = str(val)
 		case "face_svg":
 			editLook = true
-		case "svg_extras", "extras":
-			return c, false, problem(400, "svg_extras was replaced by face_svg; call inspect({device_id}) to read the current face_svg and pass the edited <svg> in cat.face_svg")
 		case "configured", "save_profile", "device_id", "op":
 		default:
 			return c, false, problem(400, "Unknown cat field "+key)
@@ -371,6 +369,50 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 }
 
 func validCatSlug(slug string) bool { return len(slug) <= 40 && catSlugRE.MatchString(slug) }
+
+func (b *bridge) savedCatState(ctx context.Context) (object, error) {
+	out := object{}
+	if b.db == nil {
+		return out, nil
+	}
+	list, err := b.catTool(ctx, object{"op": "list_saved"})
+	if err != nil {
+		return nil, err
+	}
+	for _, cat := range list["cats"].([]savedCat) {
+		out[cat.Slug] = cat
+	}
+	return out, nil
+}
+
+func (b *bridge) patchCat(ctx context.Context, id string, args object) (any, error) {
+	c := withDevice(args, id)
+	op, supplied := c["op"]
+	if !supplied {
+		op = "update"
+	}
+	switch op {
+	case "load", "delete_saved":
+		if str(c["slug"]) == "" {
+			c["slug"] = catSlug(str(c["name"]))
+		}
+		if op == "load" {
+			op = "load_saved"
+		}
+	case "update", "reset_blank":
+	default:
+		return nil, fieldError("cat.op", "unknown operation")
+	}
+	c["op"] = op
+	result, err := b.catTool(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	if op == "delete_saved" {
+		return object{"deleted_saved": c["slug"]}, nil
+	}
+	return result["cat"], nil
+}
 
 func (b *bridge) catTool(ctx context.Context, args object) (object, error) {
 	if b.db == nil {

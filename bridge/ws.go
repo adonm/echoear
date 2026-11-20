@@ -1294,6 +1294,9 @@ func (h *wsHub) setVolume(ctx context.Context, d *wsDevice, auto bool, level int
 	case "vol-auto":
 		auto, level = !d.autoVol, d.vol
 	}
+	if level < 0 {
+		level = d.vol
+	}
 	savedLevel := level
 	if auto {
 		savedLevel = initialAutoVolume

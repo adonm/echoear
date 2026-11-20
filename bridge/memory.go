@@ -47,154 +47,182 @@ type versionConflict struct{ version int64 }
 
 func (e *versionConflict) Error() string { return "version_conflict" }
 
+type memoryEdit struct {
+	memoryWrite
+	expected *uint64
+	delete   bool
+}
+
+var errMemoryAccess = problem(502, "Cannot access saved memory")
+
 func (d *bridgeDB) setMemory(ctx context.Context, w memoryWrite, expected *uint64) (int64, error) {
+	now := time.Now().UnixMilli()
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	var current int64
-	err = tx.QueryRowContext(ctx, "SELECT version FROM memory WHERE scope=? AND key=?", w.scope, w.key).Scan(&current)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	entry, err := editMemory(ctx, tx, memoryEdit{memoryWrite: w, expected: expected}, now)
+	if err != nil {
 		return 0, err
 	}
-	if expected != nil && uint64(current) != *expected {
-		return 0, &versionConflict{current}
+	return entry["version"].(int64), tx.Commit()
+}
+
+func editMemory(ctx context.Context, tx *sql.Tx, edit memoryEdit, now int64) (object, error) {
+	var current int64
+	err := tx.QueryRowContext(ctx, "SELECT version FROM memory WHERE scope=? AND key=?", edit.scope, edit.key).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
-	now := time.Now().UnixMilli()
+	if edit.expected != nil && uint64(current) != *edit.expected {
+		return nil, &versionConflict{current}
+	}
+	if edit.delete {
+		if current != 0 {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM memory WHERE scope=? AND key=?", edit.scope, edit.key); err != nil {
+				return nil, err
+			}
+		}
+		return object{"deleted": current != 0}, nil
+	}
 	var result sql.Result
 	if current == 0 {
 		result, err = tx.ExecContext(ctx, `INSERT INTO memory (scope,key,value_json,updated_at)
 			SELECT ?,?,?,? WHERE (SELECT count(*) FROM memory WHERE scope=?) < 64
-			ON CONFLICT(scope,key) DO NOTHING`, w.scope, w.key, w.value, now, w.scope)
+			ON CONFLICT(scope,key) DO NOTHING`, edit.scope, edit.key, edit.value, now, edit.scope)
 	} else {
 		result, err = tx.ExecContext(ctx, `UPDATE memory SET value_json=?,version=version+1,updated_at=?
-			WHERE scope=? AND key=? AND version=?`, w.value, now, w.scope, w.key, current)
+			WHERE scope=? AND key=? AND version=?`, edit.value, now, edit.scope, edit.key, current)
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	changed, err := result.RowsAffected()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if changed == 0 {
-		return 0, problem(409, "Memory scope already has 64 keys")
+		return nil, problem(409, "Memory scope already has 64 keys")
 	}
-	return current + 1, tx.Commit()
+	return object{"value": json.RawMessage(edit.value), "version": current + 1, "updated_at": now}, nil
 }
 
-func (b *bridge) memory(ctx context.Context, args object, values bool) (object, error) {
+func (b *bridge) memoryEntries(ctx context.Context, scope string) ([]object, error) {
+	entries := []object{}
+	if !validScope(scope) {
+		return nil, problem(400, "Invalid memory scope")
+	}
+	if b.db == nil {
+		return entries, nil
+	}
+	rows, err := b.db.QueryContext(ctx, "SELECT key,value_json,version,updated_at FROM memory WHERE scope=? ORDER BY key", scope)
+	if err != nil {
+		return nil, errMemoryAccess
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, raw string
+		var version, at int64
+		if err := rows.Scan(&k, &raw, &version, &at); err != nil {
+			return nil, errMemoryAccess
+		}
+		entries = append(entries, object{"key": k, "value": json.RawMessage(raw), "version": version, "updated_at": at})
+	}
+	if rows.Err() != nil {
+		return nil, errMemoryAccess
+	}
+	return entries, nil
+}
+
+func (b *bridge) memoryState(ctx context.Context, scopes []string) (object, error) {
+	out := object{}
+	for _, scope := range scopes {
+		if _, exists := out[scope]; exists {
+			continue
+		}
+		entries, err := b.memoryEntries(ctx, scope)
+		if err != nil {
+			return nil, err
+		}
+		byKey := object{}
+		for _, entry := range entries {
+			key := str(entry["key"])
+			delete(entry, "key")
+			byKey[key] = entry
+		}
+		out[scope] = byKey
+	}
+	return out, nil
+}
+
+func (b *bridge) patchMemory(ctx context.Context, raw any) (object, error) {
 	if b.db == nil {
 		return nil, problem(503, "Memory unavailable")
 	}
-	op, scope, key := str(args["op"]), str(args["scope"]), str(args["key"])
-	if !validScope(scope) || op != "list" && !memoryKeyRE.MatchString(key) {
-		return nil, problem(400, "Invalid memory scope or key")
+	items, ok := raw.([]any)
+	if !ok {
+		items = []any{raw}
 	}
-	dbError := problem(502, "Cannot access saved memory")
-	switch op {
-	case "list":
-		rows, err := b.db.QueryContext(ctx, "SELECT key,value_json,version,updated_at FROM memory WHERE scope=? ORDER BY key", scope)
-		if err != nil {
-			return nil, dbError
-		}
-		defer rows.Close()
-		entries := []object{}
-		for rows.Next() {
-			var k, raw string
-			var version, at int64
-			if err := rows.Scan(&k, &raw, &version, &at); err != nil {
-				return nil, dbError
-			}
-			entry := object{"key": k, "version": version, "updated_at": at}
-			if values {
-				entry["value"] = json.RawMessage(raw)
-			}
-			entries = append(entries, entry)
-		}
-		if rows.Err() != nil {
-			return nil, dbError
-		}
-		return object{"scope": scope, "entries": entries}, nil
-	case "get":
-		var raw string
-		var version int64
-		err := b.db.QueryRowContext(ctx, "SELECT value_json,version FROM memory WHERE scope=? AND key=?", scope, key).Scan(&raw, &version)
-		if errors.Is(err, sql.ErrNoRows) {
-			return object{"scope": scope, "key": key, "found": false}, nil
-		}
-		if err != nil {
-			return nil, dbError
-		}
-		return object{"scope": scope, "key": key, "found": true, "version": version, "value": json.RawMessage(raw)}, nil
-	case "set":
-		write, err := parseMemoryWrite(args)
-		if err != nil {
-			return nil, err
+	if len(items) == 0 {
+		return nil, fieldError("memory", "expected at least one edit")
+	}
+	edits := make([]memoryEdit, 0, len(items))
+	for _, item := range items {
+		args, ok := item.(object)
+		if !ok {
+			return nil, fieldError("memory", "expected an edit object")
 		}
 		expected, err := mcpUint(args, "expected_version")
 		if err != nil {
 			return nil, err
 		}
-		version, err := b.db.setMemory(ctx, write, expected)
-		var conflict *versionConflict
-		var api *apiError
+		op, supplied := args["op"]
+		if !supplied {
+			op = "set"
+		}
+		var w memoryWrite
+		switch op {
+		case "set":
+			w, err = parseMemoryWrite(args)
+			if err != nil {
+				return nil, err
+			}
+		case "delete":
+			w.scope, w.key = str(args["scope"]), str(args["key"])
+			if !validScope(w.scope) || !memoryKeyRE.MatchString(w.key) {
+				return nil, problem(400, "Invalid memory scope or key")
+			}
+		default:
+			return nil, fieldError("memory.op", "expected set or delete")
+		}
+		edits = append(edits, memoryEdit{w, expected, op == "delete"})
+	}
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, errMemoryAccess
+	}
+	defer tx.Rollback()
+	now, out := time.Now().UnixMilli(), object{}
+	for _, edit := range edits {
+		entry, err := editMemory(ctx, tx, edit, now)
 		if err != nil {
+			var conflict *versionConflict
+			var api *apiError
 			if errors.As(err, &conflict) || errors.As(err, &api) {
 				return nil, err
 			}
-			return nil, dbError
+			return nil, errMemoryAccess
 		}
-		return object{"ok": true, "scope": scope, "key": key, "version": version}, nil
-	case "delete":
-		expected, err := mcpUint(args, "expected_version")
-		if err != nil {
-			return nil, err
+		if out[edit.scope] == nil {
+			out[edit.scope] = object{}
 		}
-		deleted, err := b.db.deleteMemory(ctx, scope, key, expected)
-		if err != nil {
-			var conflict *versionConflict
-			if errors.As(err, &conflict) {
-				return nil, err
-			}
-			return nil, dbError
-		}
-		return object{"ok": true, "scope": scope, "key": key, "deleted": deleted}, nil
-	default:
-		return nil, problem(400, "Unknown memory operation")
+		out[edit.scope].(object)[edit.key] = entry
 	}
-}
-
-func (d *bridgeDB) deleteMemory(ctx context.Context, scope, key string, expected *uint64) (bool, error) {
-	if expected == nil {
-		return deleteRow(ctx, d, "DELETE FROM memory WHERE scope=? AND key=?", scope, key)
+	if err := tx.Commit(); err != nil {
+		return nil, errMemoryAccess
 	}
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-	var current int64
-	err = tx.QueryRowContext(ctx, "SELECT version FROM memory WHERE scope=? AND key=?", scope, key).Scan(&current)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	if uint64(current) != *expected {
-		return false, &versionConflict{current}
-	}
-	if current == 0 {
-		return false, nil
-	}
-	result, err := tx.ExecContext(ctx, "DELETE FROM memory WHERE scope=? AND key=? AND version=?", scope, key, current)
-	if err != nil {
-		return false, err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n != 0, tx.Commit()
+	return out, nil
 }
 
 func deleteRow(ctx context.Context, d *bridgeDB, query string, args ...any) (bool, error) {
@@ -211,14 +239,13 @@ func (b *bridge) memoryAPI(w http.ResponseWriter, r *http.Request, path string) 
 		return nil, problem(503, "Memory unavailable")
 	}
 	q := r.URL.Query()
-	args := object{"scope": q.Get("scope"), "key": q.Get("key")}
+	scope, key := q.Get("scope"), q.Get("key")
 	switch {
 	case r.Method == http.MethodGet && path == "/api/memory":
-		args["op"] = "list"
-		return b.memory(r.Context(), args, true)
+		entries, err := b.memoryEntries(r.Context(), scope)
+		return object{"scope": scope, "entries": entries}, err
 	case r.Method == http.MethodDelete && path == "/api/memory":
-		args["op"] = "delete"
-		_, err := b.memory(r.Context(), args, false)
+		_, err := b.patchMemory(r.Context(), object{"op": "delete", "scope": scope, "key": key})
 		if err == nil {
 			w.WriteHeader(204)
 		}

@@ -76,12 +76,17 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 			}
 			w.WriteHeader(204)
 		case strings.HasSuffix(path, "/message/msg-compaction") && r.Method == http.MethodGet:
+			if strings.Contains(path, "ses-fresh") {
+				sendJSON(w, 200, object{"data": object{"id": "msg-compaction", "type": "compaction", "status": "failed",
+					"error": object{"type": "compaction.unavailable", "message": "Nothing to compact yet"}}})
+				return
+			}
 			status := "completed"
 			if fail.Load() && strings.Contains(path, "ses-cake") {
 				status = "failed"
 			}
 			sendJSON(w, 200, object{"data": object{"id": "msg-compaction", "type": "compaction", "status": status}})
-		case path == "/api/session/ses-cake" || path == "/api/session/ses-mint":
+		case path == "/api/session/ses-cake" || path == "/api/session/ses-mint" || path == "/api/session/ses-fresh":
 			sendJSON(w, 200, object{"data": object{"id": strings.TrimPrefix(path, "/api/session/")}})
 		default:
 			t.Errorf("unexpected OpenCode request: %s %s", r.Method, path)
@@ -100,7 +105,7 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	if err := b.db.setMeta(ctx, mcpSchemaMeta, "old"); err != nil {
 		t.Fatal(err)
 	}
-	for id, sid := range map[string]string{"Cake": "ses-cake", "Mint": "ses-mint", "stale": "ses-stale", "empty": ""} {
+	for id, sid := range map[string]string{"Cake": "ses-cake", "Mint": "ses-mint", "fresh": "ses-fresh", "stale": "ses-stale", "empty": ""} {
 		if err := b.oc.store.save(id, sid, false); err != nil {
 			t.Fatal(err)
 		}
@@ -147,6 +152,8 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 		"POST /api/experimental/session/ses-cake/wait", "GET /api/session/ses-cake/message/msg-compaction",
 		"GET /api/session/ses-mint", "POST /api/session/ses-mint/compact",
 		"POST /api/experimental/session/ses-mint/wait", "GET /api/session/ses-mint/message/msg-compaction",
+		"GET /api/session/ses-fresh", "POST /api/session/ses-fresh/compact",
+		"POST /api/experimental/session/ses-fresh/wait", "GET /api/session/ses-fresh/message/msg-compaction",
 		"GET /api/session/ses-stale",
 	}
 	mu.Lock()
