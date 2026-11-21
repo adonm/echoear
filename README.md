@@ -41,7 +41,11 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    Set `ECHOEAR_REPO_DIR` when launching outside the checkout to locate the
    agent prompt and OTA files (the systemd unit sets it). The default
    model is `opencode/gemini-4-hydrogen#low`; set `ECHOEAR_OPENCODE_MODEL` in
-   `bridge.env` to override it.
+   `bridge.env` to override it. The dedicated service retries a Gemini turn
+   once on `opencode/claude-haiku-5-5` if the first model request is explicitly
+   rejected for rate limits or endpoint unavailability before output or tools.
+   The next turn starts on Gemini again. Stalls, interruptions, and permission
+   failures do not switch models.
 
 2. Create the private firmware config once:
 
@@ -169,10 +173,11 @@ render, and elapsed time to the first queued PCM (or HTTP audio URL).
 `echoear-opencode.service` listens at `127.0.0.1:49375` with Basic auth.
 Setup generates its password in the private `bridge.env` and gives it separate
 configuration, session data, cache, state, and workspace under
-`~/.local/share/echoear/opencode/` (or `$XDG_DATA_HOME`). It links the EchoEar
-agent and legacy `auth.json`, and imports the configured model provider's
-current V2 credentials once through OpenCode's CLI. It does not share your
-session database or load personal plugins, MCP servers, or coding `AGENTS.md`.
+`~/.local/share/echoear/opencode/` (or `$XDG_DATA_HOME`). It installs the model
+fallback plugin, links the EchoEar agent and legacy `auth.json`, and imports the
+configured model provider's current V2 credentials once through OpenCode's
+CLI. It does not share your session database or load personal plugins, MCP
+servers, or coding `AGENTS.md`.
 Setup does not edit personal OpenCode configuration. If upgrading, remove the
 old `mcp.servers.echoear` entry and EchoEar agent symlink from your personal config.
 Without `ECHOEAR_OPENCODE_URL`, the bridge still discovers the shared service

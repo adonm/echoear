@@ -23,6 +23,7 @@ for module in bridge/web/*.js; do
 done
 # mic.test.mjs imports the mic and playback CJS suites.
 node --test bridge/web/*.test.mjs
+node --test config/opencode/*.test.mjs
 (
     cd bridge
     export CGO_ENABLED=1

@@ -84,7 +84,7 @@ chmod 700 -- "$build_tmp"
 mv -f -- "$build_tmp" "$bridge_bin"
 trap - EXIT
 
-mkdir -p -- "$oc_root"/{config/opencode/agents,data/opencode,state,cache,workspace} \
+mkdir -p -- "$oc_root"/{config/opencode/agents,config/opencode/plugins,data/opencode,state,cache,workspace} \
     "$config/echoear" "$units/hex.service.d"
 link_file() {
     local source=$1 destination=$2
@@ -98,6 +98,8 @@ link_file() {
     ln -s -- "$source" "$destination"
 }
 link_file "$REPO_DIR/agents/echoear.md" "$oc_root/config/opencode/agents/echoear.md"
+install -m 600 -- "$REPO_DIR/config/opencode/echoear-fallback.js" \
+    "$oc_root/config/opencode/plugins/echoear-model-router.js"
 if [[ -f "$data_home/opencode/auth.json" ]]; then
     link_file "$data_home/opencode/auth.json" "$oc_root/data/opencode/auth.json"
 fi
