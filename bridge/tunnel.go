@@ -336,6 +336,10 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		path := r.URL.EscapedPath()
+		if path == "/app/parent.js" {
+			sendError(w, problem(404, "Not found"))
+			return
+		}
 		if r.Method == http.MethodGet {
 			if path == "/" {
 				location := "/app"

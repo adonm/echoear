@@ -461,22 +461,32 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 	if err != nil || ctx.Err() != nil {
 		return
 	}
+	h := b.ws
+	if h == nil {
+		return
+	}
 	message := t.Label
 	if t.Say != "" {
 		message += ": " + t.Say
-	}
-	if !t.WakeAgent {
-		entry := newChat("card", who.Character, "Time's up! "+message, "timer")
-		entry.SceneTitle = t.Label
-		b.chat(t.DeviceID, entry, true)
 	}
 	var pcm []byte
 	if !t.WakeAgent {
 		pcm, _ = synthesizeMelody(t.Notes)
 	}
-	h := b.ws
 	h.mu.Lock()
-	d := h.devices[strings.ToLower(t.DeviceID)]
+	key, now := strings.ToLower(t.DeviceID), time.Now()
+	if h.parentRefresh(key, now) != "" {
+		h.mu.Unlock()
+		return
+	}
+	if !t.WakeAgent {
+		defer func() {
+			entry := newChat("card", who.Character, "Time's up! "+message, "timer")
+			entry.SceneTitle = t.Label
+			b.chat(t.DeviceID, entry, true)
+		}()
+	}
+	d := h.devices[key]
 	if d != nil && h.active(d) && d.callState == callNone {
 		if t.AppName != "" {
 			defer func() {
@@ -485,10 +495,9 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 				}
 			}()
 		}
-		now := time.Now()
 		if t.WakeAgent {
 			completed := make(chan struct{})
-			h.startTurn(d, now, true, "timer", func(turnCtx context.Context, id uint64) {
+			started := h.startTurn(d, now, true, "timer", func(turnCtx context.Context, id uint64) {
 				defer close(completed)
 				turnCtx, cancel := context.WithCancel(turnCtx)
 				defer cancel()
@@ -497,7 +506,9 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 				h.runTurn(turnCtx, d, id, "Timer fired: "+message, "timer", nil)
 			})
 			h.mu.Unlock()
-			<-completed
+			if started {
+				<-completed
+			}
 			return
 		}
 		h.wake(d, now)
@@ -515,12 +526,20 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 		h.mu.Unlock()
 		return
 	}
-	h.mu.Unlock()
 	if t.WakeAgent && b.oc != nil {
+		child, done, err := h.parentOffline(ctx, key, now)
+		h.mu.Unlock()
+		if err != nil {
+			return
+		}
+		defer done()
+		ctx = child
 		ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 		defer cancel()
 		_, _ = b.generateReply(ctx, ctx, who, "Timer fired: "+message, turnOptions{source: "timer"})
+		return
 	}
+	h.mu.Unlock()
 }
 
 func (b *bridge) patchTimer(ctx context.Context, id string, args object) (object, error) {
@@ -551,6 +570,9 @@ func (b *bridge) patchTimer(ctx context.Context, id string, args object) (object
 		if err != nil {
 			return nil, err
 		}
+		if err := b.parentAllowed(id); err != nil {
+			return nil, err
+		}
 		if err := m.set(ctx, t); err != nil {
 			return nil, err
 		}
@@ -578,6 +600,9 @@ func (b *bridge) patchTimer(ctx context.Context, id string, args object) (object
 		}
 		if !timerIDRE.MatchString(timerID) || hasAll || fields < 1 {
 			return nil, fieldError("timer", "update requires id and at least one field to change")
+		}
+		if err := b.parentAllowed(id); err != nil {
+			return nil, err
 		}
 		now := time.Now()
 		t, err := m.update(ctx, timerID, id, args, now)

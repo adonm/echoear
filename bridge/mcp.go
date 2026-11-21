@@ -510,6 +510,11 @@ func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object,
 		}
 		return object{"ok": true, "device_id": id, "volume": level, "auto_volume": auto, "sleeping": false}, nil
 	}
+	if setSleep && !asleep {
+		if r := h.parentRefresh(d.key, time.Now()); r != "" {
+			return nil, r.err()
+		}
+	}
 	if setVolume {
 		if err := h.setVolume(ctx, d, auto, level, ""); err != nil {
 			return nil, err
@@ -517,6 +522,9 @@ func (h *wsHub) mcpControl(ctx context.Context, id string, args object) (object,
 	}
 	if setSleep {
 		now := time.Now()
+		if r := h.parentRefresh(d.key, now); !asleep && r != "" {
+			return nil, r.err()
+		}
 		d.last = now
 		h.setSleeping(d, asleep)
 		h.render(d, now, false)
@@ -547,6 +555,9 @@ func (h *wsHub) signalTarget(id string) (*wsDevice, string) {
 	d := h.devices[strings.ToLower(id)]
 	if d == nil || d.who.DeviceID != id || !h.active(d) {
 		return nil, "not_connected"
+	}
+	if r := h.parentRefresh(d.key, time.Now()); r != "" {
+		return nil, string(r)
 	}
 	if d.callState != callNone {
 		return nil, "on_call"
@@ -593,6 +604,9 @@ func (h *wsHub) playSignal(d *wsDevice, kind string, pcm []byte) bool {
 func (b *bridge) mcpIntercom(ctx context.Context, args object) (object, []object, error) {
 	sender, err := b.lookupDevice(str(args["from_device_id"]))
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := b.parentAllowed(sender.DeviceID); err != nil {
 		return nil, nil, err
 	}
 	text := shortText(args["text"], maxMessage, true)

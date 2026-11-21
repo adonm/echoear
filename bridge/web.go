@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-//go:embed web/index.html web/style.css web/*.js
+//go:embed web/*.html web/style.css web/*.js
 var webFiles embed.FS
 
 func serveApp(w http.ResponseWriter, path string) bool {
@@ -25,6 +25,10 @@ func serveApp(w http.ResponseWriter, path string) bool {
 		}
 		mime = "text/javascript; charset=utf-8"
 	}
+	return serveAppFile(w, name, mime)
+}
+
+func serveAppFile(w http.ResponseWriter, name, mime string) bool {
 	data, err := webFiles.ReadFile("web/" + name)
 	if err != nil {
 		return false

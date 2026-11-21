@@ -26,6 +26,11 @@ h2 { font-size: 1.15rem; line-height: 1.2; }
 h3 { font-size: .92rem; overflow-wrap: anywhere; }
 a { color: var(--mint); }
 .masthead, .workspace { width: min(100% - 2rem, 96rem); margin-inline: auto; }
+.parent-layout { width: min(100% - 2rem, 44rem); margin: 0 auto 2rem; display: grid; gap: 1rem; }
+.parent-panel { display: grid; gap: .55rem; }
+.parent-layout .panel { padding: 1rem; }
+.parent-panel button { justify-self: start; }
+.parent-panel form { border-top: 1px solid var(--line); padding-top: .85rem; margin-top: .35rem; }
 .masthead, .row { display: flex; align-items: center; gap: .55rem; }
 .wrap, .header-actions { flex-wrap: wrap; }
 .masthead { justify-content: space-between; min-height: 5.4rem; padding-block: .8rem; }

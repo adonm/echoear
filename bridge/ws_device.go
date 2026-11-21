@@ -137,6 +137,8 @@ type wsDevice struct {
 	asleep    bool
 	wakeWord  bool
 
+	parentReason parentReason
+
 	callState                   callState
 	callID                      uint32
 	callPeer                    string
@@ -541,7 +543,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 	if ev.Role == "device" {
 		c.enqueue(textFrame(object{"op": "hello_ok"}))
 	}
-	h.render(d, now, true)
+	if h.parentRefresh(d.key, now) == "" {
+		h.render(d, now, true)
+	}
 }
 
 func (h *wsHub) announce(d *wsDevice) {
@@ -555,6 +559,9 @@ func (h *wsHub) announce(d *wsDevice) {
 	}
 	h.push(d, d.volumeFrame(false), true)
 	h.push(d, object{"op": "power", "brightness": d.brightness()}, true)
+	if d.parentReason != "" {
+		h.push(d, parentFrame(d), true)
+	}
 	h.broadcastPeers()
 	if c.role == "web" {
 		c.pushPeers(h.peerFrame(c.scope != nil))
@@ -661,6 +668,7 @@ func (h *wsHub) catPose(d *wsDevice, now time.Time, mood string) catPose {
 }
 
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
+	h.parentObserve(d, now)
 	switch d.drawer {
 	case drawerGames, drawerMemories, drawerHistory:
 	default:
@@ -695,6 +703,8 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	d.pose = pose
 	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace}
 	switch {
+	case d.parentReason != "":
+		r.view = parentScene(d.parentReason)
 	case d.callState != callNone:
 		if p := h.callPeer(d); p != nil {
 			var elapsed time.Duration
@@ -856,11 +866,17 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 }
 
 func (h *wsHub) wake(d *wsDevice, now time.Time) {
+	if d.parentReason != "" {
+		return
+	}
 	d.last = now
 	h.setSleeping(d, false)
 }
 
 func (h *wsHub) setSleeping(d *wsDevice, asleep bool) {
+	if !asleep && d.parentReason != "" {
+		return
+	}
 	if asleep && d.callState != callNone {
 		return
 	}
@@ -871,6 +887,10 @@ func (h *wsHub) setSleeping(d *wsDevice, asleep bool) {
 }
 
 func (d *wsDevice) brightness() int {
+	if d.parentReason != "" {
+		// Firmware turns the battery panel off at 12; keep the notice visible.
+		return 20
+	}
 	if d.asleep {
 		return 12
 	}
@@ -885,14 +905,28 @@ func (h *wsHub) animate(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-tick.C:
+		case <-tick.C:
 			h.mu.Lock()
 			if h.closed {
 				h.mu.Unlock()
 				return
 			}
-			h.tickApps(now)
+			now := time.Now()
+			for key, p := range h.parents {
+				if len(p.offline) > 0 && h.devices[key] == nil {
+					h.parentRefresh(key, now)
+				}
+			}
 			for _, d := range h.devices {
+				if !h.active(d) {
+					continue
+				}
+				if h.parentRefresh(d.key, now) != "" {
+					if d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)) {
+						h.playbackDone(d, now)
+					}
+					continue
+				}
 				if d.callState != callNone {
 					if d.callState == callActive && now.Sub(d.callStarted).Truncate(time.Second) > d.callSecond {
 						h.render(d, now, false)
@@ -919,6 +953,7 @@ func (h *wsHub) animate(ctx context.Context) {
 					}
 				}
 			}
+			h.tickApps(now)
 			if now.Sub(sincePeers) > 15*time.Second {
 				h.broadcastPeers()
 				sincePeers = now

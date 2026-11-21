@@ -58,6 +58,7 @@ function select(d, quick = false) {
 function renderCurrent() {
   const d = state.view?.device, ready = state.ws?.readyState === WebSocket.OPEN && state.rev > 0;
   const active = ready && state.view?.virtual;
+  const resting = !!state.view?.parentMessage;
   const mode = d?.mode && d.mode !== "offline" ? d.mode : "";
   colors($("workspace"), d?.cat);
   say("chat-name", d?.character || "Choose a cat");
@@ -70,13 +71,13 @@ function renderCurrent() {
   $("phone-controls").hidden = !state.view?.virtual;
   const micAvailable = canCaptureMic();
   const busyCall = inCall();
-  $("talk").disabled = !active || !micAvailable || micStopping() || busyCall;
+  $("talk").disabled = !active || !micAvailable || micStopping() || busyCall || resting;
   $("sound").disabled = !active;
   $("mic-help").hidden = !state.view?.virtual || micAvailable;
   say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
     "Mic needs localhost or an HTTPS opentunnel.xyz link");
-  $("text").disabled = !d || state.view.virtual && (!active || busyCall);
-  $("text").placeholder = d?.cat?.configured === false ? "Say hi to design your cat…" : "Say something to your cat…";
+  $("text").disabled = !d || resting || state.view.virtual && (!active || busyCall);
+  $("text").placeholder = state.view?.parentMessage || (d?.cat?.configured === false ? "Say hi to design your cat…" : "Say something to your cat…");
   $("send").disabled = $("text").disabled || !!state.view?.sending || !!state.view?.resetting;
   $("share-photo").disabled = !d || !!state.view?.sharingPhoto || state.view?.virtual && !active;
   $("reset").hidden = !!state.app?.scope;
@@ -88,7 +89,7 @@ function renderCurrent() {
 function inCall() { return state.view?.mode === "call" || state.view?.mode === "calling"; }
 
 function canStartCall() {
-  return state.view?.virtual && state.rev > 0 && state.ws?.readyState === WebSocket.OPEN && !inCall() && canCaptureMic();
+  return state.view?.virtual && state.rev > 0 && state.ws?.readyState === WebSocket.OPEN && !inCall() && !state.view.parentMessage && canCaptureMic();
 }
 
 function startPeerCall(target) {
@@ -113,6 +114,7 @@ function connect(attempt = 0) {
   disconnect();
   const cat = state.view;
   cat.mode = "";
+  cat.parentMessage = "";
   cat.bridgeEndpoint = false;
   say("link-state", "Connecting…");
   updateStatus(cat.virtual ? `Joining as ${cat.device.character}…` : `Connecting to ${cat.device.character}…`);
@@ -246,7 +248,7 @@ function command(msg) {
       screen.dataset.interactive = "true";
       if (first) {
         say("link-state", state.app.scope ? "Private live cat" : "LAN dashboard");
-        updateStatus(state.view.virtual ? `${state.view.device.character} · Live Virtual Cat` : `Mirroring ${state.view.device.character}`);
+        updateStatus(state.view.parentMessage || (state.view.virtual ? `${state.view.device.character} · Live Virtual Cat` : `Mirroring ${state.view.device.character}`));
         loadHistory({replace:false});
         if (state.view.virtual) renderDevices();
       }
@@ -255,6 +257,19 @@ function command(msg) {
     }
     case "power":
       screen.dataset.dim = String(msg.brightness < 20);
+      break;
+    case "parent_policy":
+      if (msg.device_id === state.view.id) {
+        const wasResting = !!state.view.parentMessage;
+        state.view.parentMessage = msg.message || "";
+        if (state.view.parentMessage) {
+          endMic(true, false, false, true);
+          updateStatus(state.view.parentMessage);
+        } else if (wasResting) {
+          updateStatus(`${state.view.device.character} is available.`);
+        }
+        renderCurrent();
+      }
       break;
     case "mode":
       if (state.view.virtual) {

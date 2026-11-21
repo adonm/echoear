@@ -936,6 +936,12 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 			h.mu.Unlock()
 			return nil, problem(409, "Device is not connected: "+id)
 		}
+		if args["exit"] != true {
+			if r := h.parentRefresh(d.key, time.Now()); r != "" {
+				h.mu.Unlock()
+				return nil, r.err()
+			}
+		}
 		if args["exit"] != true && d.callState != callNone {
 			h.mu.Unlock()
 			return nil, problem(409, "Device is on a call: "+id)
@@ -1077,6 +1083,10 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		if !h.active(d) {
 			h.mu.Unlock()
 			return nil, problem(409, "Device disconnected: "+d.who.DeviceID)
+		}
+		if r := h.parentRefresh(d.key, time.Now()); r != "" {
+			h.mu.Unlock()
+			return nil, r.err()
 		}
 		if d.appGen != gens[i] {
 			h.mu.Unlock()
@@ -1222,7 +1232,7 @@ func (h *wsHub) patchRunningApp(ctx context.Context, ids []string, patch json.Ra
 	var a *appInstance
 	for _, id := range ids {
 		d := h.devices[strings.ToLower(id)]
-		if d == nil || !h.active(d) || d.app == nil || d.app.vm == nil {
+		if d == nil || !h.active(d) || h.parentRefresh(d.key, time.Now()) != "" || d.app == nil || d.app.vm == nil {
 			h.mu.Unlock()
 			return nil, problem(409, "No running JS app on "+id)
 		}
@@ -1481,7 +1491,7 @@ func (h *wsHub) commitAppEvent(a *appInstance, ev appEvent, views []svgScreen, e
 			a.timeOfSpeech = now
 		}
 		for j, d := range a.devices {
-			if d == nil || !h.active(d) || ev.i >= 0 && j != ev.i && !e.all {
+			if d == nil || !h.active(d) || ev.i >= 0 && j != ev.i && !e.all || h.parentRefresh(d.key, time.Now()) != "" {
 				continue
 			}
 			switch e.kind {

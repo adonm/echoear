@@ -223,13 +223,13 @@ func (h *wsHub) showPhoto(device, id string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.devices[strings.ToLower(device)]
-	if d == nil || !h.active(d) {
+	now := time.Now()
+	if d == nil || !h.active(d) || h.parentRefresh(d.key, now) != "" {
 		return false
 	}
 	h.interruptTurn(d, "photo")
 	h.stopCatTurn(d)
 	h.clearView(d)
-	now := time.Now()
 	h.wake(d, now)
 	s := sceneView{bg: "#000000", title: "Photo", art: `<image href="photo:` + id + `" width="360" height="360"/>`}
 	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Cat", "", palette{"#FFFAEE", catInk}))

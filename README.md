@@ -95,6 +95,33 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 
 ## Controls, voice notes, and calls
 
+### Parent controls
+
+Store a separate random token (at least 32 ASCII characters, no spaces) in
+`~/.config/echoear/parent.token` (or under `$XDG_CONFIG_HOME`), mode `0600`.
+The bridge reads it at startup. On the LAN, open **Parent controls** in `/app`
+and enter both tokens. Keep the parent token with the grown-ups; kids should
+use their device or a scoped share link, not the LAN dashboard. Scoped links
+cannot open the controls.
+
+- Set daily quiet hours in the device's IANA time zone (for example,
+  `America/New_York`). A window can cross midnight. A dim screen explains why
+  the cat is unavailable. Calls and intercom are declined; due timers are
+  skipped, not replayed.
+- Set an optional daily time budget. Recording, chat and playback, visible
+  apps, and connected calls share the budget. Concurrent activity counts once
+  and the total resets at local midnight. The cat announces when time is up.
+- Pause a device for a set time, or choose **Unlock and override** to allow use
+  temporarily. Tapping cannot unlock it. Kids can ask “Pause for five minutes”
+  to start a break (up to 30 minutes) after parent access is set up. Only a
+  parent can unlock it early.
+
+Rules follow the device, not a swappable cat profile. The parent view shows
+today's usage and seven-day activity counts; chat contents stay in History.
+The agent can read its current policy but cannot edit it.
+
+### Using a cat
+
 - Tap the cat face and speak after the tone. Pause 1.5 seconds to send
   automatically, or 3 seconds once you've spoken for 4 seconds. Tap **Send**
   to finish early, **Cancel** to discard, or **Stop** to interrupt a reply.
