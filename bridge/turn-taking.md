@@ -45,12 +45,16 @@ stream probe. It prints aggregate scores, not transcripts, and saves no clips.
   The bridge validates the file and never downloads it. Neither STT nor TTS
   model selection changes.
 - A device offers `caps.bridge_endpoint:true` in `hello`. Only when configured
-  and offered does a **user-initiated** untargeted note start with
+  and offered does an untargeted Talk or Say more action (or an enabled wake word)
+  start with
   `{"op":"rec","action":"start","target":"","endpoint":"bridge"}`.
   Audio is the existing `0x01` + 16 kHz mono s16le PCM between `rec_start`
-  and `rec_end`; the bridge sends `rec stop` at its endpoint. The client
-  retains the ~8 s silence / 60 s privacy watchdog. Clients without the cap,
-  unconfigured bridges, targeted intercom, and call audio keep their old paths.
+  and `rec_end`. The bridge sends `rec stop` to commit at its endpoint and
+  gives the client up to 450 ms for `rec_end`; `cancelled:true` discards the
+  capture. The bridge has a 7 s no-speech limit (audio time) and a 60 s
+  wall-clock limit. Clients retain their own ~8 s silence / 60 s sample
+  watchdog. Clients without the cap, unconfigured bridges, targeted intercom,
+  and call audio keep their old paths.
 - `/app` also offers the cap. It sends `{"ev":"rec_request"}` on Talk only
   after receiving `{"op":"capabilities","bridge_endpoint":true}`; otherwise
   it starts legacy capture. It closes the mic on bridge stop, Cancel, or

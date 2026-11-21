@@ -106,13 +106,14 @@ Kconfig reconfigure warnings. `./scripts/check.sh` passed.
   checks the image's embedded version, new OTA slot and bridge connectivity.
 - `tap`, `drag` and `up` carry `rev_lo` (unsigned 16 bit). Taps carry the
   newest fully painted revision at touch-down. The bridge rejects native
-  Stop, Talk, Reply, Send/Cancel, Call, Answer, Decline, Hang Up and Mute
+  Stop, Talk, Say more, Reply, Send/Cancel, Call, Answer, Decline, Hang Up and Mute
   actions unless the revision matches the last native scene enqueued.
   Legacy clients that do not advertise `pointer_rev` may omit the field.
-- `{"op":"rec","action":"start","endpoint":"bridge","target":"..."}` uses
+- `{"op":"rec","action":"start","endpoint":"bridge","target":""}` uses
   bridge-directed endpointing, preserving the `rec_start`, `0x01` PCM and
-  `rec_end` sequence. A `rec` stop ends capture; otherwise 8 seconds of
-  silence after initial calibration or 60 seconds of samples end it. Missing
+  `rec_end` sequence. A `rec` stop flushes the final PCM unless
+  `cancelled:true` discards the recording. Independently, 8 seconds of
+  silence after initial calibration or 60 seconds of samples end capture. Missing
   `endpoint:"bridge"` retains device VAD. Bridge endpoint selection is made by
   the turn-taking bridge, not by the detector.
 - `power` retains the existing brightness field. Brightness 12 now switches

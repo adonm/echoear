@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"image"
+	"testing"
+	"time"
+)
 
 func TestNativeTapRequiresCurrentFrameRevision(t *testing.T) {
 	b, base := wsHarness(t, nil)
@@ -39,6 +43,45 @@ func TestDestructiveNativeRevisionWrapAndLegacy(t *testing.T) {
 	d.caps.PointerRev = false
 	if !d.acceptPointerRevision("stop", nil) {
 		t.Fatal("legacy firmware must continue to work without rev_lo")
+	}
+}
+
+func TestNativeSayMoreRequiresCurrentFrameRevision(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, _ string) { b.endpoint = testEndpointSettings() })
+	d := testConnectWS(t, base, "unit", false)
+	const id = "echoear-say-more"
+	d.json(t, object{"ev": "hello", "role": "device", "proto": 2, "device_id": id, "character": "Cake",
+		"caps": object{"pointer_rev": true, "bridge_endpoint": true}})
+	d.until(t, hasWS("hello_ok", ""))
+	_, idleRev, _ := decodeDisplay(t, d.until(t, isDisplay))
+
+	b.ws.mu.Lock()
+	cat := b.ws.devices[id]
+	cat.busy = true
+	b.ws.render(cat, time.Now(), false)
+	b.ws.mu.Unlock()
+	d.until(t, func(f wsFrame) bool {
+		if !isDisplay(f) {
+			return false
+		}
+		r, _, _ := decodeDisplay(t, f)
+		return image.Pt(180, 265).In(r)
+	})
+
+	tap := object{"ev": "tap", "x": 180, "y": 265, "rev_lo": idleRev}
+	d.json(t, tap)
+	d.barrier(t)
+	b.ws.mu.Lock()
+	started, thinkingRev := cat.capture != nil, cat.nativeRev
+	b.ws.mu.Unlock()
+	if started {
+		t.Fatal("a stale Talk tap started a Say more capture")
+	}
+	tap["rev_lo"] = thinkingRev
+	d.json(t, tap)
+	start := testObject(t, d.until(t, hasWS("rec", `"action":"start"`)).data)
+	if start["endpoint"] != "bridge" || start["target"] != "" {
+		t.Fatal("Say more did not start an untargeted bridge capture")
 	}
 }
 
