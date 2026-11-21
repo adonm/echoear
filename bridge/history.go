@@ -266,12 +266,18 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 				return nil, problem(409, "Cat is in a call")
 			}
 			b.ws.startTurn(d, time.Now(), false, "typed", func(ctx context.Context, turn uint64) {
+				if scope != "" || r.Context().Value(photoScopeContext{}) != nil {
+					ctx = withoutPhotoAccess(ctx)
+				}
 				b.ws.runTurn(ctx, d, turn, text, "typed", nil)
 			})
 			b.ws.mu.Unlock()
 			return object{"ok": true, "device_id": sender.DeviceID}, nil
 		}
 		b.ws.mu.Unlock()
+	}
+	if scope != "" {
+		ctx = withoutPhotoAccess(ctx)
 	}
 	out, err := b.turn(ctx, sender, text)
 	if err != nil {

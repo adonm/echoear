@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"log"
 	"maps"
@@ -120,6 +121,7 @@ type wsDevice struct {
 
 	scene     sceneView
 	view      *sceneView
+	photos    *photoShow
 	pending   *sceneView
 	card      *sceneView
 	drawer    string
@@ -783,7 +785,9 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 				face = catArt(*r.cat, r.pose)
 			}
 			raw := r.view.svg(face)
-			if !r.full && raw == prev.raw {
+			if r.view.library != nil {
+				screen, err = h.b.library.slideScreen(d.client.ctx, d.key, r.view.library, raw, geometry)
+			} else if !r.full && raw == prev.raw {
 				screen = prev
 			} else {
 				screen, err = h.b.buildScreen(raw, false, geometry)
@@ -814,6 +818,14 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 		if !h.active(d) || d.renderGen != gen {
 			continue
 		}
+		if r.view.library != nil {
+			_, valid := h.b.library.getPhotoHandle(d.client.ctx, d.key, r.view.library.handle)
+			if !valid || !d.client.canSeeLibrary() || errors.Is(err, errPhotoRevoked) {
+				h.clearView(d)
+				h.render(d, time.Now(), true)
+				continue
+			}
+		}
 		if err != nil {
 			log.Printf("EchoEar screen: %v", err)
 			continue
@@ -838,7 +850,7 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 			h.trackFrame(d, screen.render, len(native.data), rawBytes, codec)
 		}
 		for c := range h.clients {
-			if c.watch == d.key {
+			if c.watch == d.key && (r.view.library == nil || c.canSeeLibrary()) {
 				c.enqueue(svgWire)
 			}
 		}

@@ -12,8 +12,14 @@ case "$*" in
 esac
 version=v0.4.5
 case $(uname -m) in
-    x86_64) arch=amd64; checksum=4890dc2b27510d0e2f9e7ee5d47bf1f274e145f79d5557aef1d24b3103fadbbe ;;
-    aarch64) arch=arm64; checksum=721ad071c8a4aba138b6132cf13bbd30800d68ce4f29711d259e492236c2810c ;;
+    x86_64)
+        arch=amd64
+        checksum=4890dc2b27510d0e2f9e7ee5d47bf1f274e145f79d5557aef1d24b3103fadbbe
+        binary_checksum=9673e0ce61f8118aa8e5ead819847224752b6efee3910837ede83d4233a90003 ;;
+    aarch64)
+        arch=arm64
+        checksum=721ad071c8a4aba138b6132cf13bbd30800d68ce4f29711d259e492236c2810c
+        binary_checksum=fd5098d3207f407d78bada5862f835ff5b24e3649a0e97914278cc56526de6b3 ;;
     *) printf 'Ente Photos setup supports Linux x86_64 and aarch64.\n' >&2; exit 1 ;;
 esac
 install -d -m 700 -- "$data" "$data/bin" "$data/ente-cli" "$config/echoear"
@@ -22,11 +28,13 @@ stage=$(mktemp -d "$data/.ente-install.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 archive=ente-cli-$version-linux-$arch.tar.gz
 binary=$data/bin/ente-$version
-if [[ ! -x "$binary" ]]; then
+if [[ ! -x "$binary" || -L "$binary" ]] ||
+    ! printf '%s  %s\n' "$binary_checksum" "$binary" | sha256sum --check --status; then
     curl --fail --silent --show-error --location \
         "https://github.com/ente/ente/releases/download/ente-cli-$version/$archive" -o "$stage/$archive"
     printf '%s  %s\n' "$checksum" "$stage/$archive" | sha256sum --check --status
     tar -xzf "$stage/$archive" -C "$stage" -- ente
+    printf '%s  %s\n' "$binary_checksum" "$stage/ente" | sha256sum --check --status
     "$stage/ente" --version | grep -Fx "ente ${version#v}"
     install -m 700 -- "$stage/ente" "$binary"
 fi

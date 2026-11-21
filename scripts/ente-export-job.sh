@@ -16,11 +16,13 @@ if ! flock -x -w 300 9; then
     printf 'Ente Photos CLI lock unavailable.\n' >&2
     exit 1
 fi
-ENTE_CLI_VAULT_KEY="$(< "$key")"
-export ENTE_CLI_VAULT_KEY
+vault_key="$(< "$key")"
+run_ente() { ENTE_CLI_VAULT_KEY=$vault_key "$ente" "$@"; }
 if [[ "$mode" == fetch ]]; then
-    [[ $# == 5 && $4 =~ ^[0-9]+$ ]] || exit 2
-    exec "$ente" photos file download "$4" --output "$5" --account personal --no-input --json
+    [[ $# == 6 && $4 =~ ^[0-9]+$ && $5 =~ ^[0-9]+$ ]] || exit 2
+    run_ente account view --account personal --no-input --json |
+        python3 -c 'import json,sys; a=json.load(sys.stdin); sys.exit(not (a["id"]==sys.argv[1] and a["host"]=="https://api.ente.com"))' "$4"
+    ENTE_CLI_VAULT_KEY=$vault_key exec "$ente" photos file download "$5" --output "$6" --account personal --no-input --json
 fi
 [[ "$mode" == sync || "$mode" == sync-export ]] || exit 2
 
@@ -29,15 +31,15 @@ trap 'rm -rf -- "$stage"' EXIT
 log=$data/ente-photos.log
 : >"$log"
 if ! (
-    "$ente" account view --account personal --no-input --json >"$stage/account" &&
-    "$ente" photos album list --account personal --all --no-input --json >"$stage/albums" &&
-    "$ente" photos file list --account personal --type image --type livephoto --all --no-input --json >"$stage/files"
+    run_ente account view --account personal --no-input --json >"$stage/account" &&
+    run_ente photos album list --account personal --all --no-input --json >"$stage/albums" &&
+    run_ente photos file list --account personal --type image --type livephoto --all --no-input --json >"$stage/files"
 ) 2>>"$log"; then
     printf 'Ente Photos metadata sync failed; see the private ente-photos.log.\n' >&2
     exit 1
 fi
 # The city catalog is optional. Its centroids are not individual photo locations.
-"$ente" photos place list --account personal --all --no-input --json >"$stage/places" 2>>"$log" ||
+run_ente photos place list --account personal --all --no-input --json >"$stage/places" 2>>"$log" ||
     printf '[]\n' >"$stage/places"
 if ! python3 - "$stage" <<'PY'
 import json
@@ -77,7 +79,7 @@ if probe=$(mktemp "$data/ente-export/.link-probe.XXXXXXXX"); then
     rm -- "$probe"
 fi
 # The CLI reports private file paths on stderr. Keep them out of the journal.
-if ! "$ente" photos export "$data/ente-export" \
+if ! run_ente photos export "$data/ente-export" \
     --account personal --no-input --json --jobs 3 "${links[@]}" >"$summary" 2>>"$log"; then
     printf 'Ente Photos optional export failed; see the private ente-photos.log.\n' >&2
     exit 1

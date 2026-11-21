@@ -18,6 +18,7 @@ type sceneView struct {
 	intercom       *intercomCard
 	call           uint32
 	menu           *menuContent
+	library        *photoSlide // Trusted local slideshow only; never serialize to a scoped watcher.
 }
 
 func (s *sceneView) hasIntercom() bool { return s != nil && s.intercom != nil }

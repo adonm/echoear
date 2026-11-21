@@ -12,16 +12,16 @@ env_file=$config/echoear/bridge.env
 pin_gpu=false
 ente_photos=false
 while (($#)); do
-case "$1" in
-    --gpu-index) [[ ${2-} == 0 ]] || exit 2; pin_gpu=true; shift ;;
-    --ente-photos) ente_photos=true ;;
-    -h|--help)
-        printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0] [--ente-photos]' \
-            'Use --gpu-index 0 only if hex model devices lists your intended Vulkan GPU at index 0.'
-        exit 0 ;;
-    *) printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0] [--ente-photos]' >&2; exit 2 ;;
-esac
-shift
+    case "$1" in
+        --gpu-index) [[ ${2-} == 0 ]] || exit 2; pin_gpu=true; shift ;;
+        --ente-photos) ente_photos=true ;;
+        -h|--help)
+            printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0] [--ente-photos]' \
+                'Use --gpu-index 0 only if hex model devices lists your intended Vulkan GPU at index 0.'
+            exit 0 ;;
+        *) printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0] [--ente-photos]' >&2; exit 2 ;;
+    esac
+    shift
 done
 
 # shellcheck source=scripts/go-bin.sh

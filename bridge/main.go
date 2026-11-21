@@ -134,6 +134,34 @@ func run() error {
 		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "firmware/build")), "echoear.bin")},
 		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "firmware/build-box3")), "echoear_box3.bin")}}
 	b.ws = newWSHub(b)
+	if _, err := os.Stat(filepath.Join(local, "bin", "ente-photo-job")); err == nil {
+		config := env("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		p, err := openPhotoLibrary(root, local, filepath.Join(config, "echoear", "ente-vault-key"))
+		if err != nil {
+			log.Print("EchoEar could not open the local photo index")
+		} else {
+			b.library = p
+			modelDir := filepath.Join(local, "photo-models")
+			if _, err := os.Stat(modelDir); err == nil {
+				model, err := openPhotoML(modelDir, filepath.Join(local, "lib", "libonnxruntime.so"))
+				if err != nil {
+					log.Print("EchoEar photo models unavailable; metadata search and labels still work")
+				} else {
+					p.ml = model
+				}
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				p.maintain(root, b.ws.clearInvalidSlides, os.Getenv("ECHOEAR_PHOTOS_BACKFILL") == "1")
+			}()
+			defer func() {
+				finish()
+				<-done
+				p.close()
+			}()
+		}
+	}
 	// Session history is a one-time, retryable backfill; the LAN service and
 	// local history remain available while OpenCode is offline.
 	historyDone := make(chan struct{})
