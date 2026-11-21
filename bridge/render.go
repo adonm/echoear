@@ -201,15 +201,9 @@ func layoutWarnings(hits []hitBox, round bool) []string {
 		}
 		if round {
 			b := h.bounds
-			corners := 0
-			for _, x := range [...]float64{b.x1, b.x2} {
-				for _, y := range [...]float64{b.y1, b.y2} {
-					if outside(x, y, r) {
-						corners++
-					}
-				}
-			}
-			if outside((b.x1+b.x2)/2, (b.y1+b.y2)/2, r-6) || corners >= 2 {
+			dx := max(math.Abs(b.x1-r), math.Abs(b.x2-r))
+			dy := max(math.Abs(b.y1-r), math.Abs(b.y2-r))
+			if dx*dx+dy*dy > r*r || outside((b.x1+b.x2)/2, (b.y1+b.y2)/2, r-6) {
 				warnings = append(warnings, fmt.Sprintf("control %q clips outside the round display bezel", h.id))
 			}
 		}
@@ -339,6 +333,9 @@ func cleanSVGAttr(k, v string) (string, bool) {
 	case "data-pose":
 		return v, true
 	case "fill", "stroke", "stop-color":
+		if k != "stop-color" && strings.EqualFold(v, "transparent") {
+			return "none", true
+		}
 		return v, svgPaint.MatchString(v) || k != "stop-color" && svgRef.MatchString(v)
 	case "fill-rule", "stroke-linecap", "stroke-linejoin", "gradientUnits", "spreadMethod", "font-weight", "text-anchor":
 		return v, svgPaint.MatchString(v) || k == "font-weight" && svgScalar.MatchString(v)
@@ -569,6 +566,21 @@ type svgTextStyle [4]string
 
 var svgTextAttrs = [...]string{"font-size", "font-weight", "font-family", "text-anchor"}
 
+type svgGlyphMetrics struct {
+	font *sfnt.Font
+	size fixed.Int26_6
+	buf  sfnt.Buffer
+}
+
+func (m *svgGlyphMetrics) glyph(r rune, previous sfnt.GlyphIndex, kern bool) (id sfnt.GlyphIndex, spacing, advance fixed.Int26_6) {
+	id, _ = m.font.GlyphIndex(&m.buf, r)
+	if kern {
+		spacing, _ = m.font.Kern(&m.buf, previous, id, m.size, font.HintingNone)
+	}
+	advance, _ = m.font.GlyphAdvance(&m.buf, id, m.size, font.HintingNone)
+	return
+}
+
 func fitLabel(text string, size, width int) int {
 	var buf sfnt.Buffer
 	ppem := fixed.I(size)
@@ -596,7 +608,7 @@ func outlineText(n *svgNode, style svgTextStyle) (svgBounds, bool) {
 	ppem := fixed.Int26_6(size * 64)
 	x, y := svgNum(n.attr["x"]), svgNum(n.attr["y"])
 	b := svgBounds{math.Inf(1), y - size, math.Inf(-1), y + size*.22}
-	var buf sfnt.Buffer
+	metrics := svgGlyphMetrics{font: f, size: ppem}
 	var d strings.Builder
 	compact := func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
 	for _, line := range strings.Split(strings.TrimSpace(n.text), "\n") {
@@ -604,15 +616,11 @@ func outlineText(n *svgNode, style svgTextStyle) (svgBounds, bool) {
 		glyphs := make([]sfnt.GlyphIndex, len(chars))
 		offsets := make([]fixed.Int26_6, len(chars))
 		var width fixed.Int26_6
+		var previous sfnt.GlyphIndex
 		for i, r := range chars {
-			glyphs[i], _ = f.GlyphIndex(&buf, r)
-			if i > 0 {
-				k, _ := f.Kern(&buf, glyphs[i-1], glyphs[i], ppem, font.HintingNone)
-				width += k
-			}
-			offsets[i] = width
-			w, _ := f.GlyphAdvance(&buf, glyphs[i], ppem, font.HintingNone)
-			width += w
+			id, spacing, advance := metrics.glyph(r, previous, i > 0)
+			glyphs[i], offsets[i], previous = id, width+spacing, id
+			width += spacing + advance
 		}
 		start := x
 		w := float64(width) / 64
@@ -624,7 +632,7 @@ func outlineText(n *svgNode, style svgTextStyle) (svgBounds, bool) {
 		}
 		b.x1, b.x2, b.y2 = min(b.x1, start), max(b.x2, start+w), y+size*.22
 		for i, glyph := range glyphs {
-			segments, _ := f.LoadGlyph(&buf, glyph, ppem, nil)
+			segments, _ := f.LoadGlyph(&metrics.buf, glyph, ppem, nil)
 			for j, s := range segments {
 				if j > 0 && s.Op == sfnt.SegmentOpMoveTo {
 					d.WriteByte('Z')

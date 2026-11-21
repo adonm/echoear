@@ -157,6 +157,8 @@ type appEffect struct {
 	all        bool
 }
 
+const appEffectLimit = 8
+
 // One worker owns the VM and lastScreens after initialization. The hub owns
 // device membership, queued events, and tick scheduling.
 type appInstance struct {
@@ -300,7 +302,7 @@ func (a *appInstance) initVM(initial json.RawMessage) error {
 		return s.String(), true
 	}
 	checkEffectLimit := func() {
-		if len(a.effects) >= 8 {
+		if len(a.effects) >= appEffectLimit {
 			panic(vm.NewTypeError("Too many app effects"))
 		}
 	}
@@ -372,6 +374,11 @@ func (a *appInstance) initVM(initial json.RawMessage) error {
 			panic(vm.NewTypeError("Unknown chime kind"))
 		}
 		return addEffect(appEffect{kind: "chime", text: kind})
+	})
+	installAppUI(vm, func() {
+		if a.allowEffects && len(a.effects) < appEffectLimit {
+			addEffect(appEffect{kind: "chime", text: "tap"})
+		}
 	})
 	run("say", func(c goja.FunctionCall) goja.Value {
 		text, _ := asString(c.Argument(0))
@@ -781,6 +788,10 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		if d.appGen != gens[i] {
 			h.mu.Unlock()
 			return nil, problem(409, "Device view changed: "+d.who.DeviceID)
+		}
+		if d.callState != callNone {
+			h.mu.Unlock()
+			return nil, problem(409, "Device is on a call: "+d.who.DeviceID)
 		}
 		if menu != nil && !d.canLaunchMenuGame(menu) {
 			h.mu.Unlock()

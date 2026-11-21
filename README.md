@@ -217,6 +217,10 @@ and `emit.sfx` support `boing`, `pop`, `win`, `buzz`, `ding`, and `whoosh`.
 In JS, `sfx` and `sfxAll` also accept chimes such as `tap`; unknown names are
 silent. App launches return `layout_warnings` for controls that overlap the
 Cat exit button or clip on round displays.
+Use `app = ui.pagedText({title, text})` for wrapped reading with built-in
+navigation, or return `ui.choices({title, prompt, choices})` from `render`
+for a card or quiz with up to four buttons. Both leave room for Cat and
+fit the round screen. `ui.wrap` and `ui.esc` are available for custom SVG.
 Set `timer.app` to a saved app name to launch it on the connected device when
 the reminder goes off. See the [agent guide](agents/echoear.md) for examples.
 

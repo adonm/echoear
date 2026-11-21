@@ -108,6 +108,8 @@ func TestMenuScreenTouchTargets(t *testing.T) {
 		"history":        menuList("History", "", rows, 1),
 		"memory-detail":  menuDetail("Memories", rows[0]),
 		"history-detail": menuDetail("History", rows[0]),
+		"voice":          voiceScene(heartVoice, 1),
+		"call-peers":     peerScene([]menuPeer{{"cat-1", "Friend", "#404040", "#FF0000"}}, 0, true),
 	} {
 		for _, geom := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
 			t.Run(name+"/"+strconv.Itoa(geom.width), func(t *testing.T) {
@@ -453,9 +455,11 @@ func TestAppLayoutWarnings(t *testing.T) {
 	}{
 		{"safe", `<rect data-id="top" x="110" y="18" width="140" height="32"/>
 			<rect data-id="next" x="150" y="270" width="60" height="21"/>
-			<rect data-id="one-corner" x="55" y="34" width="70" height="66"/>`, nil},
+			<rect data-id="only-padded-corner-clips" x="76" y="36" width="70" height="66"/>`, nil},
 		{"padded overlap", `<rect data-id="next" x="150" y="270" width="60" height="25"/>`,
 			[]string{`control "next" overlaps bottom Cat exit button (keep controls above y=296)`}},
+		{"one corner", `<g data-id="prev" data-hit="74,20,64,40"/>`,
+			[]string{`control "prev" clips outside the round display bezel`}},
 		{"two corners", `<rect data-id="wide" x="80" y="12" width="200" height="24"/>`,
 			[]string{`control "wide" clips outside the round display bezel`}},
 		{"center margin", `<rect data-id="high" x="171" y="2" width="18" height="6"/>`,
@@ -475,6 +479,23 @@ func TestAppLayoutWarnings(t *testing.T) {
 				t.Fatalf("exit target drifted or clipped: %+v", exit)
 			}
 		})
+	}
+}
+
+func TestSVGTransparentPaint(t *testing.T) {
+	const raw = `<svg><rect width="360" height="360" fill="#224466"/>
+		<g fill="TrAnSpArEnT"><rect x="90" y="90" width="90" height="90" stroke="#FFFFFF"/></g>
+		<rect x="190" y="190" width="50" height="50" fill="#FF0000" stroke="transparent" stroke-width="5"/></svg>`
+	want, err := buildScreen(strings.NewReplacer("TrAnSpArEnT", "none", "transparent", "none").Replace(raw), false, roundScreen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := buildScreen(raw, false, roundScreen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.source != want.source || !slices.Equal(got.fb, want.fb) {
+		t.Fatal("transparent paint differs from none")
 	}
 }
 
