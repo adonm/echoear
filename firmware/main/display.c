@@ -77,23 +77,31 @@ static void display_show_offline(void)
 static void paint_task(void *arg)
 {
     int applied = BRIGHT;
+    bool panel_on = true;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
         xSemaphoreTake(fb_lock, portMAX_DELAY);
         if (!linked && now_ms() - atomic_load(&last_touch) >= 120000u) {
             atomic_store(&brightness, DIM);
         }
+        int level = atomic_load(&brightness);
+        if (BOARD_HAS_BATTERY && level == DIM) {
+            xSemaphoreGive(fb_lock);
+            if (applied != 0 && bsp_display_backlight_off() == ESP_OK) applied = 0;
+            if (panel_on && esp_lcd_panel_disp_on_off(panel, false) == ESP_OK) panel_on = false;
+            continue;
+        }
         frame_bounds_t area = dirty_bounds;
         unsigned rev = atomic_load_explicit(&telemetry_io.last_frame_rev, memory_order_relaxed);
         dirty_bounds = (frame_bounds_t){ 0 };
         xSemaphoreGive(fb_lock);
-        int level = atomic_load(&brightness);
-        if (level != applied && bsp_display_brightness_set(level) == ESP_OK) applied = level;
         if (area.x0 < area.x1 && blit(area) == ESP_OK) {
             xSemaphoreTake(fb_lock, portMAX_DELAY);
             if (linked && dirty_bounds.x0 == dirty_bounds.x1) atomic_store(&shown_rev, rev);
             xSemaphoreGive(fb_lock);
         }
+        if (!panel_on && esp_lcd_panel_disp_on_off(panel, true) == ESP_OK) panel_on = true;
+        if (panel_on && level != applied && bsp_display_brightness_set(level) == ESP_OK) applied = level;
     }
 }
 
@@ -124,7 +132,7 @@ bool display_apply_frame(const uint8_t *data, size_t len)
     if (first) first_frame = false;
     xSemaphoreGive(fb_lock);
     if (first) ESP_LOGI(TAG, "Applied bridge frame 0x03 %ux%u (codec %u)", dirty.w, dirty.h, data[9]);
-    if (applied) xTaskNotifyGive(painter);
+    if (applied && !(BOARD_HAS_BATTERY && display_is_sleeping())) xTaskNotifyGive(painter);
     return applied;
 }
 
@@ -146,13 +154,25 @@ bool display_is_sleeping(void)
     return atomic_load(&brightness) == DIM;
 }
 
+#if BOARD_HAS_BATTERY
+static void touch_interrupt(esp_lcd_touch_handle_t controller)
+{
+    BaseType_t awaken = pdFALSE;
+    vTaskNotifyGiveFromISR(controller->config.user_data, &awaken);
+    if (awaken) portYIELD_FROM_ISR();
+}
+#endif
+
 static void touch_task(void *arg)
 {
     touch_gesture_t gesture = { 0 };
     uint16_t press_rev = 0;
-    TickType_t tick = xTaskGetTickCount();
     for (;;) {
-        vTaskDelayUntil(&tick, pdMS_TO_TICKS(30));
+#if BOARD_HAS_BATTERY
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(display_is_sleeping() && !gesture.down ? 120 : 30));
+#else
+        vTaskDelay(pdMS_TO_TICKS(30));
+#endif
         esp_lcd_touch_point_data_t p = { 0 };
         uint8_t count = 0;
         if (esp_lcd_touch_read_data(touch) != ESP_OK ||
@@ -189,9 +209,15 @@ esp_err_t display_init(void)
     ESP_RETURN_ON_ERROR(bsp_display_backlight_on(), TAG, "Enable backlight");
     ESP_RETURN_ON_ERROR(bsp_display_brightness_set(BRIGHT), TAG, "Set initial brightness");
     atomic_store(&last_touch, now_ms());
+    TaskHandle_t touch_reader;
     ESP_RETURN_ON_FALSE(xTaskCreate(paint_task, "painter", 4096, NULL, 3, &painter) == pdPASS &&
-                        xTaskCreate(touch_task, "touch", 3072, NULL, 4, NULL) == pdPASS,
+                        xTaskCreate(touch_task, "touch", 3072, NULL, 4, &touch_reader) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "Display tasks");
+#if BOARD_HAS_BATTERY
+    if (esp_lcd_touch_register_interrupt_callback_with_data(touch, touch_interrupt, touch_reader) != ESP_OK) {
+        ESP_LOGW(TAG, "Touch interrupt unavailable; using poll wake");
+    }
+#endif
     ESP_LOGI(TAG, BOARD_LCD " %dx%d LCD and " BOARD_TOUCH " touch initialized", FRAME_WIDTH, FRAME_HEIGHT);
     return ESP_OK;
 }

@@ -20,6 +20,7 @@ const idleSleep = 120 * time.Second
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
 type wsCaps struct {
+	PanelSleep     *bool `json:"panel_sleep,omitempty"`
 	PointerRev     *bool `json:"pointer_rev,omitempty"`
 	BridgeEndpoint *bool `json:"bridge_endpoint,omitempty"`
 	Battery        *bool `json:"battery,omitempty"`
@@ -30,6 +31,7 @@ type wsCaps struct {
 }
 
 type deviceCaps struct {
+	PanelSleep     bool `json:"panel_sleep,omitempty"`
 	PointerRev     bool `json:"pointer_rev,omitempty"`
 	BridgeEndpoint bool `json:"bridge_endpoint,omitempty"`
 	Battery        bool `json:"battery"`
@@ -48,6 +50,7 @@ func helloCaps(ev wsEvent, board string) deviceCaps {
 	}
 	vocat := ev.Role == "device" && board == "esp-vocat"
 	return deviceCaps{
+		PanelSleep:     value(ev.Caps.PanelSleep, false),
 		PointerRev:     value(ev.Caps.PointerRev, false),
 		BridgeEndpoint: value(ev.Caps.BridgeEndpoint, false),
 		Battery:        value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
@@ -882,6 +885,8 @@ func (h *wsHub) animate(ctx context.Context) {
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
 					h.setSleeping(d, true)
 					h.render(d, now, false)
+				case d.asleep && d.caps.PanelSleep && d.client.role == "device":
+					// The battery board's panel is off; skip idle animation traffic.
 				case d.drawer == "stats" && !d.asleep && now.Sub(d.statsAt) >= diagInterval:
 					h.render(d, now, false)
 				case d.stopTapsExpired(now):

@@ -300,10 +300,11 @@ static bool send_telemetry(uint32_t session, bool hello)
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
                            "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
                             "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s,"
-                            "\"pointer_rev\":true,\"bridge_endpoint\":%s}",
+                            "\"pointer_rev\":true,\"bridge_endpoint\":%s,\"panel_sleep\":%s}",
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
                            BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
-                             call, call, BOARD_HAS_DRAG ? "true" : "false", media_audio_ready() ? "true" : "false");
+                            call, call, BOARD_HAS_DRAG ? "true" : "false", media_audio_ready() ? "true" : "false",
+                            BOARD_HAS_BATTERY ? "true" : "false");
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
     char text[1024];
