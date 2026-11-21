@@ -189,7 +189,7 @@ func (t *turnTrace) firstPCM(at time.Time) {
 
 func (b *bridge) transcribe(ctx context.Context, pcm []byte) (string, error) {
 	start := time.Now()
-	text, err := b.hex.transcribe(ctx, pcm)
+	text, err := b.decodeClip(ctx, pcm)
 	traceFrom(ctx).measure(diagSTT, time.Since(start))
 	return text, err
 }
@@ -235,10 +235,12 @@ type diagHost struct {
 }
 
 type diagServices struct {
-	Hex        bool `json:"hex"`
-	OpenCode   bool `json:"opencode"`
-	TTS        bool `json:"tts"`
-	OpenTunnel bool `json:"opentunnel"`
+	Hex        bool   `json:"hex"`
+	STT        bool   `json:"stt"`
+	STTEngine  string `json:"stt_engine"`
+	OpenCode   bool   `json:"opencode"`
+	TTS        bool   `json:"tts"`
+	OpenTunnel bool   `json:"opentunnel"`
 }
 
 type diagSystem struct {
@@ -508,6 +510,8 @@ func (b *bridge) sampleDiagnostics(start time.Time, path string) func() {
 				wg.Go(func() { report.Services.OpenCode = b.oc.reachable(ctx, "/api/info") })
 			}
 			wg.Wait()
+			report.Services.STT = b.parakeet != nil || report.Services.Hex
+			report.Services.STTEngine = b.sttEngine()
 			b.diag.mu.Lock()
 			b.diag.system = report
 			b.diag.mu.Unlock()

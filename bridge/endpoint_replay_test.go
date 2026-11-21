@@ -93,16 +93,26 @@ func TestEndpointReplay(t *testing.T) {
 		{"Tell me a joke about", "Siobhan and thirty-two spiders.", 3600, []marker{{"name", []string{"siobhan"}}, {"number", []string{"thirty two", "32"}}}},
 		{"Can you draw a dragon", "with blue wings and little stars?", 1700, nil},
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
+	var h hexClient
+	var clip func(context.Context, []byte) (string, error)
+	speculative := os.Getenv("ECHOEAR_REPLAY_SPECULATIVE")
+	switch speculative {
+	case "", "hex":
+		h = replayHex(t)
+		clip = h.transcribe
+	case "parakeet":
+		p, err := openParakeet(os.Getenv("ECHOEAR_BAKEOFF_MODEL"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.close)
+		clip = p.transcribe
+	default:
+		t.Fatal("ECHOEAR_REPLAY_SPECULATIVE must be hex or parakeet")
 	}
-	data := filepath.Join(env("XDG_DATA_HOME", filepath.Join(home, ".local/share")), "hex")
-	h := hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: filepath.Join(data, "local-api.json"), read: hexEndpoint}},
-		&fileCache[string]{path: filepath.Join(data, "settings.json"), read: hexQuery}}
-	defer h.client.CloseIdleConnections()
+	var err error
 	streaming := false
-	if os.Getenv("ECHOEAR_REPLAY_CLIP_ONLY") != "1" {
+	if speculative == "" && os.Getenv("ECHOEAR_REPLAY_CLIP_ONLY") != "1" {
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		probe, probeErr := h.openStream(ctx)
 		cancel()
@@ -199,6 +209,9 @@ func TestEndpointReplay(t *testing.T) {
 		start := time.Now()
 		uploaded := 0
 		var shaped endpointPolicy
+		var probes [2]replayPauseProbe
+		pauseMS := [...]int{500, 700}
+		labels := [...]string{"silero-speculative-500", "silero-speculative-700"}
 		for i := endpointBytes; i <= len(pcm); i += endpointBytes {
 			at := i / (sampleRate / 1000 * 2)
 			if stream != nil && hintAt < 0 {
@@ -235,12 +248,54 @@ func TestEndpointReplay(t *testing.T) {
 			if hintAt < 0 && shaped.step(time.Duration(at)*time.Millisecond, silero.policy.inVoice, hint) == endpointCommit {
 				hintAt = at
 			}
+			if speculative != "" {
+				for j := range probes {
+					probe := &probes[j]
+					if probe.commitAt != 0 {
+						continue
+					}
+					policy := silero.policy
+					if policy.inVoice {
+						*probe = replayPauseProbe{}
+					} else if policy.voiced && probe.readyAt == 0 && at-int(policy.last.Milliseconds()) >= pauseMS[j] {
+						start := time.Now()
+						probe.text, probe.err = clip(ctx, pcm[:i])
+						probe.readyAt = at + int((time.Since(start) + time.Millisecond - 1).Milliseconds())
+					}
+					var text string
+					if probe.err == nil && at >= probe.readyAt {
+						text = probe.text
+					}
+					if policy.step(time.Duration(at)*time.Millisecond, policy.inVoice, text) == endpointCommit {
+						probe.commitAt = at
+						if text == "" {
+							start := time.Now()
+							probe.text, probe.err = clip(ctx, pcm[:i])
+							probe.readyAt = at + int(time.Since(start).Milliseconds())
+						}
+					}
+				}
+			}
 		}
 		vad.close()
 		browserAt, boardAt := replayLegacy(pcm, false), replayLegacy(pcm, true)
 		record("browser-rms", browserAt, trueEnd)
 		record("board-rms", boardAt, trueEnd)
 		record("silero-no-text", plainAt, trueEnd)
+		if speculative != "" {
+			for j, probe := range probes {
+				at := probe.commitAt
+				if at == 0 {
+					at = -1
+				}
+				record(labels[j], at, trueEnd)
+				if at >= trueEnd && probe.err == nil {
+					scores[labels[j]].finalized = append(scores[labels[j]].finalized, max(at, probe.readyAt)-trueEnd)
+				}
+				recordText(labels[j]+" + "+speculative, f.targets, probe.text, probe.err)
+			}
+			t.Logf("fixture=%d speculative_commit_ms=%d/%d", fixtureID, probes[0].commitAt, probes[1].commitAt)
+		}
 		finalPolicy, finalAt := "silero-no-text", plainAt
 		if stream != nil {
 			finalPolicy, finalAt = "silero-hex-partials", hintAt
@@ -272,11 +327,13 @@ func TestEndpointReplay(t *testing.T) {
 			if plainAt >= 0 {
 				end = min(end, plainAt*32)
 			}
-			text, err = h.transcribe(ctx, pcm[:end])
+			text, err = clip(ctx, pcm[:end])
 		}
 		recordFinal(finalPolicy, finalAt, trueEnd, startFinal, err)
 		finalPath := "silero + whole-clip Hex"
-		if streaming {
+		if speculative != "" {
+			finalPath = "silero + whole-clip " + speculative
+		} else if streaming {
 			finalPath = "silero + Hex stream"
 		}
 		recordText(finalPath, f.targets, text, err)
@@ -286,9 +343,9 @@ func TestEndpointReplay(t *testing.T) {
 		}{{"board-rms", boardAt}, {"browser-rms", browserAt}} {
 			if tc.stop >= 0 {
 				start := time.Now()
-				got, sttErr := h.transcribe(ctx, pcm[:min(len(pcm), tc.stop*32)])
+				got, sttErr := clip(ctx, pcm[:min(len(pcm), tc.stop*32)])
 				recordFinal(tc.path, tc.stop, trueEnd, start, sttErr)
-				recordText(tc.path+" + Hex", f.targets, got, sttErr)
+				recordText(tc.path+" + clip", f.targets, got, sttErr)
 			}
 		}
 		stop()
@@ -307,6 +364,27 @@ func TestEndpointReplay(t *testing.T) {
 		t.Logf("%s name_errors=%d/%d number_errors=%d/%d unscored_markers=%d", path, n.errors, n.count, q.errors, q.count, n.failures+q.failures)
 	}
 	t.Logf("Hex first_nonempty_partial_ms_from_start_of_speech=%s; Silero path STT failures=%d", replayPercentiles(partialMS), failed)
+}
+
+// A decode runs once per pause. Its result becomes visible on the replay's
+// audio clock after the measured wall duration; a resumed voice invalidates it.
+type replayPauseProbe struct {
+	text              string
+	err               error
+	readyAt, commitAt int
+}
+
+func replayHex(t *testing.T) hexClient {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(env("XDG_DATA_HOME", filepath.Join(home, ".local/share")), "hex")
+	client := pooledClient()
+	t.Cleanup(client.CloseIdleConnections)
+	return hexClient{upstream{"Hex", client, &fileCache[endpoint]{path: filepath.Join(data, "local-api.json"), read: hexEndpoint}},
+		&fileCache[string]{path: filepath.Join(data, "settings.json"), read: hexQuery}}
 }
 
 func replayWords(s string) []string {

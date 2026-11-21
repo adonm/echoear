@@ -1,7 +1,7 @@
 [Unit]
 Description=EchoEar LAN voice and OTA bridge
-Wants=network-online.target hex.service echoear-opencode.service
-After=network-online.target hex.service echoear-opencode.service
+Wants=network-online.target @STT_DEPENDENCY@echoear-opencode.service
+After=network-online.target @STT_DEPENDENCY@echoear-opencode.service
 
 [Service]
 EnvironmentFile=@ENV_FILE@

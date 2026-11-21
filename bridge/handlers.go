@@ -25,6 +25,7 @@ type bridge struct {
 	agentPath string
 	peers     peers
 	hex       hexClient
+	parakeet  *parakeetSTT
 	endpoint  *endpointSettings
 	oc        *openCode
 	pairPort  int
@@ -526,14 +527,16 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return nil, b.ws.serve(w, r)
 		case path == "/health":
 			h := make(chan bool, 1)
-			go func() { h <- b.hex.reachable(ctx, "/health") }()
+			go func() { h <- b.hex.config != nil && b.hex.reachable(ctx, "/health") }()
 			o := b.oc.reachable(ctx, "/api/info")
 			ready := b.worker != nil && b.worker.ready.Load()
 			engine := "unavailable"
 			if ready {
 				engine = kokoroEngine
 			}
-			return object{"ok": true, "hex": <-h, "opencode": o, "tts": ready, "tts_engine": engine}, nil
+			hex := <-h
+			return object{"ok": true, "hex": hex, "stt": b.parakeet != nil || hex, "stt_engine": b.sttEngine(),
+				"opencode": o, "tts": ready, "tts_engine": engine}, nil
 		case path == "/api/devices":
 			devices, err := b.deviceList()
 			return object{"devices": devices}, err

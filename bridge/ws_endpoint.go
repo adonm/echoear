@@ -73,7 +73,7 @@ func (h *wsHub) captureEndpoint(d *wsDevice, c *endpointCapture) {
 					var ok bool
 					result.text, ok = s.final(c.ctx)
 					if !ok && c.ctx.Err() == nil {
-						result.text, result.err = h.b.hex.transcribe(c.ctx, result.pcm)
+						result.text, result.err = h.b.decodeClip(c.ctx, result.pcm)
 					}
 					result.stt = time.Since(start)
 					if result.hasEnd {

@@ -121,10 +121,11 @@ function renderDiagnostics(data) {
   ];
   diagBar(system[2], "Host RAM used", usage);
   $("diag-system").replaceChildren(...system);
-  $("diag-services").replaceChildren(...Object.entries({hex:"Hex", opencode:"OpenCode", tts:"Kokoro", opentunnel:"OpenTunnel"}).map(([key, label]) =>
+  const stt = services.stt_engine === "parakeet" ? {stt:"Parakeet"} : {hex:"Hex"};
+  $("diag-services").replaceChildren(...Object.entries({...stt, opencode:"OpenCode", tts:"Kokoro", opentunnel:"OpenTunnel"}).map(([key, label]) =>
     node("li", services[key] ? "is-up" : "", `${label} · ${services[key] ? (key === "opentunnel" ? "installed" : "ready") : "unavailable"}`)));
   $("diag-latency").replaceChildren(...Object.entries({speech_end_to_commit_ms:"Speech End → Transcript",
-    stt_ms:"Hex STT", gate_ms:"OpenCode Gate",
+    stt_ms:"Speech to Text", gate_ms:"OpenCode Gate",
     llm_first_ms:"OpenCode TTFT", first_sentence_ms:"First Sentence", llm_total_ms:"OpenCode Total",
     tts_queue_ms:"TTS Queue", tts_infer_ms:"TTS Inference", tts_first_ms:"Kokoro TTS", first_pcm_ms:"First PCM",
     e2e_ms:"Voice E2E", render_ms:"SVG→RLE565 Render"}).map(([key, title]) => {

@@ -35,8 +35,10 @@ ECHOEAR_REPLAY_KOKORO=/path/to/kokoro-multi-lang-v1_0 \
   "$GO_BIN" test -v -run '^TestEndpointReplay$'
 ```
 
-Replay only talks to local Hex. Set `ECHOEAR_REPLAY_CLIP_ONLY=1` to skip the
+The default replay only talks to local Hex. Set `ECHOEAR_REPLAY_CLIP_ONLY=1` to skip the
 stream probe. It prints aggregate scores, not transcripts, and saves no clips.
+For an opt-in whole-clip replay with 500/700 ms pause probes instead of
+streaming, see [the STT bake-off](stt-speed.md).
 
 ## Enablement and wire contract
 
