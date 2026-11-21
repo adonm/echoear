@@ -20,6 +20,7 @@ const idleSleep = 120 * time.Second
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
 type wsCaps struct {
+	WakeWord       *bool `json:"wake_word,omitempty"`
 	PanelSleep     *bool `json:"panel_sleep,omitempty"`
 	PointerRev     *bool `json:"pointer_rev,omitempty"`
 	BridgeEndpoint *bool `json:"bridge_endpoint,omitempty"`
@@ -31,6 +32,7 @@ type wsCaps struct {
 }
 
 type deviceCaps struct {
+	WakeWord       bool `json:"wake_word,omitempty"`
 	PanelSleep     bool `json:"panel_sleep,omitempty"`
 	PointerRev     bool `json:"pointer_rev,omitempty"`
 	BridgeEndpoint bool `json:"bridge_endpoint,omitempty"`
@@ -50,6 +52,7 @@ func helloCaps(ev wsEvent, board string) deviceCaps {
 	}
 	vocat := ev.Role == "device" && board == "esp-vocat"
 	return deviceCaps{
+		WakeWord:       value(ev.Caps.WakeWord, false),
 		PanelSleep:     value(ev.Caps.PanelSleep, false),
 		PointerRev:     value(ev.Caps.PointerRev, false),
 		BridgeEndpoint: value(ev.Caps.BridgeEndpoint, false),
@@ -129,6 +132,7 @@ type wsDevice struct {
 	meter     time.Time
 	pet       time.Time
 	asleep    bool
+	wakeWord  bool
 
 	callState                   callState
 	callID                      uint32

@@ -32,7 +32,7 @@ enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, CALL_PCM = 4, STAT
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
-typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, TTS_ACK, REJECT_RECORD, CALL_FAILED } input_kind_t;
+typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, TTS_ACK, REJECT_RECORD, CALL_FAILED, WAKE_WORD } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
@@ -119,9 +119,9 @@ static bool send_json(uint32_t session, cJSON *json)
     return sent;
 }
 
-static void enqueue_session(input_t input)
+static bool enqueue_session(input_t input)
 {
-    if (!input.session || !service) return;
+    if (!input.session || !service) return false;
     bool full = false;
     portENTER_CRITICAL(&input_lock);
     if (input.kind == INPUT_DRAG) {
@@ -138,6 +138,7 @@ static void enqueue_session(input_t input)
     portEXIT_CRITICAL(&input_lock);
     if (full) atomic_fetch_add_explicit(&telemetry_io.input_drops, 1, memory_order_relaxed);
     else xTaskNotifyGive(service);
+    return !full;
 }
 
 static bool next_input(input_t *input)
@@ -175,6 +176,11 @@ void ws_client_pointer(const char *event, int x, int y, uint16_t rev_lo)
     else if (!strcmp(event, "up")) kind = INPUT_UP;
     else return;
     enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y, .rev_lo = rev_lo });
+}
+
+bool ws_client_wake_word(void)
+{
+    return enqueue_session((input_t){ .kind = WAKE_WORD, .session = ready_socket_session() });
 }
 
 bool ws_client_rec_start(uint32_t session, const char *target)
@@ -249,6 +255,10 @@ static void send_input(const input_t *input)
         if (len > 0 && (size_t)len < sizeof(text)) send_ready(session, text, len, false);
         return;
     }
+    if (input->kind == WAKE_WORD) {
+        send_json(session, event_json("wake_word"));
+        return;
+    }
     const char *event = input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
     cJSON *json = event_json(event);
     bool ok = cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y) &&
@@ -300,11 +310,11 @@ static bool send_telemetry(uint32_t session, bool hello)
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
                            "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
                             "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s,"
-                            "\"pointer_rev\":true,\"bridge_endpoint\":%s,\"panel_sleep\":%s}",
+                            "\"pointer_rev\":true,\"bridge_endpoint\":%s,\"panel_sleep\":%s,\"wake_word\":%s}",
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
                            BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
                             call, call, BOARD_HAS_DRAG ? "true" : "false", media_audio_ready() ? "true" : "false",
-                            BOARD_HAS_BATTERY ? "true" : "false");
+                            BOARD_HAS_BATTERY ? "true" : "false", media_audio_ready() ? "true" : "false");
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
     char text[1024];
@@ -344,6 +354,9 @@ static void dispatch(const cJSON *msg)
             ESP_LOGI(TAG, "Bridge accepted hello");
             xTaskNotifyGive(service);
         }
+    } else if (!strcmp(op, "wake_word")) {
+        const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(msg, "enabled");
+        if (ws_client_connected() && cJSON_IsBool(enabled)) media_set_wake_word(cJSON_IsTrue(enabled));
     } else if (!strcmp(op, "rec")) {
         const char *action = field(msg, "action"), *target = field(msg, "target");
         if (!strcmp(action, "stop")) {

@@ -36,6 +36,7 @@ type wsEvent struct {
 	Audio     uint64  `json:"audio"`
 	Call      uint32  `json:"call"`
 	Cancelled bool    `json:"cancelled"`
+	Enabled   *bool   `json:"enabled"`
 	wsStatus
 }
 

@@ -41,3 +41,39 @@ func TestDestructiveNativeRevisionWrapAndLegacy(t *testing.T) {
 		t.Fatal("legacy firmware must continue to work without rev_lo")
 	}
 }
+
+func TestNativeWakeWordUsesTalkFlowOnlyWhenEnabled(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	d := testConnectWS(t, base, "unit", false)
+	const id = "echoear-wake"
+	d.json(t, object{"ev": "hello", "role": "device", "proto": 2, "device_id": id, "character": "Cake",
+		"caps": object{"wake_word": true, "bridge_endpoint": true}})
+	d.until(t, hasWS("hello_ok", ""))
+	d.until(t, isDisplay)
+	d.json(t, object{"ev": "wake_word"})
+	d.barrier(t)
+	b.ws.mu.Lock()
+	dev := b.ws.devices[id]
+	started := !dev.recAt.IsZero()
+	endpoint := dev.caps.BridgeEndpoint
+	b.ws.mu.Unlock()
+	if started || !endpoint {
+		t.Fatal("wake was not default-off or bridge endpoint capability was lost")
+	}
+
+	operator := testConnectWS(t, base, "unit", true)
+	operator.json(t, object{"ev": "hello", "role": "web"})
+	operator.json(t, object{"ev": "wake_word", "device_id": id, "enabled": true})
+	operator.until(t, hasWS("wake_word", `"enabled":true`))
+	d.until(t, hasWS("wake_word", `"enabled":true`))
+	d.json(t, object{"ev": "wake_word"})
+	d.until(t, hasWS("rec", `"action":"start"`))
+	d.json(t, object{"ev": "rec_start"})
+	d.barrier(t)
+	b.ws.mu.Lock()
+	open := dev.recOpen
+	b.ws.mu.Unlock()
+	if !open {
+		t.Fatal("recording did not wait for the normal rec_start acknowledgement")
+	}
+}
