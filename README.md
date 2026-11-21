@@ -6,7 +6,7 @@ EchoEar is a tap-to-talk companion with interactive diagrams, voice notes, live 
 EchoEar <-- /ws: RGB565 frames, touch, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
                                               |-- Hex      (speech to text)
                                               |-- OpenCode :49375 (loopback, reply deltas over SSE)
-                                              `-- Kokoro   (persistent FP32 worker)
+                                              `-- Kokoro   (FP32, embedded via sherpa-onnx)
 ```
 
 **Targets:** ESP-VoCat v1.2 and ESP32-S3-BOX-3. Both use a 360×360 logical canvas,
@@ -16,15 +16,15 @@ RGB565 updates for hardware and SVG for `/app`. Boards draw a fallback face offl
 **New in 0.9.3:** Both boards use the touchscreen for all touch controls.
 VoCat’s capacitive head pads are disabled.
 
-**New in 0.9.2:** Live two-way **Call** and all nine Kokoro voices in the paged
+**New in 0.9.2:** Live two-way **Call** and a paged voice picker in the
 on-device picker. Firmware announces features in `hello` and flushes only the
 dirty LCD columns within changed rows. The bridge and dashboard add paginated
 chat history, faster face rendering, and separate turn and hardware diagnostics.
 
 ## Quickstart
 
-1. On Linux, install Go 1.26, Python 3.11+, Hex 3.4.0, OpenCode V2, Vulkan
-   drivers, Podman, `uv`/`uvx`, and `curl`. Use a systemd user session.
+1. On Linux, install Go 1.26, GCC, Python 3.11+, Hex 3.4.0, OpenCode V2, Vulkan
+   drivers, Podman, `uvx` (USB flashing only), and `curl`. Use a systemd user session.
 
    ```sh
    hex model devices
@@ -32,8 +32,14 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    ```
 
    Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup builds
-   the Go bridge, installs Hex's `parakeet_unified_en` and FP32 `kokoro-v1.0.onnx`,
-   and starts Hex, the bridge, and a dedicated OpenCode service. The default
+   the Go bridge, installs Hex's `parakeet_unified_en` and the SHA-256-pinned
+   FP32 `kokoro-multi-lang-v1_0` pack, and starts Hex, the bridge, and a
+   dedicated OpenCode service. The bridge runs Kokoro in-process via
+   `sherpa-onnx-go` and native libraries in `lib/`. Host setup still uses
+   Python; the bridge has no Python runtime or TTS subprocess. Set
+   `TTS_MODEL_DIR` in `bridge.env` to load that pack from a different directory.
+   Set `ECHOEAR_REPO_DIR` when launching outside the checkout to locate the
+   agent prompt and OTA files (the systemd unit sets it). The default
    model is `opencode/gemini-4-hydrogen#low`; set `ECHOEAR_OPENCODE_MODEL` in
    `bridge.env` to override it.
 
@@ -90,7 +96,7 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
   **Games** launches saved apps, **Memories** shows the cat's saved memories,
   and **History** shows the last 20 messages, newest first. Tap a row for details.
   **Talk to…** opens intercom, **Volume** sets the level or enables **Auto**,
-  **Voice** pages through all nine voices, and **Stats** opens the diagnostics HUD.
+  **Voice** pages through six curated voices, and **Stats** opens the diagnostics HUD.
   Auto-volume estimates ambient noise from recordings and adjusts the DAC in RAM
   without writing to flash. **Cat** returns to the face. Scoped tunnels don't
   expose Games, Memories, or Stats.
@@ -121,10 +127,12 @@ sessions. Use **Call** from a virtual cat in `/app` to call a compatible board
 or another virtual cat. Mirroring a physical cat does not turn the browser into
 its microphone. Use **Photo** to show an image on the selected cat's
 screen and leave a card in its chat. Use **Voice** under the screen for one-click
-Heart or Fable, or choose among Heart and all eight UK voices in the dropdown. The
-choice is saved per device in the bridge database. Mint defaults to Fable (`bm_fable`,
-UK English). Cake and other cats default to Heart (`af_heart`, US English)
-unless `ECHOEAR_TTS_VOICE` sets a different fallback.
+Heart or Fable, or choose one of six warm, kid-friendly storyteller voices:
+Heart, Bella, and Puck (US English), or Fable, Emma, and George (UK English).
+The choice is saved per device in the bridge database. Mint defaults to Fable
+(`bm_fable`). Cake and other cats default to Heart (`af_heart`) unless
+`ECHOEAR_TTS_VOICE` sets a different fallback. Retired UK voices resolve to
+Emma or Fable without rewriting existing profiles.
 The conversation panel shows active timers for the selected cat with a
 countdown and a Cancel button. The LAN sidebar's **Saved Memory & Assets**
 section lets you inspect and delete saved keys and visuals.
@@ -147,12 +155,13 @@ other cats' chats. Treat the link as a password and use **Close Tunnel** to revo
 
 Open **Menu → Stats** for a compact on-device HUD, or **Diagnostics** in the
 LAN `/app` dashboard for device status, pipeline timings, and CPU and memory
-usage for the bridge, Kokoro, and host. Firmware reports ESP32-S3 CPU
-usage, free and minimum free heap, free PSRAM, Wi-Fi RSSI, and uptime every five
-seconds over WebSocket. The dashboard also shows WebSocket round-trip time.
+usage for the bridge and host. The bridge totals include Kokoro. Firmware
+reports ESP32-S3 CPU usage, free and minimum free heap, free PSRAM, Wi-Fi RSSI,
+and uptime every five seconds over WebSocket. The dashboard also shows
+WebSocket round-trip time.
 Device status also reports the last frame revision and LCD flush duration,
 input overflows, and PCM starvation/drop counts. Turn diagnostics separate
-OpenCode gate wait and first sentence, TTS queue and worker time, first frame
+OpenCode gate wait and first sentence, TTS queue and inference time, first frame
 render, and elapsed time to the first queued PCM (or HTTP audio URL).
 
 ## Dedicated OpenCode
@@ -279,7 +288,7 @@ synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 | --- | --- |
 | `GET /health` | Hex, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
-| `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, and bridge, Kokoro, and host resource usage |
+| `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, Kokoro readiness, and bridge and host resource usage |
 | `GET /api/devices` | Remembered devices with `device_id`, `character`, `cat`, `voice`, and current `ws_connected`; hardware also includes `ip`, `port`, and `last_seen` |
 | `GET /api/scope` | Current scope and ordered `voices` catalog |
 | `POST /api/virtual-clients` | `{}` creates a blank cat; optional legacy `character` and `theme` seed a designed cat |

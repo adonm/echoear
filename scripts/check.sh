@@ -25,6 +25,7 @@ done
 node --test bridge/web/*.test.mjs
 (
     cd bridge
+    export CGO_ENABLED=1
     "$GO_BIN" mod verify
     "$GO_BIN" vet ./...
     "$GO_BIN" test -race ./...
@@ -71,5 +72,5 @@ printf 'PASS tracked-file hygiene\n'
 
 if [[ ${1-} == --live ]]; then
     # Live tests fetch OTA manifests and images; they never flash or upload to a device.
-    (cd bridge && "$GO_BIN" test -tags=live -v -count=1 ./...)
+    (cd bridge && CGO_ENABLED=1 "$GO_BIN" test -tags=live -v -count=1 ./...)
 fi

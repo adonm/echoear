@@ -23,55 +23,62 @@ esac
 # shellcheck source=scripts/go-bin.sh
 source "$REPO_DIR/scripts/go-bin.sh"
 GO_BIN=$(resolve_go)
-for cmd in curl hex opencode python3 sha256sum systemctl; do
+for cmd in curl gcc hex opencode python3 sha256sum systemctl tar; do
     command -v "$cmd" >/dev/null || { echo "Install $cmd before running setup." >&2; exit 1; }
 done
 systemctl --user show-environment >/dev/null
 
-uv=${UV_BIN:-uv}
-if [[ ! ${UV_BIN:-} ]]; then
-    # The mise shim may not be active in a noninteractive shell.
-    for candidate in "$HOME"/.local/share/mise/installs/uv/latest/uv-*/uv; do
-        if [[ -x "$candidate" ]]; then
-            uv=$candidate
-            break
-        fi
-    done
-fi
-command -v "$uv" >/dev/null || { echo 'Install uv or set UV_BIN before running setup.' >&2; exit 1; }
-
-tts_python="$data/tts-venv/bin/python"
-mkdir -p -- "$data/tts-models"
-if [[ ! -x "$tts_python" ]]; then
-    "$uv" venv --python 3.13 "$data/tts-venv"
-fi
-"$uv" pip install --python "$tts_python" 'kokoro-onnx==0.6.1'
-
-download_tts_model() {
-    local name=$1 checksum=$2 destination="$data/tts-models/$1" temporary
-    if [[ -f "$destination" ]] && printf '%s  %s\n' "$checksum" "$destination" | sha256sum --check --status; then
-        return
+install_kokoro() (
+    local name=kokoro-multi-lang-v1_0
+    local checksum=60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4
+    local models="$data/tts-models" destination stage archive
+    destination="$models/$name"
+    if [[ -s "$destination/model.onnx" && -s "$destination/voices.bin" && -s "$destination/tokens.txt" &&
+        -s "$destination/espeak-ng-data/phondata" ]]; then
+        return 0
     fi
-    temporary=$(mktemp "$destination.XXXXXXXX")
-    if curl --fail --silent --show-error --location \
-        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/$name" \
-        --output "$temporary" && printf '%s  %s\n' "$checksum" "$temporary" | sha256sum --check --status; then
-        mv -f -- "$temporary" "$destination"
-    else
-        rm -f -- "$temporary"
-        printf 'Failed to download and verify %s\n' "$name" >&2
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        printf 'Move the incomplete Kokoro model at %s aside before running setup.\n' "$destination" >&2
         return 1
     fi
-}
-download_tts_model kokoro-v1.0.onnx beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a
-download_tts_model voices-v1.0.bin bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
+    mkdir -p -- "$models"
+    stage=$(mktemp -d "$models/.$name.XXXXXXXX")
+    trap 'rm -rf -- "$stage"' EXIT
+    archive="$stage/$name.tar.bz2"
+    curl --fail --silent --show-error --location \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$name.tar.bz2" \
+        --output "$archive"
+    if ! printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status; then
+        printf 'Kokoro model archive failed SHA-256 verification.\n' >&2
+        return 1
+    fi
+    tar -xjf "$archive" -C "$stage"
+    mv -nT -- "$stage/$name" "$destination"
+)
+install_kokoro
 
 bridge_bin="$data/echoear-bridge"
 build_tmp=$(mktemp "$bridge_bin.XXXXXXXX")
 trap 'rm -f -- "$build_tmp"' EXIT
 (
     cd -- "$REPO_DIR/bridge"
-    "$GO_BIN" build -trimpath -ldflags="-s -w" -o "$build_tmp" .
+    export CGO_ENABLED=1
+    # Put the installed lib directory ahead of the dependency's cgo cache RPATH.
+    export CGO_LDFLAGS="-Wl,-rpath,\$ORIGIN/lib${CGO_LDFLAGS:+ $CGO_LDFLAGS}"
+    "$GO_BIN" build -trimpath -ldflags="-s -w -extldflags \"-Wl,-rpath,\$ORIGIN/lib\"" -o "$build_tmp" .
+    case $("$GO_BIN" env GOARCH) in
+        amd64) native=x86_64-unknown-linux-gnu ;;
+        arm64) native=aarch64-unknown-linux-gnu ;;
+        arm) native=arm-unknown-linux-gnueabihf ;;
+        *) printf 'Unsupported Linux architecture for Kokoro.\n' >&2; exit 1 ;;
+    esac
+    module=$("$GO_BIN" list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux)
+    libs=$module/lib/$native
+    install -d -m 700 -- "$data/lib"
+    install -m 755 -- "$libs/libsherpa-onnx-c-api.so" "$libs/libonnxruntime.so" "$data/lib/"
+    if [[ -f "$libs/libsherpa-onnx-cxx-api.so" ]]; then
+        install -m 755 -- "$libs/libsherpa-onnx-cxx-api.so" "$data/lib/"
+    fi
 )
 chmod 700 -- "$build_tmp"
 mv -f -- "$build_tmp" "$bridge_bin"
@@ -144,7 +151,7 @@ hex_path=
 if [[ -z $(systemctl --user show hex.service --property=FragmentPath --value) ]]; then
     hex_path=$(type -P hex)
 fi
-python3 - "$REPO_DIR" "$data_home" "$tts_python" "$bridge_bin" "$units" "$hex_path" \
+python3 - "$REPO_DIR" "$data_home" "$bridge_bin" "$units" "$hex_path" \
     "$(type -P opencode)" "$env_file" "$oc_root" <<'PY'
 import re
 import sys
@@ -155,9 +162,9 @@ def escape(value):
         "\\": "\\\\", '"': '\\"', "%": "%%", "\n": "\\n", "\r": "\\r", "\t": "\\t",
     }))
 
-repo, data, python, binary, directory, hex_path, opencode, env_file, oc_root = sys.argv[1:]
+repo, data, binary, directory, hex_path, opencode, env_file, oc_root = sys.argv[1:]
 units = Path(directory)
-paths = {"REPO_DIR": repo, "DATA_HOME": data, "BRIDGE_BIN": binary, "TTS_PYTHON": python,
+paths = {"REPO_DIR": repo, "DATA_HOME": data, "BRIDGE_BIN": binary,
          "OPENCODE_BIN": opencode, "ENV_FILE": env_file}
 for name in ("echoear-bridge.service", "echoear-opencode.service",
              "echoear-opencode-lan.socket", "echoear-opencode-lan.service"):
