@@ -83,6 +83,7 @@ type wsStatus struct {
 	InputDrops     *uint32  `json:"input_drops,omitempty"`
 	AudioUnderruns *uint32  `json:"audio_underruns,omitempty"`
 	AudioDrops     *uint32  `json:"audio_drops,omitempty"`
+	CallTXDrops    *uint32  `json:"call_tx_drops,omitempty"`
 }
 
 type wsDevice struct {
@@ -615,6 +616,9 @@ func (d *wsDevice) status(s wsStatus) {
 	}
 	if s.AudioDrops != nil {
 		t.AudioDrops = s.AudioDrops
+	}
+	if s.CallTXDrops != nil {
+		t.CallTXDrops = s.CallTXDrops
 	}
 }
 

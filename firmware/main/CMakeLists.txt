@@ -19,6 +19,8 @@ add_custom_command(OUTPUT "${model_bin}"
     DEPENDS "${sr_dir}/model/pack_model.py" ${model_files}
     VERBATIM)
 target_add_binary_data(${COMPONENT_LIB} "${model_bin}" BINARY)
+target_link_options(${COMPONENT_LIB} INTERFACE
+    "LINKER:--wrap=esp_transport_ws_send_raw" "LINKER:--wrap=esp_transport_poll_write")
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror=return-type -Wno-unused-parameter)
 idf_build_get_property(project_name PROJECT_NAME)
