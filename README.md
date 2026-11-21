@@ -95,12 +95,18 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    weights or a Vulkan GPU; it does not build ESP-IDF images. Build those locally with the
    commands above (`BOARD=vocat` and `BOARD=box3`).
 
-   Add `--live` to check the deployed web/OTA endpoints and run WebSocket
-   and voice/chat tests against a fresh bridge binary with a temporary database,
-   real Parakeet/Kokoro, and a deterministic model stub. On a Vulkan host,
-   set `ECHOEAR_PARAKEET_NATIVE` to the `native/` prefix from
+   Add `--live` to exercise the product with virtual browser cats and firmware
+   clients for both board layouts. It builds a fresh loopback bridge with a
+   temporary database, real Parakeet Vulkan and Kokoro, synthetic photos, and a
+   deterministic model stub. It does not connect to the installed bridge, use
+   model quota, or test wake word. Allow at least two minutes for the actual
+   idle timeout. Set `ECHOEAR_PARAKEET_NATIVE` to the `native/` prefix from
    `scripts/build-parakeet.sh` to reuse its verified static libraries.
-   No device is flashed, and this check does not use model quota.
+
+   `--e2e-real` uses the dedicated local OpenCode server, its configured EchoEar
+   model and fallback, and disposable sessions; it can spend model quota.
+   `--deployed` runs the older deployed-service and OTA probes (no upload or
+   flash).
    See [evals and real-model smoke](docs/evals.md)
    for optional tests against the configured model.
 
