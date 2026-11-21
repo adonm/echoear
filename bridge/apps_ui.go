@@ -370,7 +370,7 @@ func installAppUI(vm *goja.Runtime, tapChime func()) {
 			choice := uiGet(choices, strconv.Itoa(i))
 			id := field(choice, "id")
 			if !svgID.MatchString(id) || isExitNode(id) || seen[id] {
-				panic(vm.NewTypeError("ui.choices needs unique SVG control IDs (Cat exit is reserved)"))
+				panic(vm.NewTypeError("ui.choices needs unique SVG control IDs (Home is reserved)"))
 			}
 			seen[id] = true
 			b := bounds{64, 236, 232, 36}

@@ -186,7 +186,7 @@ func (card intercomCard) scene(canCall bool) sceneView {
 func noticeScene(title, message string) sceneView {
 	cat := blankCat()
 	s := messageScene(title, title, message, cat)
-	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Face", "", navPalette))
+	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Home", "", navPalette))
 	return s
 }
 

@@ -40,7 +40,7 @@ func checkUIScreens(t *testing.T, raw string, want []string) {
 				}
 			}
 			if h.id != exitNode && h.y2 >= 290 {
-				t.Errorf("%s crowds the Cat exit: %+v", h.id, h)
+				t.Errorf("%s crowds Home: %+v", h.id, h)
 			}
 			for _, other := range view.hits[:i] {
 				if h.x1 <= other.x2 && other.x1 <= h.x2 && h.y1 <= other.y2 && other.y1 <= h.y2 {
@@ -180,7 +180,7 @@ func TestAppUIPagedTextRawTaps(t *testing.T) {
 	board.json(t, object{"ev": "tap", "x": 180, "y": 320})
 	board.until(t, isDisplay)
 	if active := stateMe(t, base, id)["active_app"]; active != nil {
-		t.Fatalf("Cat did not exit the reader: %v", active)
+		t.Fatalf("Home did not exit the reader: %v", active)
 	}
 
 	_, last := uiTestApp(t, `app = ui.pagedText({title:"Volume",pages:["First",{title:"Last & <end>",text:"Final"}],page:999,fontSize:99})`)

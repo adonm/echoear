@@ -201,7 +201,7 @@ func layoutWarnings(hits []hitBox, round bool) []string {
 		if slices.ContainsFunc(exits, func(e hitBox) bool {
 			return h.x1 <= e.x2 && e.x1 <= h.x2 && h.y1 <= e.y2 && e.y1 <= h.y2
 		}) {
-			warnings = append(warnings, fmt.Sprintf("control %q overlaps bottom Face exit button (keep controls above y=296)", h.id))
+			warnings = append(warnings, fmt.Sprintf("control %q overlaps bottom Home button (keep controls above y=296)", h.id))
 		}
 		if round {
 			b := h.bounds
@@ -769,7 +769,7 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 	}
 	background := root.background()
 	if exit && !hasExit {
-		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Face</text></g></svg>`)
+		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" ry="16" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Home</text></g></svg>`)
 		_ = walk(pill, rasterx.Identity, svgTextStyle{}, false, 4)
 		if root.attr["transform"] != "" || root.attr["opacity"] != "" {
 			// Keep the bridge's escape hatch outside the author's transform/opacity.

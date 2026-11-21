@@ -257,7 +257,7 @@ func menuDetail(title string, row menuRow) sceneView {
 		s.art += svgText(180, 134+i*17, 15, line, menuInk, `font-family="monospace"`)
 	}
 	s.control(bounds{92, 276, 79, 42}, actionTile("menu-back", "Back", "back", navPalette))
-	s.control(bounds{189, 276, 79, 42}, actionTile("cat", "Face", "", navPalette))
+	s.control(bounds{189, 276, 79, 42}, actionTile("cat", "Home", "", navPalette))
 	return s
 }
 

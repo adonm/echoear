@@ -51,7 +51,10 @@ func TestAppTemplatesHitCoordinates(t *testing.T) {
 					}
 					x, y := inverse(180, 320)
 					if got := hitID(view.hits, x, y); got != exitNode {
-						t.Fatalf("Cat exit hit %q", got)
+						t.Fatalf("Home hit %q", got)
+					}
+					if !strings.Contains(view.source, `aria-label="Home"`) {
+						t.Fatal("injected exit is not labeled Home")
 					}
 					for i, h := range view.hits {
 						if !inScreenCircle(h.x1, h.y1) || !inScreenCircle(h.x2, h.y1) ||

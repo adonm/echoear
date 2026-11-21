@@ -162,7 +162,7 @@ The agent can read its current policy but cannot edit it.
   **Talk to…** opens intercom, **Volume** sets the level or enables **Auto**,
   **Voice** pages through six curated voices, and **Stats** opens the diagnostics HUD.
   Auto-volume estimates ambient noise from recordings and adjusts the DAC in RAM
-  without writing to flash. **Face** returns to the companion. Scoped tunnels don't
+  without writing to flash. **Home** returns to the companion. Scoped tunnels don't
   expose Games, Memories, or Stats.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
@@ -383,11 +383,12 @@ hooks. Use `onDrag` and `onUp` alongside `onTap` for sliders and drawing in
 and `emit.sfx` support `boing`, `pop`, `win`, `buzz`, `ding`, and `whoosh`.
 In JS, `sfx` and `sfxAll` also accept chimes such as `tap`; unknown names are
 silent. App launches return `layout_warnings` for controls that overlap the
-Face exit button or clip on round displays. Custom exits can use `lark-exit`
+Home button or clip on round displays. Custom exits can use `lark-exit`
 or the legacy `echoear-exit`.
 
-Lark pairs 16×16 pixel art with Oat chrome: a shared 16-color palette, crisp
-sprites, and rounded cards. Show a screen with no JS or SVG:
+Lark pairs pixel art with Oat chrome: 32×32 companions and featured art,
+16×16 icons, a shared 16-color palette, and rounded cards. Show a screen
+with no JS or SVG:
 
 ```js
 app({devices: device_id, screen: {title: "Night sky", body: [
@@ -398,15 +399,15 @@ app({devices: device_id, screen: {title: "Night sky", body: [
 
 `screen` also supports `badge`, `bg`, `accent`, meters (`label`, `value`, `max`)
 and grids of `{id, label, sprite?, sub?, active?, variant?}` items. It wraps
-text and fits controls above Face on both displays. For interactive behavior,
+text and fits controls above Home on both displays. For interactive behavior,
 return `ui.screen(spec)` from JS `render` and handle IDs in `onTap`.
-`ui.sprite(rows, {x, y, scale, palette})` returns a crisp SVG fragment.
+`ui.sprite(rows, {x, y, scale, palette, mirror})` returns a crisp SVG fragment.
 `ui.palette` exposes the read-only palette (`.` is transparent;
 `k w p m l s y r g a b n d c o` are colors).
 
 Use `app = ui.pagedText({title, text})` for wrapped reading with built-in
 navigation, or return `ui.choices({title, prompt, choices})` from `render`
-for a card or quiz with up to four buttons. Both leave room for Face and
+for a card or quiz with up to four buttons. Both leave room for Home and
 fit the round screen. `ui.wrap` and `ui.esc` are available for custom SVG.
 Set `timer.app` to a saved app name to launch it on the connected device when
 the reminder goes off. See the [agent guide](agents/echoear.md) for examples.
@@ -429,9 +430,11 @@ under its data directory, keeps the seven latest, and reports the latest in
 Active and saved forms are stored in `cats` and `saved_cats`.
 Both the device and browser use one editable `face_svg` for the companion's appearance.
 Set `patch({device_id, cat: {sprite: {rows}, save_profile: false}})` to shift
-forms with pixel rows instead of hand-written SVG. Rows are 2–24 pixels each;
-16×16 is recommended. Optional `blink`, `talk`, `think`, and `sleep` maps
-override zero-based rows. Optional `palette` maps pixel keys to `#RRGGBB`.
+forms with pixel rows instead of hand-written SVG. Full grids can be 2–64 pixels
+per side. With `mirror:true`, supply just the left half (16 columns for a 32×32
+companion). A 32×32 form uses 9 pixels per cell on VoCat and 6 on BOX-3.
+Optional `blink`, `talk`, `think`, and `sleep` maps override zero-based rows
+in the same format. Optional `palette` maps pixel keys to `#RRGGBB`.
 `face_svg` and `face_edits` still work for existing forms.
 The bridge renders shared artwork and the matching `data-pose` layer:
 `idle`, `blink`, `talk`, `listen`, `think`, or `sleep`.

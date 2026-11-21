@@ -155,7 +155,7 @@ func (s declarativeScreen) svg() (string, error) {
 		}
 	}
 	// The card and all 8 px hit padding fit the inscribed bezel; the
-	// last action stops above the system's Face target at y=300.
+	// last action stops above the system's Home target at y=300.
 	const top, bottom = 83, 282
 	accent := paletteColor(s.Accent, larkPalette["p"])
 	view := sceneView{bg: paletteColor(s.BG, menuBG), art: uiRoundRect(55, 66, 250, 222, uiCardRadius, larkPalette["w"], menuBorder, 2)}

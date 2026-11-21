@@ -505,7 +505,7 @@ func TestAppLaunchReportsLayoutWarnings(t *testing.T) {
 	}
 	const svg = `<svg><rect data-id="next" x="150" y="270" width="60" height="25"/>
 		<rect data-id="wide" x="80" y="12" width="200" height="24"/></svg>`
-	const overlap = `control "next" overlaps bottom Face exit button (keep controls above y=296)`
+	const overlap = `control "next" overlaps bottom Home button (keep controls above y=296)`
 	const bezel = `control "wide" clips outside the round display bezel`
 	for _, tc := range []struct {
 		title   string
