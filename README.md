@@ -42,6 +42,14 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    agent prompt and OTA files (the systemd unit sets it). Choose the models in
    the [dedicated OpenCode config](#echoear-models).
 
+   **Optional, Linux Vulkan:** `./scripts/setup-host.sh --stt parakeet`
+   builds the bridge with the same Parakeet GGUF and inference engine as Hex
+   3.4.0. It needs CMake ≥3.19, Ninja, a C++17 compiler, Vulkan development
+   headers/loader, `glslc`, and the SPIR-V Headers CMake package. This mode
+   needs no Hex service or X display; setup leaves any existing Hex service
+   alone. It uses whole-clip recognition, not live partials or Hex vocabulary
+   settings. Plain setup selects Hex. See [STT measurements](bridge/stt-speed.md).
+
 2. Create the private firmware config once:
 
    ```sh
@@ -369,13 +377,13 @@ work with Tab, Enter, and Space.
 little-endian mono PCM. Clients with `caps.call_pcm` use `0x04` for 40 ms call
 uploads when `call.start` sets `mic_prefix: 4`; legacy clients use `0x01`.
 Voice capture and intercom use WebSocket. The bridge
-pads voiced PCM sent to Hex with 150 ms of silence on each side. Kokoro starts
+pads voiced whole-clip STT with 150 ms of silence on each side. Kokoro starts
 synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 `0.9.0` removes the legacy `/speak` endpoint.
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
-| `GET /health` | Hex, OpenCode, and TTS readiness |
+| `GET /health` | STT engine/readiness, Hex (when selected), OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, Kokoro readiness, and bridge and host resource usage |
 | `GET /api/devices` | Remembered devices with `device_id`, `character`, `cat`, `voice`, and current `ws_connected`; hardware also includes `ip`, `port`, and `last_seen` |
