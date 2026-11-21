@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
@@ -211,26 +212,49 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	switch a.kind {
 	case "menu":
 		h.chime(d, "tap")
-		d.drawer, d.card, d.pending = "menu", nil, nil
+		d.drawer, d.card, d.pending = drawerMenu, nil, nil
 		d.menuPage = 0
 		d.view = nil
 		h.render(d, now, false)
 	case "menu-open", "menu-back", "menu-page":
-		switch a.kind {
-		case "menu-open":
-			d.drawer, d.menuPage = a.value, 0
-		case "menu-back":
-			if d.drawer == "menu" {
-				d.drawer = ""
-			} else {
-				d.drawer, d.menuPage = "menu", 0
-			}
-		case "menu-page":
-			delta, _ := strconv.Atoi(a.value)
-			d.menuPage += delta
+		if d.scene.menu != d.menuData {
+			return
 		}
 		h.chime(d, "tap")
+		switch a.kind {
+		case "menu-open":
+			d.homePage = d.menuPage
+			d.drawer, d.menuPage = a.value, 0
+		case "menu-back":
+			if d.menuData != nil && d.menuData.detail != nil {
+				d.menuData.detail = nil
+			} else if d.drawer == drawerMenu {
+				d.drawer = ""
+			} else {
+				d.drawer, d.menuPage = drawerMenu, d.homePage
+			}
+		case "menu-page":
+			d.menuPage, _ = strconv.Atoi(a.value)
+		}
+		if a.kind != "menu-back" {
+			switch d.drawer {
+			case drawerGames, drawerMemories, drawerHistory:
+				h.loadMenu(d)
+				return
+			}
+		}
 		h.render(d, now, false)
+	case "menu-detail":
+		i, _ := strconv.Atoi(a.value)
+		if d.menuData != nil && d.scene.menu == d.menuData && i >= 0 && i < len(d.menuData.rows) {
+			d.menuData.detail = &d.menuData.rows[i]
+			h.chime(d, "tap")
+			h.render(d, now, false)
+		}
+	case "game-run":
+		if d.scene.menu == d.menuData {
+			h.launchMenuGame(d, a.value)
+		}
 	case "rec-cancel", "rec-send":
 		h.recordingControl(d, now, a.kind == "rec-cancel")
 	case "stop":
@@ -277,4 +301,119 @@ func (h *wsHub) clearView(d *wsDevice) {
 	d.appGen++
 	h.dropApp(d)
 	d.drawer, d.view, d.pending, d.card = "", nil, nil, nil
+}
+
+type menuContent struct {
+	games  []tile
+	rows   []menuRow
+	detail *menuRow
+	notice string
+}
+
+func (m *menuContent) scene(drawer string, page int) sceneView {
+	title := "History"
+	switch drawer {
+	case drawerGames:
+		return gamesScene(m.games, page, m.notice)
+	case drawerMemories:
+		title = "Memories"
+	}
+	if m.detail != nil {
+		return menuDetail(title, *m.detail)
+	}
+	return menuList(title, m.notice, m.rows, page)
+}
+
+// The placeholder identifies this request even if another client moves the menu while SQL runs.
+func (h *wsHub) loadMenu(d *wsDevice) {
+	drawer, id, name := d.drawer, d.who.DeviceID, d.cat.Name
+	pending := &menuContent{notice: "Loading…"}
+	d.menuData = pending
+	h.mu.Unlock()
+	menu, err := h.b.readMenu(d.client.ctx, drawer, id, name)
+	h.mu.Lock()
+	if !h.active(d) || d.drawer != drawer || d.menuData != pending {
+		return
+	}
+	if err != nil {
+		menu = menuContent{notice: "Menu unavailable"}
+	}
+	count, pageSize := len(menu.rows), menuRowsPerPage
+	if drawer == drawerGames {
+		count, pageSize = len(menu.games), tilesPerPage
+	}
+	d.menuData = &menu
+	d.menuPage = clampMenuPage(d.menuPage, count, pageSize)
+	h.render(d, time.Now(), false)
+}
+
+func (b *bridge) readMenu(ctx context.Context, drawer, id, name string) (menuContent, error) {
+	var m menuContent
+	switch drawer {
+	case drawerGames:
+		apps, err := b.listApps(ctx, false)
+		m.notice = "No saved games yet"
+		for i, app := range apps {
+			detail := "Saved app"
+			if app["kind"] == "drawing" {
+				detail = "Drawing"
+			}
+			m.games = append(m.games, tile{id: "game-" + strconv.Itoa(i), label: menuClip(str(app["title"]), 13),
+				detail: detail, icon: "games", action: sceneAction{"game-run", str(app["name"])}, colors: navPalette})
+		}
+		if len(m.games) != 0 {
+			m.notice = ""
+		}
+		return m, err
+	case drawerMemories:
+		entries, err := b.memoryEntries(ctx, id)
+		m.notice = "No memories yet"
+		for _, entry := range entries {
+			raw := entry["value"].(json.RawMessage)
+			var value string
+			if len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &value) != nil {
+				value = string(raw)
+			}
+			m.rows = append(m.rows, menuRow{str(entry["key"]), menuText(value)})
+		}
+		return m, err
+	default:
+		page, err := b.readHistoryPage(ctx, id, 20, nil)
+		m.notice = "No messages yet"
+		for _, e := range slices.Backward(page.Messages) {
+			speaker := name
+			switch e.Role {
+			case "user":
+				speaker = "You"
+			case "intercom":
+				speaker = "From " + e.Sender
+			}
+			m.rows = append(m.rows, menuRow{menuText(speaker), menuText(e.Text)})
+		}
+		return m, err
+	}
+}
+
+func menuText(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	return shortText(text, len(text), false)
+}
+
+func (d *wsDevice) canLaunchMenuGame(menu *menuContent) bool {
+	return d.drawer == drawerGames && d.menuData == menu && d.pose.mood == "idle"
+}
+
+func (h *wsHub) launchMenuGame(d *wsDevice, name string) {
+	menu := d.menuData
+	if menu == nil || !d.canLaunchMenuGame(menu) {
+		return
+	}
+	h.chime(d, "tap")
+	h.mu.Unlock()
+	_, err := h.b.runSavedApp(d.client.ctx, d.who.DeviceID, name, menu)
+	h.mu.Lock()
+	if err != nil && h.active(d) && d.canLaunchMenuGame(menu) {
+		menu.notice = "Game unavailable"
+		h.render(d, time.Now(), false)
+	}
 }

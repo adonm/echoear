@@ -96,6 +96,8 @@ func TestHardwareVolumeMenuAndLegacyHeadTouch(t *testing.T) {
 	web.until(t, hasWS("svg", "cat-ring"))
 	tap := func(x, y int) { board.json(t, object{"ev": "tap", "x": x, "y": y}) }
 	tap(180, 300)
+	web.until(t, hasWS("svg", "menu-next"))
+	tap(248, 294)
 	web.until(t, hasWS("svg", "Auto · 55%"))
 	tap(245, 130)
 	drawer := string(web.until(t, hasWS("svg", "vol-auto")).data)

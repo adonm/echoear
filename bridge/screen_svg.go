@@ -32,6 +32,9 @@ var uiIcons = map[string]string{
 	"plus":     "M4 12h16M12 4v16",
 	"minus":    "M4 12h16",
 	"call":     "M5 4l4-1 3 5-3 3q2 4 6 6l3-3 5 3-1 4q-1 2-5 1Q6 19 3 8q-1-3 2-4z",
+	"games":    "M7 6h10q3 0 4 4l1 6q0 4-4 2l-3-3H9l-3 3q-4 2-4-2l1-6q1-4 4-4zm1 2v5m-2-2.5h4m5 .5h.1m3-2h.1",
+	"history":  "M3 10a9 9 0 1 1 1 7M3 4v6h6m3-3v6l4 2",
+	"memories": "M12 20 4 12a5 5 0 0 1 8-6 5 5 0 0 1 8 6z",
 }
 
 type bounds struct{ x, y, w, h int }
@@ -69,6 +72,7 @@ func (s *sceneView) control(b bounds, t tile) {
 			size = 15
 			text = truncate(text, 11)
 		}
+		size = fitLabel(text, size, w-10)
 	} else if icon == "plus" || icon == "minus" {
 		is, ix, iy = 30, x+w/2-15, y+h/2-15
 	} else if icon != "" {
@@ -109,34 +113,46 @@ func menuHeader(title string) sceneView {
 
 func menuScene(title string) sceneView {
 	s := menuHeader(title)
-	s.control(bounds{120, 292, 120, 46}, actionTile("menu-back", "Back", "back", navPalette))
+	s.menuNav(0, 0, tilesPerPage)
 	return s
 }
 
-const tilesPerPage = 4
+const (
+	tilesPerPage    = 4
+	menuRowsPerPage = 3
+	drawerMenu      = "menu"
+	drawerGames     = "games"
+	drawerMemories  = "memories"
+	drawerHistory   = "history"
+)
 
-func clampTilePage(page, count int) int {
-	return min(max(page, 0), (max(count, 1)-1)/tilesPerPage)
+func clampMenuPage(page, count, pageSize int) int {
+	return min(max(page, 0), (max(count, 1)-1)/pageSize)
+}
+
+func (s *sceneView) menuNav(page, count, pageSize int) {
+	if count <= pageSize {
+		s.control(bounds{120, 292, 120, 46}, actionTile("menu-back", "Back", "back", navPalette))
+		return
+	}
+	// The renderer expands hitboxes by 8 units on each side.
+	if page > 0 {
+		s.control(bounds{88, 276, 49, 42}, tile{id: "menu-prev", label: "Prev", action: sceneAction{"menu-page", strconv.Itoa(page - 1)}, colors: navPalette})
+	}
+	s.control(bounds{154, 276, 52, 42}, actionTile("menu-back", "Back", "", navPalette))
+	if (page+1)*pageSize < count {
+		s.control(bounds{223, 276, 49, 42}, tile{id: "menu-next", label: "Next", action: sceneAction{"menu-page", strconv.Itoa(page + 1)}, colors: navPalette})
+	}
 }
 
 func tileGrid(title string, choices []tile, page int) sceneView {
-	page = clampTilePage(page, len(choices))
+	page = clampMenuPage(page, len(choices), tilesPerPage)
 	start, end := page*tilesPerPage, min(len(choices), (page+1)*tilesPerPage)
 	s := menuHeader(title)
 	for i, choice := range choices[start:end] {
 		s.control(bounds{57 + 132*(i%2), 86 + 95*(i/2), 114, 78}, choice)
 	}
-	if len(choices) <= tilesPerPage {
-		s.control(bounds{120, 292, 120, 46}, actionTile("menu-back", "Back", "back", navPalette))
-	} else {
-		if start > 0 {
-			s.control(bounds{84, 276, 49, 42}, tile{id: "menu-prev", label: "Prev", action: sceneAction{"menu-page", "-1"}, colors: navPalette})
-		}
-		s.control(bounds{151, 276, 58, 42}, actionTile("menu-back", "Back", "", navPalette))
-		if end < len(choices) {
-			s.control(bounds{227, 276, 49, 42}, tile{id: "menu-next", label: "Next", action: sceneAction{"menu-page", "1"}, colors: navPalette})
-		}
-	}
+	s.menuNav(page, len(choices), tilesPerPage)
 	return s
 }
 
@@ -144,18 +160,82 @@ func menuHome(voice string, auto bool, level int, scoped, calling bool, page int
 	link := func(id, label, detail, icon string, colors palette) tile {
 		return tile{id: "menu-" + id, label: label, detail: detail, icon: icon, colors: colors, action: sceneAction{"menu-open", id}}
 	}
-	choices := []tile{
-		link("intercom", "Voice Note", "", "intercom", palette{"#372530", "#FFADAC"}),
-		link("volume", "Volume", volumeLabel(auto, level), "volume", volumePalette),
-		link("voice", "Voice", voiceName(voice), "voice", voicePalette),
-	}
+	var choices []tile
 	if calling {
 		choices = append(choices, link("call", "Call", "", "call", palette{"#193833", "#80F1C5"}))
 	}
+	choices = append(choices, link("intercom", "Talk to…", "", "intercom", palette{"#372530", "#FFADAC"}))
+	if !scoped {
+		choices = append(choices, link(drawerGames, "Games", "", "games", palette{"#342943", "#FFD68B"}))
+	}
+	choices = append(choices, link(drawerHistory, "History", "", "history", volumePalette))
+	if !scoped {
+		choices = append(choices, link(drawerMemories, "Memories", "", "memories", palette{"#372530", "#FFADAC"}))
+	}
+	choices = append(choices, link("voice", "Voice", voiceName(voice), "voice", voicePalette),
+		link("volume", "Volume", volumeLabel(auto, level), "volume", volumePalette))
 	if !scoped {
 		choices = append(choices, link("stats", "Stats", "", "stats", palette{"#193833", "#80F1C5"}))
 	}
 	return tileGrid("Menu", choices, page)
+}
+
+type menuRow struct{ label, text string }
+
+func menuClip(text string, width int) string {
+	if clipped := truncate(text, width); len(clipped) != len(text) {
+		return truncate(clipped, width-1) + "…"
+	}
+	return text
+}
+
+func menuEmpty(s *sceneView, text string) {
+	s.art += svgLabel(180, 170, 18, text, menuMuted)
+}
+
+func gamesScene(games []tile, page int, notice string) sceneView {
+	title := "Games"
+	if len(games) != 0 && notice != "" {
+		title = notice
+	}
+	s := tileGrid(title, games, page)
+	if len(games) == 0 {
+		menuEmpty(&s, notice)
+	}
+	return s
+}
+
+func menuList(title, empty string, rows []menuRow, page int) sceneView {
+	s := menuHeader(title)
+	page = clampMenuPage(page, len(rows), menuRowsPerPage)
+	start, end := page*menuRowsPerPage, min(len(rows), (page+1)*menuRowsPerPage)
+	for i, row := range rows[start:end] {
+		y := 85 + i*60
+		index := strconv.Itoa(start + i)
+		label, preview := menuClip(row.label, 30), menuClip(row.text, 29)
+		s.button("menu-row-"+index, label, sceneAction{"menu-detail", index}, 52, y, 256, 43,
+			svgRect(52, y, 256, 43, 21, navPalette.bg, "#526079", 2)+
+				svgLabel(180, y+18, fitLabel(label, 17, 232), label, menuInk)+
+				svgText(180, y+35, 14, preview, menuMuted, `font-family="monospace"`))
+	}
+	if len(rows) == 0 {
+		menuEmpty(&s, empty)
+	}
+	s.menuNav(page, len(rows), menuRowsPerPage)
+	return s
+}
+
+func menuDetail(title string, row menuRow) sceneView {
+	s := menuHeader(title)
+	label := menuClip(row.label, 32)
+	s.art += svgRect(48, 85, 264, 178, 22, navPalette.bg, "#526079", 2) +
+		svgLabel(180, 111, fitLabel(label, 21, 232), label, menuInk)
+	for i, line := range wrapCardLines(row.text, 25, 8) {
+		s.art += svgText(180, 134+i*17, 15, line, menuInk, `font-family="monospace"`)
+	}
+	s.control(bounds{92, 276, 79, 42}, actionTile("menu-back", "Back", "back", navPalette))
+	s.control(bounds{189, 276, 79, 42}, actionTile("cat", "Cat", "", navPalette))
+	return s
 }
 
 func volumeScene(auto bool, level int) sceneView {
@@ -192,7 +272,7 @@ type menuPeer struct {
 }
 
 func peerScene(peers []menuPeer, page int, calling bool) sceneView {
-	title, prefix, action := "Voice Note", "intercom", "reply"
+	title, prefix, action := "Talk to…", "intercom", "reply"
 	if calling {
 		title, prefix, action = "Call", "call", "call-peer"
 	}

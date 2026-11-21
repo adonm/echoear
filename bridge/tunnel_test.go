@@ -291,8 +291,10 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	conn.until(t, hasWS("svg", "cat-ring"))
 	conn.json(t, object{"ev": "tap", "x": 140, "y": 313})
 	menu := conn.until(t, hasWS("svg", "menu-intercom"))
-	if bytes.Contains(menu.data, []byte("menu-stats")) {
-		t.Fatal("scoped SVG offers host diagnostics")
+	for _, id := range []string{"menu-stats", "menu-games", "menu-memories", "menu-next"} {
+		if bytes.Contains(menu.data, []byte(id)) {
+			t.Fatalf("scoped SVG offers unexpected %s", id)
+		}
 	}
 	conn.json(t, object{"ev": "tap", "x": 115, "y": 130})
 	conn.until(t, hasWS("svg", "intercom-echoear-private"))

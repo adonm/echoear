@@ -83,15 +83,32 @@ func color(v any) string {
 }
 
 func cardLines(text string) []string {
+	return wrapCardLines(text, 27, 3)
+}
+
+func wrapCardLines(text string, width, count int) []string {
 	var lines []string
 	line := ""
-	for _, word := range strings.Fields(text) {
+words:
+	for word := range strings.FieldsSeq(text) {
 		for word != "" {
-			n := 27 - runeLen(line)
+			n := width - runeLen(line)
 			if line != "" {
 				n--
 				if runeLen(word) > n {
 					lines = append(lines, line)
+					if len(lines) == count {
+						last := &lines[count-1]
+						if runeLen(*last) == width {
+							if i := strings.LastIndexByte(*last, ' '); i >= 0 {
+								*last = (*last)[:i]
+							} else {
+								*last = truncate(*last, width-1)
+							}
+						}
+						*last += "…"
+						break words
+					}
 					line = ""
 					continue
 				}
@@ -102,19 +119,8 @@ func cardLines(text string) []string {
 			word = word[len(chunk):]
 		}
 	}
-	if line != "" {
+	if len(lines) < count && line != "" {
 		lines = append(lines, line)
-	}
-	if len(lines) > 3 {
-		lines = lines[:3]
-		if runeLen(lines[2]) >= 27 {
-			if i := strings.LastIndexByte(lines[2], ' '); i >= 0 {
-				lines[2] = lines[2][:i]
-			} else {
-				lines[2] = truncate(lines[2], 26)
-			}
-		}
-		lines[2] += "…"
 	}
 	return lines
 }

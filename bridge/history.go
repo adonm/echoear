@@ -199,13 +199,17 @@ func (b *bridge) messages(r *http.Request, id string) (any, error) {
 		}
 		before = &historyCursor{TS: ts, ID: key}
 	}
+	return b.readHistoryPage(r.Context(), id, limit, before)
+}
+
+func (b *bridge) readHistoryPage(ctx context.Context, id string, limit int, before *historyCursor) (historyPage, error) {
 	out := historyPage{DeviceID: id, Messages: []chatEntry{}}
 	if b.history == nil {
 		return out, nil
 	}
-	entries, err := b.history.readBefore(r.Context(), id, limit+1, before)
+	entries, err := b.history.readBefore(ctx, id, limit+1, before)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	out.HasMore = len(entries) > limit
 	if out.HasMore {

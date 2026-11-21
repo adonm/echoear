@@ -167,6 +167,8 @@ func TestMenuVoicePicker(t *testing.T) {
 	web := testConnectWS(t, base, "unit", true)
 	web.watch(t, id)
 	web.json(t, object{"ev": "tap", "id": "menu"})
+	web.until(t, hasWS("svg", "menu-next"))
+	web.json(t, object{"ev": "tap", "id": "menu-next"})
 	web.until(t, hasWS("svg", "Heart"))
 	web.json(t, object{"ev": "tap", "id": "menu-voice"})
 	web.until(t, hasWS("svg", "voice-george"))

@@ -231,8 +231,10 @@ func TestWSPagedVoiceMenu(t *testing.T) {
 	tapCallControl(t, cake, "menu")
 	home := cake.until(t, hasWS("svg", "menu-call"))
 	if !hasWS("svg", "menu-intercom")(home) {
-		t.Fatal("main menu must offer both Call and Voice Note")
+		t.Fatal("main menu must offer both Call and Talk to…")
 	}
+	tapCallControl(t, cake, "menu-next")
+	cake.until(t, hasWS("svg", "menu-voice"))
 	tapCallControl(t, cake, "menu-voice")
 	for i, voice := range voiceCatalog {
 		if i%tilesPerPage != 0 {

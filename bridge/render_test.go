@@ -93,6 +93,63 @@ func TestCallScreenTouchTargets(t *testing.T) {
 	}
 }
 
+func TestMenuScreenTouchTargets(t *testing.T) {
+	var games []tile
+	var rows []menuRow
+	for i := range 10 {
+		games = append(games, tile{id: fmt.Sprintf("game-%d", i), label: "Wide WIDE game", icon: "games", detail: "Saved app", colors: navPalette})
+		rows = append(rows, menuRow{"A long heading for this detail card", strings.Repeat("Wide W with some text ", 50)})
+	}
+	for name, scene := range map[string]sceneView{
+		"menu-first":     menuHome(heartVoice, true, 55, false, true, 0),
+		"menu-last":      menuHome(heartVoice, true, 55, false, true, 1),
+		"games":          gamesScene(games, 1, ""),
+		"memories":       menuList("Memories", "", rows, 1),
+		"history":        menuList("History", "", rows, 1),
+		"memory-detail":  menuDetail("Memories", rows[0]),
+		"history-detail": menuDetail("History", rows[0]),
+	} {
+		for _, geom := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
+			t.Run(name+"/"+strconv.Itoa(geom.width), func(t *testing.T) {
+				s, err := buildScreen(scene.svg(""), false, geom)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(s.hits) != len(scene.actions) {
+					t.Fatalf("wrong controls: %v", s.hits)
+				}
+				if warnings := layoutWarnings(s.hits, geom.shape == "round"); len(warnings) != 0 {
+					t.Error(warnings)
+				}
+				side := min(geom.width, geom.height)
+				px := func(x int) int { return (geom.width-side)/2 + x*side/360 }
+				py := func(y int) int { return (geom.height-side)/2 + y*side/360 }
+				for i, hit := range s.hits {
+					for _, x := range []int{hit.x1, hit.x2} {
+						for _, y := range []int{hit.y1, hit.y2} {
+							if !inScreenCircle(x, y) || px(x) < 0 || px(x) >= geom.width || py(y) < 0 || py(y) >= geom.height {
+								t.Errorf("%s clips the display at %d,%d", hit.id, x, y)
+							}
+						}
+					}
+					if px(hit.x2)-px(hit.x1) < 40 || py(hit.y2)-py(hit.y1) < 30 {
+						t.Errorf("undersized touch target: %v", hit)
+					}
+					for _, other := range s.hits[:i] {
+						if image.Rect(hit.x1, hit.y1, hit.x2+1, hit.y2+1).Overlaps(image.Rect(other.x1, other.y1, other.x2+1, other.y2+1)) {
+							t.Errorf("overlapping touch targets: %v and %v", hit, other)
+						}
+					}
+					x, y := geom.inverseTap(px((hit.x1+hit.x2)/2), py((hit.y1+hit.y2)/2))
+					if hitID(s.hits, x, y) != hit.id {
+						t.Errorf("%s cannot be hit at its panel center", hit.id)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSystemScreenPixelRegions(t *testing.T) {
 	type region struct {
 		name       string
@@ -134,24 +191,48 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 	menu := func(name string, s sceneView, regions ...region) {
 		regions = append(regions, reg("title", menuBG, 95, 51, 170, 29, 42, 14))
 		if s.actions["menu-prev"].kind != "" || s.actions["menu-next"].kind != "" {
-			regions = append(regions, reg("back label", "#262E43", 149, 295, 62, 22, 23, 8))
+			regions = append(regions, reg("back label", "#262E43", 149, 287, 62, 22, 23, 8))
 		} else {
 			regions = append(regions, reg("back icon", "#262E43", 148, 306, 22, 18, 8, 8),
 				reg("back label", "#262E43", 171, 305, 49, 22, 23, 8))
 		}
 		scenes = append(scenes, scene{name, s.svg(""), regions})
 	}
-	menu("home", menuHome(heartVoice, true, 55, false, false, 0),
+	menu("home page 1", menuHome(heartVoice, true, 55, false, false, 0),
 		reg("intercom icon", "#372530", 103, 98, 22, 21, 13, 13),
 		reg("intercom label", "#372530", 67, 126, 94, 22, 44, 9),
+		reg("games icon", "#342943", 235, 98, 22, 21, 13, 8),
+		reg("games label", "#342943", 199, 126, 94, 22, 40, 9),
+		reg("history label", "#203144", 67, 221, 94, 22, 40, 9),
+		reg("memories label", "#372530", 199, 221, 94, 22, 50, 9))
+	menu("home page 2", menuHome(heartVoice, true, 55, false, false, 1),
 		reg("volume icon", "#203144", 235, 94, 22, 21, 13, 10),
 		reg("volume label", "#203144", 199, 118, 94, 18, 45, 9),
 		reg("volume subtitle", "#203144", 199, 140, 94, 15, 32, 6),
-		reg("voice icon", "#322741", 104, 189, 22, 21, 13, 8),
-		reg("voice label", "#322741", 68, 213, 94, 18, 34, 9),
-		reg("voice subtitle", "#322741", 68, 235, 94, 15, 22, 6),
-		reg("stats icon", "#193833", 234, 193, 22, 21, 13, 10),
-		reg("stats label", "#193833", 198, 221, 94, 22, 32, 9))
+		reg("voice icon", "#322741", 104, 94, 22, 21, 13, 8),
+		reg("voice label", "#322741", 68, 118, 94, 18, 34, 9),
+		reg("voice subtitle", "#322741", 68, 140, 94, 15, 22, 6),
+		reg("stats icon", "#193833", 102, 193, 22, 21, 13, 10),
+		reg("stats label", "#193833", 66, 221, 94, 22, 32, 9))
+	game := tile{id: "game-0", label: "Puzzle", detail: "Saved app", icon: "games", colors: navPalette}
+	menu("games", gamesScene([]tile{game}, 0, ""),
+		reg("game icon", navPalette.bg, 103, 94, 22, 21, 13, 8),
+		reg("game title", navPalette.bg, 67, 118, 94, 18, 35, 9),
+		reg("game subtitle", navPalette.bg, 67, 140, 94, 15, 45, 6))
+	listRows := []menuRow{{"favorite-toy", "A surprisingly tiny blue kite"}, {"tricks", "Ring the bell"}, {"name", "Cake"}}
+	for _, title := range []string{"Memories", "History"} {
+		menu(title, menuList(title, "", listRows, 0),
+			reg("row title", navPalette.bg, 105, 91, 150, 18, 60, 8),
+			reg("row preview", navPalette.bg, 65, 111, 230, 18, 170, 8),
+			reg("last row title", navPalette.bg, 120, 211, 120, 18, 30, 8))
+	}
+	detail := menuDetail("Memories", listRows[0])
+	scenes = append(scenes, scene{"detail", detail.svg(""), []region{
+		reg("detail heading", navPalette.bg, 85, 92, 190, 24, 94, 12),
+		reg("detail body", navPalette.bg, 65, 121, 230, 34, 140, 19),
+		reg("detail back", navPalette.bg, 96, 287, 63, 28, 42, 8),
+		reg("detail cat", navPalette.bg, 204, 287, 56, 28, 18, 10),
+	}})
 	menu("volume", volumeScene(true, 55),
 		reg("level", menuBG, 76, 98, 208, 31, 105, 17),
 		reg("volume track", menuBG, 70, 144, 220, 15, 185, 7),

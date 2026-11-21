@@ -325,6 +325,8 @@ func TestWSMirrorAndControls(t *testing.T) {
 	dev.json(t, object{"ev": "status", "battery_pct": 25, "battery_mv": 3530, "charging": false, "volume": 80, "rssi": -45})
 	web.until(t, hasWS("svg", "#39D1A0"))
 	web.json(t, object{"ev": "tap", "x": 180, "y": 300})
+	web.until(t, hasWS("svg", "menu-next"))
+	web.json(t, object{"ev": "tap", "id": "menu-next"})
 	if f := web.until(t, hasWS("svg", "menu-stats")); !hasWS("svg", "menu-voice")(f) {
 		t.Fatal("menu did not mirror voice controls")
 	}

@@ -17,6 +17,7 @@ type sceneView struct {
 	duringTurn     bool // Timer notices may be dismissed even while speaking.
 	intercom       *intercomCard
 	call           uint32
+	menu           *menuContent
 }
 
 func (s *sceneView) hasIntercom() bool { return s != nil && s.intercom != nil }

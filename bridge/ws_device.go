@@ -105,6 +105,8 @@ type wsDevice struct {
 	card        *sceneView
 	drawer      string
 	menuPage    int
+	homePage    int
+	menuData    *menuContent
 	statsAt     time.Time
 	rev         uint64
 	pose        catPose
@@ -607,6 +609,11 @@ type renderRequest struct {
 }
 
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
+	switch d.drawer {
+	case drawerGames, drawerMemories, drawerHistory:
+	default:
+		d.menuData = nil
+	}
 	mood := "idle"
 	switch {
 	case d.callState == callActive:
@@ -645,6 +652,9 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		}
 	case d.drawer != "" && mood == "idle":
 		switch d.drawer {
+		case drawerGames, drawerMemories, drawerHistory:
+			r.view = d.menuData.scene(d.drawer, d.menuPage)
+			r.view.menu = d.menuData
 		case "volume":
 			r.view = volumeScene(d.autoVol, d.vol)
 		case "voice":
@@ -661,7 +671,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 			if !calling {
 				choices = append([]menuPeer{{"all", "Everyone", "#FFADAC", "#FFD68B"}}, choices...)
 			}
-			d.menuPage = clampTilePage(d.menuPage, len(choices))
+			d.menuPage = clampMenuPage(d.menuPage, len(choices), tilesPerPage)
 			r.view = peerScene(choices, d.menuPage, calling)
 		case "stats":
 			if d.client.scope == nil {

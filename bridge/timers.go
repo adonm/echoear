@@ -400,7 +400,7 @@ func (b *bridge) deliverTimer(ctx context.Context, t savedTimer) {
 	if d != nil && h.active(d) && d.callState == callNone {
 		if t.AppName != "" {
 			defer func() {
-				if _, err := b.runSavedApp(ctx, t.DeviceID, t.AppName); err != nil && ctx.Err() == nil {
+				if _, err := b.runSavedApp(ctx, t.DeviceID, t.AppName, nil); err != nil && ctx.Err() == nil {
 					log.Printf("EchoEar could not launch timer app %q: %v", t.AppName, err)
 				}
 			}()

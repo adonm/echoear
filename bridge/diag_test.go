@@ -150,8 +150,10 @@ func TestDiagnosticsEndpointAndBoardHUD(t *testing.T) {
 	view.until(t, hasWS("svg", "cat-ring"))
 	tap := func(x, y int) { board.json(t, object{"ev": "tap", "x": x, "y": y}) }
 	tap(160, 210) // Menu after the 360-square view is letterboxed into 320×240.
+	view.until(t, hasWS("svg", "menu-next"))
+	tap(206, 197)
 	view.until(t, hasWS("svg", "menu-stats"))
-	tap(207, 146)
+	tap(116, 146)
 	hud := view.until(t, hasWS("svg", "CPU 27%"))
 	if !strings.Contains(string(hud.data), "Cake · 0.8.4 · esp-box-3") || !strings.Contains(string(hud.data), "USB") {
 		t.Fatal("missing identity/power in HUD")
@@ -160,7 +162,7 @@ func TestDiagnosticsEndpointAndBoardHUD(t *testing.T) {
 	view.until(t, hasWS("svg", "CPU 39%"))
 	tap(160, 210)
 	view.until(t, hasWS("svg", "menu-stats"))
-	tap(160, 210)
+	tap(160, 197)
 	view.until(t, hasWS("svg", "cat-ring"))
 }
 

@@ -132,7 +132,7 @@ func (b *bridge) appAPI(w http.ResponseWriter, r *http.Request, path string) (an
 		if err != nil {
 			return nil, err
 		}
-		return b.runSavedApp(ctx, str(data["device_id"]), str(data["name"]))
+		return b.runSavedApp(ctx, str(data["device_id"]), str(data["name"]), nil)
 	case r.Method == http.MethodDelete:
 		name := strings.TrimPrefix(path, "/api/apps/")
 		_, err := b.deleteSavedApp(ctx, name)
@@ -593,11 +593,15 @@ func appDevices(raw any) ([]string, error) {
 	return ids, nil
 }
 
-func (b *bridge) runSavedApp(ctx context.Context, id, name string) (object, error) {
-	return b.runApp(ctx, object{"devices": id, "load": name})
+func (b *bridge) runSavedApp(ctx context.Context, id, name string, menu *menuContent) (object, error) {
+	return b.launchApp(ctx, object{"devices": id, "load": name}, menu)
 }
 
 func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
+	return b.launchApp(ctx, args, nil)
+}
+
+func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) (object, error) {
 	if name, present := args["delete_saved"]; present {
 		if len(args) != 1 {
 			return nil, problem(400, "Use delete_saved without other app fields")
@@ -635,6 +639,10 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		if d == nil || !h.active(d) {
 			h.mu.Unlock()
 			return nil, problem(409, "Device is not connected: "+id)
+		}
+		if menu != nil && !d.canLaunchMenuGame(menu) {
+			h.mu.Unlock()
+			return nil, problem(409, "Games menu changed")
 		}
 		devices = append(devices, d)
 		gens = append(gens, d.appGen)
@@ -773,6 +781,10 @@ func (b *bridge) runApp(ctx context.Context, args object) (object, error) {
 		if d.appGen != gens[i] {
 			h.mu.Unlock()
 			return nil, problem(409, "Device view changed: "+d.who.DeviceID)
+		}
+		if menu != nil && !d.canLaunchMenuGame(menu) {
+			h.mu.Unlock()
+			return nil, problem(409, "Games menu changed")
 		}
 	}
 	if save != "" {

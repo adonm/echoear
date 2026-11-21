@@ -569,6 +569,18 @@ type svgTextStyle [4]string
 
 var svgTextAttrs = [...]string{"font-size", "font-weight", "font-family", "text-anchor"}
 
+func fitLabel(text string, size, width int) int {
+	var buf sfnt.Buffer
+	ppem := fixed.I(size)
+	var advance fixed.Int26_6
+	for _, r := range text {
+		glyph, _ := boldSVGFont.GlyphIndex(&buf, r)
+		w, _ := boldSVGFont.GlyphAdvance(&buf, glyph, ppem, font.HintingNone)
+		advance += w
+	}
+	return min(size, size*width/max(1, advance.Ceil()))
+}
+
 func outlineText(n *svgNode, style svgTextStyle) (svgBounds, bool) {
 	f := regularSVGFont
 	size, weight, family, anchor := svgNum(style[0]), style[1], style[2], style[3]

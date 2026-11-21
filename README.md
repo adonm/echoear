@@ -86,15 +86,18 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
   automatically, or 3 seconds once you've spoken for 4 seconds. Tap **Send**
   to finish early, **Cancel** to discard, or **Stop** to interrupt a reply.
 - The display dims after 120 seconds idle. Tap the touchscreen to wake it.
-- The on-device **Menu** has large, high-contrast buttons with icons and labels:
-  **Voice Note** opens intercom, **Volume** sets the level or enables **Auto**,
+- The on-device **Menu** and `/app` live screen share the same touch controls.
+  **Games** launches saved apps, **Memories** shows the cat's saved memories,
+  and **History** shows the last 20 messages, newest first. Tap a row for details.
+  **Talk to…** opens intercom, **Volume** sets the level or enables **Auto**,
   **Voice** pages through all nine voices, and **Stats** opens the diagnostics HUD.
   Auto-volume estimates ambient noise from recordings and adjusts the DAC in RAM
-  without writing to flash. **Cat** closes a diagram.
+  without writing to flash. **Cat** returns to the face. Scoped tunnels don't
+  expose Games, Memories, or Stats.
 - Say “Tell Mint dinner is ready,” “Intercom Cake, come play,” or “Tell everyone
   good morning.” The bridge bypasses OpenCode and relays a chime, sender announcement, and normalized voice.
 - Tap **Reply to \<Sender\>** on a message card or choose a peer in
-  **Menu → Voice Note** to record directly to that cat.
+  **Menu → Talk to…** to record directly to that cat.
 - Tap **Call** on an incoming Intercom card, pick a peer in **Menu → Call**, or
   say “call \<name\>.” Both cats must be online and call-capable. The recipient
   can answer or decline; either side can mute its mic or hang up. Unlike a
