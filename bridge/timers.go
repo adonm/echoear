@@ -208,11 +208,6 @@ func parseTimer(args object, now time.Time) (savedTimer, error) {
 }
 
 func (m *timerManager) set(ctx context.Context, t savedTimer) error {
-	if t.AppName != "" {
-		if _, err := m.b.loadApp(ctx, t.AppName); err != nil {
-			return err
-		}
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -224,8 +219,9 @@ func (m *timerManager) set(ctx context.Context, t savedTimer) error {
 	notes, _ := json.Marshal(t.Notes)
 	result, err := m.b.db.ExecContext(ctx, `INSERT INTO timers (`+timerColumns+`)
 		SELECT ?,?,?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM timers WHERE device_id=?) < 8
-		AND (SELECT count(*) FROM timers) < 32`, t.ID, t.DeviceID, t.Label, t.Say, t.Chime, t.WakeAgent,
-		t.CreatedAt.Format(time.RFC3339Nano), t.FireAt.Format(time.RFC3339Nano), string(notes), t.AppName, t.DeviceID)
+		AND (SELECT count(*) FROM timers) < 32 AND (?='' OR EXISTS(SELECT 1 FROM apps WHERE name=?))`,
+		t.ID, t.DeviceID, t.Label, t.Say, t.Chime, t.WakeAgent, t.CreatedAt.Format(time.RFC3339Nano), t.FireAt.Format(time.RFC3339Nano),
+		string(notes), t.AppName, t.DeviceID, t.AppName, t.AppName)
 	if err != nil {
 		return problem(502, "Cannot save timer")
 	}
@@ -234,6 +230,11 @@ func (m *timerManager) set(ctx context.Context, t savedTimer) error {
 		return problem(502, "Cannot save timer")
 	}
 	if n == 0 {
+		if t.AppName != "" {
+			if _, err := m.b.loadApp(ctx, t.AppName); err != nil {
+				return err
+			}
+		}
 		return problem(409, "Timer limit reached (8 per device, 32 total)")
 	}
 	m.armLocked(t.ID, time.Until(t.FireAt))

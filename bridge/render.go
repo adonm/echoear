@@ -64,6 +64,7 @@ type hitBox struct {
 type svgScreen struct {
 	raw, source string
 	hits        []hitBox
+	hitWarnings []string
 	fb          []uint16
 	render      time.Duration
 }
@@ -71,10 +72,11 @@ type svgScreen struct {
 // A prepared scene owns a normalized SVG tree and its topmost-first controls.
 // Neither backend mutates it.
 type preparedScene struct {
-	root       *svgNode
-	svg        string
-	hits       []hitBox
-	background imagecolor.Color
+	root        *svgNode
+	svg         string
+	hits        []hitBox
+	hitWarnings []string
+	background  imagecolor.Color
 }
 
 func (s preparedScene) toBrowserSVG() string { return s.svg }
@@ -151,7 +153,7 @@ func buildScreenWithPhotos(raw string, exit bool, geometry screenGeometry, looku
 	if err != nil {
 		return svgScreen{}, err
 	}
-	screen := svgScreen{raw: raw, source: scene.toBrowserSVG(), hits: scene.hits}
+	screen := svgScreen{raw: raw, source: scene.toBrowserSVG(), hits: scene.hits, hitWarnings: scene.hitWarnings}
 	if geometry.width != 0 {
 		screen.fb, err = scene.toRGB565(geometry, lookup)
 	}
@@ -666,6 +668,7 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 		return preparedScene{}, err
 	}
 	var hits []hitBox
+	var hitWarnings []string
 	hasExit := false
 	var walk func(*svgNode, rasterx.Matrix2D, svgTextStyle, bool, int) error
 	walk = func(n *svgNode, m rasterx.Matrix2D, style svgTextStyle, defs bool, pad int) error {
@@ -723,6 +726,9 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 			}
 		}
 		if n.attr["data-echoear-hit"] == "" {
+			if id != "" && !defs && !ok {
+				hitWarnings = append(hitWarnings, fmt.Sprintf(`control %q has data-id but no measurable bounds — add data-hit="x,y,w,h" or put data-id on a rect/circle/text`, id))
+			}
 			delete(n.attr, "data-id")
 		}
 		for _, child := range n.children {
@@ -748,7 +754,7 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 		}
 	}
 	slices.Reverse(hits)
-	return preparedScene{root, svgString(root), hits, background}, nil
+	return preparedScene{root: root, svg: svgString(root), hits: hits, hitWarnings: hitWarnings, background: background}, nil
 }
 
 // A leading, solid full-viewBox rectangle is the SVG canvas background.

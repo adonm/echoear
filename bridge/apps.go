@@ -35,18 +35,21 @@ func (b *bridge) savedAppState(ctx context.Context, name string) (object, error)
 	if b.db == nil {
 		return nil, problem(503, "Apps unavailable")
 	}
-	var title, code, svg, state string
+	var a savedApp
+	var state string
 	var updatedAt int64
-	err := b.db.QueryRowContext(ctx, `SELECT title,code,svg,updated_at,
+	err := b.db.QueryRowContext(ctx, `SELECT title,kind,code,svg,tick_ms,max_ticks,updated_at,
 		(SELECT json_group_object(key,json(value_json)) FROM memory WHERE scope=?)
-		FROM apps WHERE name=?`, "app:"+name, name).Scan(&title, &code, &svg, &updatedAt, &state)
+		FROM apps WHERE name=?`, "app:"+name, name).
+		Scan(&a.Title, &a.Kind, &a.Code, &a.SVG, &a.TickMS, &a.MaxTicks, &updatedAt, &state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, problem(404, "saved app not found")
 	}
 	if err != nil {
 		return nil, problem(502, "Cannot read saved app")
 	}
-	return object{"name": name, "title": title, "code": code, "svg": svg, "state": json.RawMessage(state), "updated_at": updatedAt}, nil
+	return object{"name": name, "title": a.Title, "kind": a.Kind, "code": a.Code, "svg": a.SVG,
+		"tick_ms": a.TickMS, "max_ticks": a.MaxTicks, "state": json.RawMessage(state), "updated_at": updatedAt}, nil
 }
 
 func (b *bridge) loadApp(ctx context.Context, name string) (savedApp, error) {
@@ -207,6 +210,19 @@ func (b *bridge) editSavedApps(ctx context.Context, names []string, renames []ap
 	if b.db == nil {
 		return nil, nil, problem(503, "Apps unavailable")
 	}
+	deleted, renamed, err := b.transactSavedAppEdits(ctx, names, renames)
+	if err == nil && len(deleted)+len(renamed) != 0 {
+		b.appsChanged()
+	}
+	return deleted, renamed, err
+}
+
+func (b *bridge) transactSavedAppEdits(ctx context.Context, names []string, renames []appRename) ([]string, []object, error) {
+	// Keep the running-app check and commit atomic with device app installation.
+	if b.ws != nil {
+		b.ws.mu.Lock()
+		defer b.ws.mu.Unlock()
+	}
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, errSavedAppEdit
@@ -225,13 +241,23 @@ func (b *bridge) editSavedApps(ctx context.Context, names []string, renames []ap
 		if n == 0 {
 			continue
 		}
+		if b.ws.appRunning(name) {
+			return nil, nil, problem(409, "saved app is running: "+name)
+		}
+		var armed bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM timers WHERE app_name=?)", name).Scan(&armed); err != nil {
+			return nil, nil, errSavedAppEdit
+		}
+		if armed {
+			return nil, nil, problem(409, "saved app is used by an armed timer: "+name)
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM memory WHERE scope=?", "app:"+name); err != nil {
 			return nil, nil, errSavedAppEdit
 		}
 		deleted = append(deleted, name)
 	}
 	for _, edit := range renames {
-		result, err := renameSavedApp(ctx, tx, edit)
+		result, err := b.renameSavedApp(ctx, tx, edit)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -240,13 +266,21 @@ func (b *bridge) editSavedApps(ctx context.Context, names []string, renames []ap
 	if err := tx.Commit(); err != nil {
 		return nil, nil, errSavedAppEdit
 	}
-	if len(deleted)+len(renamed) != 0 {
-		b.appsChanged()
-	}
 	return deleted, renamed, nil
 }
 
-func renameSavedApp(ctx context.Context, tx *sql.Tx, edit appRename) (object, error) {
+func (h *wsHub) appRunning(name string) bool {
+	if h != nil {
+		for _, d := range h.devices {
+			if d.app != nil && d.app.spec.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *bridge) renameSavedApp(ctx context.Context, tx *sql.Tx, edit appRename) (object, error) {
 	var title string
 	err := tx.QueryRowContext(ctx, "SELECT title FROM apps WHERE name=?", edit.from).Scan(&title)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -256,6 +290,9 @@ func renameSavedApp(ctx context.Context, tx *sql.Tx, edit appRename) (object, er
 		return nil, errSavedAppEdit
 	}
 	if edit.to != edit.from {
+		if b.ws.appRunning(edit.from) {
+			return nil, problem(409, "saved app is running: "+edit.from)
+		}
 		var appExists, stateExists bool
 		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE name=?),
 			EXISTS(SELECT 1 FROM memory WHERE scope=?)`, edit.to, "app:"+edit.to).Scan(&appExists, &stateExists)
@@ -268,7 +305,13 @@ func renameSavedApp(ctx context.Context, tx *sql.Tx, edit appRename) (object, er
 		if stateExists {
 			return nil, problem(409, "saved app state already exists: "+edit.to)
 		}
+		if b.ws.appRunning(edit.to) {
+			return nil, problem(409, "saved app is running: "+edit.to)
+		}
 		if _, err := tx.ExecContext(ctx, "UPDATE memory SET scope=? WHERE scope=?", "app:"+edit.to, "app:"+edit.from); err != nil {
+			return nil, errSavedAppEdit
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE timers SET app_name=? WHERE app_name=?", edit.to, edit.from); err != nil {
 			return nil, errSavedAppEdit
 		}
 	}
@@ -831,6 +874,7 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		return object{"ok": true, "devices": ids, "title": "", "hit_ids": []string{}}, nil
 	}
 	a := savedApp{SVG: str(args["svg"]), Code: str(args["code"]), Title: shortText(args["title"], 60, false), Author: players[0].name}
+	var loaded string
 	if name, provided := args["load"]; provided {
 		if a.SVG != "" || a.Code != "" {
 			return nil, problem(400, "Use load or svg/code, not both")
@@ -839,6 +883,7 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		if err != nil {
 			return nil, err
 		}
+		loaded = a.Name
 		if title := shortText(args["title"], 60, false); title != "" {
 			a.Title = title
 		}
@@ -933,7 +978,7 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 	seen := map[string]bool{}
 	var warnings []string
 	for _, screen := range screens {
-		for _, warning := range layoutWarnings(screen.hits, round) {
+		for _, warning := range slices.Concat(screen.hitWarnings, layoutWarnings(screen.hits, round)) {
 			if !seen[warning] {
 				seen[warning] = true
 				warnings = append(warnings, warning)
@@ -960,6 +1005,13 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		if menu != nil && !d.canLaunchMenuGame(menu) {
 			h.mu.Unlock()
 			return nil, problem(409, "Games menu changed")
+		}
+	}
+	if loaded == a.Name {
+		// Rendering runs outside the hub lock; the saved slug may have been moved or deleted.
+		if _, err := b.loadApp(ctx, loaded); err != nil {
+			h.mu.Unlock()
+			return nil, err
 		}
 	}
 	if save != "" {

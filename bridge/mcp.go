@@ -187,10 +187,10 @@ var mcpTools = func() []object {
 	rename["anyOf"] = []object{{"required": []string{"to"}}, {"required": []string{"title"}}}
 	jsonObject := object{"type": "object", "additionalProperties": true}
 	return []object{
-		tool("state", "Read keyed device, cat, saved app, timer, and JSON memory snapshots. Use app_name to read one saved app with full code, SVG, and persistent state. With device_id, always includes me.device, me.cat, and me.active_app. Use include for specific slices or recent messages and diagnostics.",
+		tool("state", "Read keyed device, cat, saved app, timer, and JSON memory snapshots. Use app_name to read one saved app's kind, tick settings, full code, SVG, and persistent state. With device_id, always includes me.device, me.cat, and me.active_app. Use include for specific slices or recent messages and diagnostics.",
 			schema(object{"device_id": text, "include": array(enum(stateSlices...)), "memory_scopes": array(text),
 				"app_name": text, "include_code": flag, "messages_limit": object{"type": "integer", "minimum": 1, "maximum": 30, "default": 10}})),
-		tool("patch", "Change device controls, cat appearance, persistent JSON memory, a timer, or saved apps. Memory and saved app batches each commit atomically. Saved app deletes run before renames; missing deletes are ignored. Cat edits default to update; timer creation accepts in_seconds or at.",
+		tool("patch", "Change device controls, cat appearance, persistent JSON memory, a timer, or saved apps. Memory and saved app batches each commit atomically. Saved app deletes run before renames; missing deletes are ignored. Stop running apps before changing or deleting their slugs. Renames update armed timers; cancel them before deleting an app they use. Cat edits default to update; timer creation accepts in_seconds or at.",
 			schema(object{"device_id": text,
 				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": voice}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,

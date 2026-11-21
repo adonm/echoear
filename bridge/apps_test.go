@@ -353,13 +353,24 @@ func TestAppStatePatchAcrossPlayers(t *testing.T) {
 	if a := stateMe(t, base, boardID)["active_app"].(object); a["state"].(object)["color"] != "#00FF00" {
 		t.Fatal(a)
 	}
+	for _, args := range []object{
+		{"rename": []object{{"from": "players", "to": "new-players"}}},
+		{"delete": []string{"players"}},
+	} {
+		if got := toolTest(t, base, "patch", object{"apps": args}, true); got["error"] != "saved app is running: players" {
+			t.Fatal(got)
+		}
+	}
+	if got := toolTest(t, base, "app", object{"delete_saved": "players"}, true); got["error"] != "saved app is running: players" {
+		t.Fatal(got)
+	}
+	toolTest(t, base, "app", object{"devices": webID, "exit": true}, false)
+	web.until(t, hasWS("svg", "cat-ring"))
 	toolTest(t, base, "app", object{"delete_saved": "players"}, false)
 	saved := toolTest(t, base, "state", object{"include": []string{"apps"}}, false)
 	if len(saved["apps"].(object)) != 0 {
 		t.Fatal(saved)
 	}
-	toolTest(t, base, "app", object{"devices": webID, "exit": true}, false)
-	web.until(t, hasWS("svg", "cat-ring"))
 	if stateMe(t, base, boardID)["active_app"] != nil {
 		t.Fatal("exit did not close the shared app")
 	}
@@ -488,6 +499,26 @@ func TestAppLaunchReportsLayoutWarnings(t *testing.T) {
 				t.Fatalf("want %v, got %v", tc.want, out)
 			}
 		})
+	}
+}
+
+func TestAppLaunchWarnsOnDataIDWithoutBounds(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-monsters"
+	dev := testConnectWS(t, base, "unit", false)
+	dev.hello(t, id, "Mint")
+	const warning = `control "m0" has data-id but no measurable bounds — add data-hit="x,y,w,h" or put data-id on a rect/circle/text`
+	for _, hit := range []string{"", ` data-hit="150,150,60,60"`} {
+		code := `function render(){return '<svg><g data-id="m0"` + hit + `><circle cx="180" cy="180" r="30"/></g></svg>';}`
+		out := toolTest(t, base, "app", object{"devices": id, "code": code}, false)
+		hitIDs := out["hit_ids"].([]any)
+		if hit == "" {
+			if got, _ := out["layout_warnings"].([]any); !slices.Equal(got, []any{warning}) || slices.Contains(hitIDs, "m0") {
+				t.Fatal(out)
+			}
+		} else if out["layout_warnings"] != nil || !slices.Contains(hitIDs, "m0") {
+			t.Fatal(out)
+		}
 	}
 }
 

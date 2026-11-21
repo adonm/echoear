@@ -255,7 +255,8 @@ func TestMCPSavedAppReadback(t *testing.T) {
 	b, base := wsHarness(t, nil)
 	const code = "function render(s) {\n  return '<svg><text>'+s.page+'</text></svg>';\n}"
 	const svg = `<svg viewBox="0 0 360 360"><text>My story</text></svg>`
-	if err := b.saveApp(t.Context(), savedApp{Name: "my-story", Title: "My Story", Kind: "app", Code: code, SVG: svg}); err != nil {
+	if err := b.saveApp(t.Context(), savedApp{Name: "my-story", Title: "My Story", Kind: "app", Code: code, SVG: svg,
+		TickMS: 500, MaxTicks: 20}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := toolTest(t, base, "state", object{"app_name": "my-story"}, false)
@@ -272,8 +273,9 @@ func TestMCPSavedAppReadback(t *testing.T) {
 	app := snapshot["app"].(object)
 	wantState := object{"progress": progress, "bookmark": nil}
 	updatedAt, err := app["updated_at"].(json.Number).Int64()
-	if len(snapshot) != 2 || snapshot["now"] == nil || len(app) != 6 || app["name"] != "my-story" ||
-		app["title"] != "My Story" || app["code"] != code || app["svg"] != svg ||
+	if len(snapshot) != 2 || snapshot["now"] == nil || app["name"] != "my-story" ||
+		app["title"] != "My Story" || app["kind"] != "app" || app["code"] != code || app["svg"] != svg ||
+		app["tick_ms"] != json.Number("500") || app["max_ticks"] != json.Number("20") ||
 		!reflect.DeepEqual(app["state"], wantState) || err != nil || updatedAt <= 0 {
 		t.Fatal(snapshot)
 	}
@@ -295,7 +297,13 @@ func TestMCPSavedAppReadback(t *testing.T) {
 }
 
 func TestMCPSavedAppEdits(t *testing.T) {
-	b, base := wsHarness(t, nil)
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.timers = newTimerManager(b)
+		t.Cleanup(b.timers.close)
+	})
+	const id = "echoear-book"
+	dev := testConnectWS(t, base, "unit", false)
+	dev.hello(t, id, "Cake")
 	watcher := testConnectWS(t, base, "unit", false)
 	watcher.json(t, object{"ev": "hello", "role": "web"})
 	watcher.until(t, hasWS("peers", ""))
@@ -322,6 +330,14 @@ func TestMCPSavedAppEdits(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	timer := patchTimerTest(t, base, object{"op": "set", "device_id": id, "in_seconds": 600, "app": "book"}, false)
+	assertTimerApp := func(name string) {
+		t.Helper()
+		timers := toolTest(t, base, "state", object{"include": []string{"timers"}}, false)["timers"].([]any)
+		if len(timers) != 1 || timers[0].(object)["id"] != timer["id"] || timers[0].(object)["app"] != name {
+			t.Fatalf("expected armed timer for %s, got %v", name, timers)
+		}
+	}
 	if _, err := b.db.ExecContext(t.Context(), "UPDATE apps SET updated_at=1"); err != nil {
 		t.Fatal(err)
 	}
@@ -342,6 +358,7 @@ func TestMCPSavedAppEdits(t *testing.T) {
 	if apps["error"] != "saved app already exists: taken" || !reflect.DeepEqual(stored(), before) {
 		t.Fatal("collision did not roll back app state", apps)
 	}
+	assertTimerApp("book")
 	list := toolTest(t, base, "state", object{"include": []string{"apps"}}, false)["apps"].(object)
 	if len(list) != 3 || list["book"] == nil || list["taken"] == nil || list["discard"] == nil || list["novel"] != nil {
 		t.Fatal("collision did not roll back saved apps", list)
@@ -371,9 +388,12 @@ func TestMCPSavedAppEdits(t *testing.T) {
 	watcher.until(t, savedAppsFrame)
 	toolTest(t, base, "state", object{"app_name": "book"}, true)
 	app := toolTest(t, base, "state", object{"app_name": "novel"}, false)["app"].(object)
-	if app["name"] != "novel" || app["title"] != "First Edition" || app["svg"] != svg || app["updated_at"] == json.Number("1") {
+	if app["name"] != "novel" || app["title"] != "First Edition" || app["kind"] != "drawing" ||
+		app["svg"] != svg || app["updated_at"] == json.Number("1") ||
+		app["tick_ms"] != json.Number("0") || app["max_ticks"] != json.Number("0") {
 		t.Fatal(app)
 	}
+	assertTimerApp("novel")
 	if mem := stored(); len(mem["app:book"].(object)) != 0 || !reflect.DeepEqual(mem["app:novel"], written["app:book"]) {
 		t.Fatal("state or metadata did not move", mem)
 	}
@@ -388,6 +408,15 @@ func TestMCPSavedAppEdits(t *testing.T) {
 	if app["title"] != "Second Edition" || !reflect.DeepEqual(stored()["app:novel"], written["app:book"]) {
 		t.Fatal(app)
 	}
+
+	blocked := patch(object{"delete": []string{"discard", "novel"}}, true)
+	if blocked["error"] != "saved app is used by an armed timer: novel" {
+		t.Fatal(blocked)
+	}
+	assertTimerApp("novel")
+	toolTest(t, base, "state", object{"app_name": "discard"}, false)
+	noSavedAppsFrame()
+	patchTimerTest(t, base, object{"op": "cancel", "device_id": id, "id": timer["id"]}, false)
 
 	got = patch(object{"delete": []string{"novel", "missing", "discard"}}, false)["apps"].(object)
 	if !slices.Equal(got["deleted"].([]any), []any{"novel", "discard"}) || len(got["renamed"].([]any)) != 0 {
