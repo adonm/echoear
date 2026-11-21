@@ -197,7 +197,7 @@ var mcpTools = func() []object {
 			schema(object{"device_id": text,
 				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": voice}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
-					"personality": text, "voice": voice, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"},
+					"personality": text, "voice": voice, "sprite": companionSpriteSchema, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"},
 					"face_edits": array(schema(object{"part": enum(faceParts...), "pose": enum(faceEditPoses...),
 						"svg": object{"type": "string", "maxLength": 16384, "description": "Replacement SVG fragment. Omit pose for all matching parts."}}, "part", "svg")),
 					"slug": object{"type": "string", "description": "Saved cat slug for load/delete_saved"}, "configured": flag,
@@ -205,8 +205,8 @@ var mcpTools = func() []object {
 				"memory": object{"anyOf": []object{memory, array(memory)}},
 				"apps":   schema(object{"delete": array(text), "rename": array(rename), "update": object{"anyOf": []object{update, array(update)}}}),
 				"timer":  schema(object{"op": enum("set", "update", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),
-		tool("app", "Launch a data-only template, display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
-			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
+		tool("app", "Show a declarative screen, launch a data-only template, display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
+			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "screen": declarativeScreenSchema, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"template": enum(append(templateNames(), "slideshow")...), "data": appData,
 				"save_current": schema(object{"name": text, "title": text}, "name"),
 				"load":         text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
@@ -239,9 +239,8 @@ func checkMCPFields(value any, schema object, path string) error {
 	switch v := value.(type) {
 	case object:
 		if schema["additionalProperties"] == false {
-			props := schema["properties"].(object)
 			for _, key := range slices.Sorted(maps.Keys(v)) {
-				child, ok := props[key].(object)
+				child, ok := propertySchema(schema, key)
 				if !ok {
 					return fieldError(path+key, "unknown argument")
 				}

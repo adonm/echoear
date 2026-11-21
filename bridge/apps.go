@@ -971,6 +971,24 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		return object{"ok": true, "devices": ids, "title": "", "hit_ids": []string{}}, nil
 	}
 	a := savedApp{SVG: str(args["svg"]), Code: str(args["code"]), Title: shortText(args["title"], 60, false), Author: players[0].name}
+	if raw, present := args["screen"]; present {
+		for _, key := range []string{"load", "code", "svg", "template", "data"} {
+			if _, incompatible := args[key]; incompatible {
+				return nil, fieldError("screen", "cannot combine with %s", key)
+			}
+		}
+		spec, err := readUIValue[declarativeScreen](raw, declarativeScreenSchema, "screen")
+		if err != nil {
+			return nil, err
+		}
+		a.SVG, err = spec.svg()
+		if err != nil {
+			return nil, err
+		}
+		if a.Title == "" {
+			a.Title = shortText(spec.Title, 60, false)
+		}
+	}
 	if _, present := args["template"]; present {
 		for _, key := range []string{"load", "code", "svg"} {
 			if _, incompatible := args[key]; incompatible {
@@ -1023,7 +1041,7 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 	case a.SVG != "":
 		a.Kind = "drawing"
 	default:
-		return nil, problem(400, "Expected template, svg, code, or load")
+		return nil, problem(400, "Expected screen, template, svg, code, or load")
 	}
 	if err := a.setTiming(args); err != nil {
 		return nil, err

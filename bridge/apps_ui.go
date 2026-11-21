@@ -123,7 +123,7 @@ func uiLabel(x, y, size, width int, text, ink string, bold bool) string {
 
 func uiButton(b bounds, id, label, sub string, p uiPalette) string {
 	x, y, w, h := b.x, b.y, b.w, b.h
-	art := svgRect(x, y, w, h, uiButtonRadius, p.card, p.accent, 2)
+	art := uiRoundRect(x, y, w, h, uiButtonRadius, p.card, p.accent, 2)
 	if sub == "" {
 		art += uiLabel(x+w/2, y+h/2+6, 17, w-16, label, p.ink, true)
 	} else {
@@ -134,13 +134,19 @@ func uiButton(b bounds, id, label, sub string, p uiPalette) string {
 		id, x, y, w, h, uiEsc(truncate(label, 128)), art)
 }
 
+func uiRoundRect(x, y, w, h, radius int, fill, stroke string, sw int) string {
+	// oksvg requires both radii; browsers infer ry when it is omitted.
+	return fmt.Sprintf(`<rect x="%d" y="%d" width="%d" height="%d" rx="%d" ry="%d" fill="%s" stroke="%s" stroke-width="%d"/>`,
+		x, y, w, h, radius, radius, fill, stroke, sw)
+}
+
 type uiPage struct {
 	title string
 	lines []string
 }
 
 func (p uiPage) svg(index, count, size int, colors uiPalette) string {
-	s := sceneView{bg: colors.bg, art: svgRect(42, 88, 276, 202, uiCardRadius, colors.card, colors.border, 2)}
+	s := sceneView{bg: colors.bg, art: uiRoundRect(42, 88, 276, 202, uiCardRadius, colors.card, colors.border, 2)}
 	counter := fmt.Sprintf("%d/%d", index+1, count)
 	s.art += uiText(180, 68, fitLabel(counter, 16, 40), counter, menuInk, "middle", true)
 	// All four corners still fit the round screen after 8 px of touch padding.
@@ -175,6 +181,63 @@ func uiNumber(v goja.Value, fallback, lo, hi float64) float64 {
 
 func installAppUI(vm *goja.Runtime, tapChime func()) {
 	ui := vm.NewObject()
+	palette := vm.NewObject()
+	for key, tint := range larkPalette {
+		_ = palette.DefineDataProperty(key, vm.ToValue(tint), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
+	}
+	freeze, _ := goja.AssertFunction(vm.Get("Object").ToObject(vm).Get("freeze"))
+	_, _ = freeze(goja.Undefined(), palette)
+	_ = ui.DefineDataProperty("palette", palette, goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
+	stringify, _ := goja.AssertFunction(vm.Get("JSON").ToObject(vm).Get("stringify"))
+	decode := func(v goja.Value, field string) any {
+		raw, err := stringify(goja.Undefined(), v)
+		if err != nil {
+			panic(vm.NewTypeError("ui.%s: %s", field, err))
+		}
+		if s, ok := raw.(goja.String); ok && s.Length() <= maxUIText {
+			data := s.String()
+			if len(data) <= maxUIText {
+				val, err := decodeUIJSON(data)
+				if err == nil {
+					return val
+				}
+			}
+		}
+		panic(vm.NewTypeError("ui.%s expects JSON of at most 64 KB", field))
+	}
+	_ = ui.Set("sprite", func(c goja.FunctionCall) goja.Value {
+		rows, err := readUIValue[[]string](decode(c.Argument(0), "sprite rows"), pixelRowsSchema, "sprite rows")
+		if err != nil {
+			panic(vm.NewTypeError("%s", err))
+		}
+		opts := uiSpriteOptions{Scale: 1}
+		if value := c.Argument(1); !goja.IsUndefined(value) {
+			opts, err = readUIValue[uiSpriteOptions](decode(value, "sprite options"), uiSpriteOpts, "sprite options")
+			if err != nil {
+				panic(vm.NewTypeError("%s", err))
+			}
+			opts.Scale = max(1, opts.Scale)
+		}
+		if isExitNode(opts.ID) {
+			panic(vm.NewTypeError("ui.sprite control ID is reserved"))
+		}
+		art, err := compileSprite(rows, opts.Palette, opts.X, opts.Y, opts.Scale)
+		if err != nil {
+			panic(vm.NewTypeError("%s", err))
+		}
+		return vm.ToValue(screenHit(bounds{opts.X, opts.Y, len(rows[0]) * opts.Scale, len(rows) * opts.Scale}, opts.ID, opts.ID, art))
+	})
+	_ = ui.Set("screen", func(c goja.FunctionCall) goja.Value {
+		spec, err := readUIValue[declarativeScreen](decode(c.Argument(0), "screen"), declarativeScreenSchema, "screen")
+		if err != nil {
+			panic(vm.NewTypeError("%s", err))
+		}
+		art, err := spec.svg()
+		if err != nil {
+			panic(vm.NewTypeError("%s", err))
+		}
+		return vm.ToValue(art)
+	})
 	text := func(v goja.Value) string {
 		if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
 			return ""
@@ -277,7 +340,7 @@ func installAppUI(vm *goja.Runtime, tapChime func()) {
 	_ = ui.Set("choices", func(c goja.FunctionCall) goja.Value {
 		opts := c.Argument(0)
 		p := uiColors(field(opts, "theme"))
-		s := sceneView{bg: p.bg, art: svgRect(48, 68, 264, 222, uiCardRadius, p.card, p.border, 2)}
+		s := sceneView{bg: p.bg, art: uiRoundRect(48, 68, 264, 222, uiCardRadius, p.card, p.border, 2)}
 		s.art += uiLabel(180, 88, 13, 176, field(opts, "badge"), p.ink, true)
 		s.art += uiLabel(180, 111, 22, 232, field(opts, "title"), p.ink, true)
 		s.art += uiLabel(180, 284, 13, 200, field(opts, "footer"), p.ink, false)
@@ -298,11 +361,11 @@ func installAppUI(vm *goja.Runtime, tapChime func()) {
 		for i, line := range lines {
 			s.art += uiText(64, 132+17*i, 15, line, p.ink, "start", false)
 		}
-		seen := map[string]bool{exitNode: true}
+		seen := map[string]bool{}
 		for i := range n {
 			choice := uiGet(choices, strconv.Itoa(i))
 			id := field(choice, "id")
-			if !svgID.MatchString(id) || seen[id] {
+			if !svgID.MatchString(id) || isExitNode(id) || seen[id] {
 				panic(vm.NewTypeError("ui.choices needs unique SVG control IDs (Cat exit is reserved)"))
 			}
 			seen[id] = true

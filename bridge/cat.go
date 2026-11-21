@@ -235,7 +235,7 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 				return c, false, problem(400, "Unsupported voice")
 			}
 			c.Voice = str(val)
-		case "face_svg", "face_edits":
+		case "face_svg", "face_edits", "sprite":
 			editLook = true
 		case "configured", "save_profile", "device_id", "op":
 		default:
@@ -249,7 +249,21 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 	oldPalette := [...]string{before.FaceBG, before.MarkColor, before.AccentColor}
 	newPalette := [...]string{c.FaceBG, c.MarkColor, c.AccentColor}
 	edits, editParts := args["face_edits"]
-	if raw, set := args["face_svg"]; set {
+	if raw, set := args["sprite"]; set {
+		if _, full := args["face_svg"]; full || editParts {
+			return c, false, fieldError("cat.sprite", "cannot combine with face_svg or face_edits")
+		}
+		spec, err := readUIValue[companionSprite](raw, companionSpriteSchema, "cat.sprite")
+		if err != nil {
+			return c, false, err
+		}
+		art, err := compileCompanionSprite(spec)
+		if err != nil {
+			return c, false, fieldError("cat.sprite", "%s", err)
+		}
+		c.FaceSVG, err = sanitizeFaceSVG(art)
+		return c, save, err
+	} else if raw, set := args["face_svg"]; set {
 		if editParts {
 			return c, false, fieldError("cat", "use face_svg or face_edits, not both")
 		}
@@ -405,8 +419,10 @@ func (b *bridge) patchCat(ctx context.Context, id string, args object) (any, err
 	if !supplied {
 		op = "update"
 	}
-	if _, edits := c["face_edits"]; edits && op != "update" {
-		return nil, fieldError("cat.face_edits", "requires cat update")
+	for _, field := range []string{"face_edits", "sprite"} {
+		if _, set := c[field]; set && op != "update" {
+			return nil, fieldError("cat."+field, "requires cat update")
+		}
 	}
 	switch op {
 	case "load", "delete_saved":

@@ -4,7 +4,9 @@ import (
 	_ "embed"
 	"encoding/json"
 	"maps"
+	"regexp"
 	"slices"
+	"strings"
 )
 
 //go:embed apps_templates.js
@@ -56,7 +58,36 @@ func appTemplateSchema(name string) object {
 
 func templateNames() []string { return slices.Sorted(maps.Keys(templateCatalog)) }
 
+func propertySchema(schema object, key string) (object, bool) {
+	if props, ok := schema["properties"].(object); ok {
+		if child, ok := props[key].(object); ok {
+			return child, true
+		}
+	}
+	if patterns, ok := schema["patternProperties"].(object); ok {
+		for pattern, child := range patterns {
+			if match, _ := regexp.MatchString(pattern, key); match {
+				return child.(object), true
+			}
+		}
+	}
+	return nil, false
+}
+
 func validateTemplateValue(v any, schema object, path string) error {
+	if branches, ok := schema["oneOf"].([]object); ok {
+		// Screen blocks are tagged; validate the selected branch so an error
+		// names the incorrect field rather than just reporting a failed union.
+		if body, ok := v.(object); ok {
+			for _, branch := range branches {
+				tag, _ := propertySchema(branch, "type")
+				if kinds, ok := tag["enum"].([]string); ok && slices.Contains(kinds, str(body["type"])) {
+					return validateTemplateValue(v, branch, path)
+				}
+			}
+		}
+		return fieldError(path, "expected a sprite, text, meter, or grid block")
+	}
 	if branches, ok := schema["anyOf"].([]object); ok {
 		for _, branch := range branches {
 			if validateTemplateValue(v, branch, path) == nil {
@@ -68,9 +99,8 @@ func validateTemplateValue(v any, schema object, path string) error {
 	switch schema["type"] {
 	case "object":
 		if o, ok := v.(object); ok {
-			props := schema["properties"].(object)
 			for _, key := range slices.Sorted(maps.Keys(o)) {
-				child, ok := props[key].(object)
+				child, ok := propertySchema(schema, key)
 				if !ok {
 					return fieldError(path+"."+key, "unknown argument")
 				}
@@ -78,7 +108,8 @@ func validateTemplateValue(v any, schema object, path string) error {
 					return err
 				}
 			}
-			for _, key := range schema["required"].([]string) {
+			required, _ := schema["required"].([]string)
+			for _, key := range required {
 				if _, ok := o[key]; !ok {
 					return fieldError(path+"."+key, "required")
 				}
@@ -87,6 +118,12 @@ func validateTemplateValue(v any, schema object, path string) error {
 		}
 	case "array":
 		if list, ok := v.([]any); ok {
+			if lo, ok := schema["minItems"].(int); ok && len(list) < lo {
+				return fieldError(path, "expected at least %d items", lo)
+			}
+			if hi, ok := schema["maxItems"].(int); ok && len(list) > hi {
+				return fieldError(path, "expected at most %d items", hi)
+			}
 			for _, item := range list {
 				if err := validateTemplateValue(item, schema["items"].(object), path+"[]"); err != nil {
 					return err
@@ -99,11 +136,33 @@ func validateTemplateValue(v any, schema object, path string) error {
 			if values, ok := schema["enum"].([]string); ok && !slices.Contains(values, text) {
 				return fieldError(path, "expected one of %v", values)
 			}
+			if hi, ok := schema["maxLength"].(int); ok && runeLen(text) > hi {
+				return fieldError(path, "expected at most %d characters", hi)
+			}
+			if pattern, ok := schema["pattern"].(string); ok {
+				if match, _ := regexp.MatchString(pattern, text); !match {
+					return fieldError(path, "invalid string")
+				}
+			}
 			return nil
 		}
-	case "integer":
+	case "boolean":
+		if _, ok := v.(bool); ok {
+			return nil
+		}
+	case "integer", "number":
 		if n, ok := v.(json.Number); ok {
-			if _, err := n.Int64(); err == nil {
+			x, err := n.Float64()
+			if schema["type"] == "integer" {
+				_, err = n.Int64()
+			}
+			if err == nil {
+				if lo, ok := schema["minimum"].(int); ok && x < float64(lo) {
+					return fieldError(path, "expected at least %d", lo)
+				}
+				if hi, ok := schema["maximum"].(int); ok && x > float64(hi) {
+					return fieldError(path, "expected at most %d", hi)
+				}
 				return nil
 			}
 		}
@@ -166,5 +225,46 @@ func (a *appInstance) installTemplate() (string, error) {
 	}
 	_ = a.vm.Set("templatePalettes", palettes)
 	_ = a.vm.Set("templateRadii", []int{uiButtonRadius, uiCardRadius})
+	_ = a.vm.Set("templatePixel", func(name string, x, y, scale int, tint string) string {
+		rows := templateSprites[name]
+		if rows == nil {
+			return ""
+		}
+		var overrides map[string]string
+		if tint != "" {
+			overrides = map[string]string{"p": tint}
+		}
+		art, err := compileSprite(rows, overrides, x-len(rows[0])*scale/2, y-len(rows)*scale/2, scale)
+		if err != nil {
+			panic(a.vm.NewTypeError("%s", err))
+		}
+		return art
+	})
 	return appTemplatesJS, nil
 }
+
+var templateSprites = func() map[string][]string {
+	art := map[string]string{
+		"star":     "...p.... ...p.... .ppppp.. ..ppp... .ppppp.. .p...p.. ........ ........",
+		"heart":    ".pp.pp.. ppppppp. pwppppp. ppppppp. .ppppp.. ..ppp... ...p.... ........",
+		"triangle": "...p.... ...p.... ..ppp... ..ppp... .ppppp.. .ppppp.. ppppppp. ........",
+		"diamond":  "...p.... ..ppp... .ppppp.. ppppppp. .ppppp.. ..ppp... ...p.... ........",
+		"square":   "........ .pppppp. .pwwppp. .pppppp. .pppppp. .pppppp. .pppppp. ........",
+		"circle":   "..ppp... .ppppp.. pppwppp. ppppppp. ppppppp. .ppppp.. ..ppp... ........",
+		"moon":     "...pp... ..pp.... .pp..... .pp..... .pppp..p ..ppppp. ...ppp.. ........",
+		"sun":      "...p.... .p...p.. ..ppp... p.ppp.p. ..ppp... .p...p.. ...p.... ........",
+		"cloud":    "...pp... ..pppp.. .pppppp. pppppppp pwwppppp .pppppp. ........ ........",
+		"spark":    "...p.... ...w.... ...w..p. pwwwww.. ...w.... .p.w.... ...p.... ........",
+		"dot":      ".pp. pwpp pppp .pp.",
+		"book":     "........ .pp..pp. pwwppwwp pwwppwwp pwwppwwp pppppppp ...pp... ........",
+		"pencil":   "......rp .....rpp ....ppa. ...ppa.. ..ppa... .ppa.... bca..... k.......",
+		"timer":    "..pppp.. ...pp... .pppppp. .pwwwwp. .pwpwwp. .pwppwp. .pwwwwp. ..pppp..",
+		"burst":    "p...p...p .p.....p. ....w.... ...wpw... p.wpppw.p ...wpw... ....w.... .p.....p. p...p...p",
+		"bean":     "................ ....kk....kk.... ...kpck..kcpk... ...kpck..kcpk... ...kpckkkkcpk... ...kpppllpppk... ..kppplwwlpppk.. ..kppwwwwwwppk.. ..kpwkkwwkkwpk.. ..kpwkmwwmkwpk.. ..kcwwwrrwwwck.. ...kcwwkkwwck... ....kkwwwwkk.... ......kkkk...... ..m..........m.. ................",
+	}
+	rows := make(map[string][]string, len(art))
+	for name, grid := range art {
+		rows[name] = strings.Fields(grid)
+	}
+	return rows
+}()
