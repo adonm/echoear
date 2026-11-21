@@ -186,7 +186,17 @@ static esp_err_t pull_headers(esp_http_client_handle_t client)
 static bool matching_board(const esp_app_desc_t *image)
 {
     const char *project = esp_app_get_description()->project_name;
-    return strncmp(image->project_name, project, sizeof(image->project_name)) == 0;
+    const char *incoming = image->project_name;
+    if (strncmp(incoming, project, sizeof(image->project_name)) == 0) return true;
+    if (strcmp(project, "echoear") == 0 || strcmp(project, "lark") == 0) {
+        return strncmp(incoming, "echoear", sizeof(image->project_name)) == 0 ||
+               strncmp(incoming, "lark", sizeof(image->project_name)) == 0;
+    }
+    if (strcmp(project, "echoear_box3") == 0 || strcmp(project, "lark_box3") == 0) {
+        return strncmp(incoming, "echoear_box3", sizeof(image->project_name)) == 0 ||
+               strncmp(incoming, "lark_box3", sizeof(image->project_name)) == 0;
+    }
+    return false;
 }
 
 static esp_err_t ota_pull_post(httpd_req_t *request)
