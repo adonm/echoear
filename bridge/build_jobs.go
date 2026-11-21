@@ -104,6 +104,16 @@ func (m *buildManager) enqueue(ctx context.Context, who peer, intent buildIntent
 		return "", err
 	}
 	jobID := builderSessionPrefix + randomHex(16)
+	if h := m.b.ws; h != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if r := h.parentRefresh(id, time.Now()); r != "" {
+			return "", r.err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	out, err := m.b.db.ExecContext(ctx, `INSERT INTO build_jobs (id,device_id,state,spec,created_at)
 		SELECT ?,?,'queued',?,? WHERE NOT EXISTS
 		(SELECT 1 FROM build_jobs WHERE device_id=? AND state IN ('queued','running'))
@@ -234,12 +244,13 @@ func (m *buildManager) start(ctx context.Context, job buildJob, cleanup bool) {
 	m.workers[job.id] = worker
 	m.mu.Unlock()
 	m.wg.Go(func() {
+		claimed := false
 		defer func() {
 			cancel()
 			m.mu.Lock()
 			delete(m.workers, job.id)
 			m.mu.Unlock()
-			if !cleanup {
+			if claimed {
 				m.signal()
 			}
 		}()
@@ -247,13 +258,11 @@ func (m *buildManager) start(ctx context.Context, job buildJob, cleanup bool) {
 			m.cleanup(ctx, job)
 			return
 		}
-		var claimed string
-		err := m.b.db.QueryRowContext(run, `UPDATE build_jobs SET state='running',cleanup=1
-			WHERE id=? AND state='queued' RETURNING id`, job.id).Scan(&claimed)
-		if err != nil {
+		claimed = m.claim(run, job)
+		if !claimed {
 			return
 		}
-		err = m.build(run, job)
+		err := m.build(run, job)
 		if err != nil && ctx.Err() == nil {
 			message := "I couldn't finish that build. Try asking again."
 			switch {
@@ -269,6 +278,19 @@ func (m *buildManager) start(ctx context.Context, job buildJob, cleanup bool) {
 			m.cleanup(ctx, job)
 		}
 	})
+}
+
+func (m *buildManager) claim(ctx context.Context, job buildJob) bool {
+	if h := m.b.ws; h != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.parentRefresh(job.device, time.Now()) != "" {
+			return false
+		}
+	}
+	var id string
+	return m.b.db.QueryRowContext(ctx, `UPDATE build_jobs SET state='running',cleanup=1
+		WHERE id=? AND state='queued' RETURNING id`, job.id).Scan(&id) == nil
 }
 
 func (m *buildManager) fail(ctx context.Context, id, message string) {

@@ -304,14 +304,20 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string) (answer, er
 		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
 		return b.relay(ctx, sender, others, direct.target, direct.text)
 	}
-	if reply, _ := b.buildReply(ctx, sender, text, source); reply != "" {
+	if reply, _, err := b.buildReply(ctx, sender, text, source); err != nil {
+		return answer{}, err
+	} else if reply != "" {
 		out := answer{Reply: reply}
 		if w := b.worker; w != nil && w.ready.Load() {
 			start := time.Now()
-			audioCtx, cancel := context.WithTimeout(b.root, ttsWait)
+			audioCtx, cancel := context.WithTimeout(ctx, ttsWait)
+			defer cancel()
 			speech := newSpeechTurn(audioCtx, cancel, w, b.voiceFor(sender), nil)
 			speech.complete([]string{reply})
 			b.attachAudio(ctx, &out, speech.stream, start)
+		}
+		if err := b.parentAllowed(sender.DeviceID); err != nil {
+			return answer{}, err
 		}
 		return out, nil
 	}

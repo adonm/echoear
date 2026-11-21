@@ -388,7 +388,10 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
 		return
 	}
-	if reply, job := h.b.buildReply(ctx, d.who, text, source); reply != "" {
+	if reply, job, err := h.b.buildReply(ctx, d.who, text, source); err != nil {
+		h.finishTurn(d, id, nil, nil)
+		return
+	} else if reply != "" {
 		h.buildAcknowledgement(ctx, d, id, reply, job)
 		return
 	}
@@ -454,7 +457,7 @@ func (h *wsHub) sayTurn(ctx context.Context, d *wsDevice, id uint64, text string
 func (h *wsHub) publish(d *wsDevice, id uint64, ctx context.Context, stream *AudioStream, start time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.active(d) || d.turn != id || ctx.Err() != nil {
+	if !h.active(d) || d.turn != id || ctx.Err() != nil || h.parentRefresh(d.key, time.Now()) != "" {
 		return
 	}
 	if stream == nil {

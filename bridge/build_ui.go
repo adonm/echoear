@@ -6,14 +6,21 @@ import (
 	"time"
 )
 
-func (b *bridge) buildReply(ctx context.Context, who peer, text, source string) (reply, job string) {
+func (b *bridge) buildReply(ctx context.Context, who peer, text, source string) (reply, job string, err error) {
 	if b.builders == nil {
-		return "", ""
+		return "", "", nil
 	}
 	intent := parseBuildIntent(text)
+	if intent.kind == "" {
+		return "", "", nil
+	}
+	if err = b.parentAllowed(who.DeviceID); err != nil {
+		return "", "", err
+	}
+	if err = ctx.Err(); err != nil {
+		return "", "", err
+	}
 	switch intent.kind {
-	case "":
-		return "", ""
 	case "clarify":
 		reply = "Are we making a new app, editing a saved app, or changing my face?"
 	case "clarify-app":
@@ -34,6 +41,10 @@ func (b *bridge) buildReply(ctx context.Context, who peer, text, source string) 
 		id, err := b.builders.enqueue(ctx, who, intent, text)
 		var clientError *apiError
 		switch {
+		case ctx.Err() != nil:
+			return "", "", ctx.Err()
+		case errors.As(err, &clientError) && clientError.status == 423:
+			return "", "", err
 		case errors.As(err, &clientError) && clientError.status < 500:
 			reply = clientError.Error()
 		case err != nil:
@@ -46,7 +57,7 @@ func (b *bridge) buildReply(ctx context.Context, who peer, text, source string) 
 	}
 	b.chat(who.DeviceID, newChat("user", "You", text, source), true)
 	b.chat(who.DeviceID, newChat("cat", b.catFor(who).Name, reply, source), true)
-	return reply, job
+	return reply, job, nil
 }
 
 func buildingScene(id string) sceneView {
@@ -64,18 +75,24 @@ func (h *wsHub) buildAcknowledgement(ctx context.Context, d *wsDevice, turn uint
 		view = buildingScene(job)
 	}
 	h.mu.Lock()
-	if h.active(d) && turn == d.turn && ctx.Err() == nil {
+	allowed := h.active(d) && turn == d.turn && h.parentRefresh(d.key, time.Now()) == "" && ctx.Err() == nil
+	if allowed {
 		d.card = &view
 		h.render(d, time.Now(), false)
 	}
 	h.mu.Unlock()
-	h.sayTurn(ctx, d, turn, reply, nil)
+	if allowed {
+		h.sayTurn(ctx, d, turn, reply, nil)
+	} else {
+		h.finishTurn(d, turn, nil, nil)
+	}
 }
 
 func (h *wsHub) announceBuild(ctx context.Context, job buildJob) {
 	h.mu.Lock()
 	d := h.devices[job.device]
-	if d == nil || !h.active(d) || d.announcing || d.busy || d.queuedVoice != nil || !d.recAt.IsZero() || d.callState != callNone ||
+	if d == nil || !h.active(d) || h.parentRefresh(d.key, time.Now()) != "" ||
+		d.announcing || d.busy || d.queuedVoice != nil || !d.recAt.IsZero() || d.callState != callNone ||
 		d.stopAudio != nil || d.awaitAck || d.asleep || d.drawer != "" || d.card != nil && d.card.build != job.id {
 		h.mu.Unlock()
 		return
@@ -84,7 +101,7 @@ func (h *wsHub) announceBuild(ctx context.Context, job buildJob) {
 	// spoken notification, even if the listener leaves mid-announcement.
 	var claimed string
 	err := h.b.db.QueryRowContext(ctx, `UPDATE build_jobs SET announced=1
-		WHERE id=? AND announced=0 RETURNING id`, job.id).Scan(&claimed)
+		WHERE id=? AND state=? AND announced=0 RETURNING id`, job.id, job.state).Scan(&claimed)
 	if err != nil {
 		h.mu.Unlock()
 		return

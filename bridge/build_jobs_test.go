@@ -246,6 +246,125 @@ func TestBuildReadyWaitsForIdleAndSurvivesStop(t *testing.T) {
 	}
 }
 
+func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
+	const device = "phone-dead"
+	const prompt = "Make me a dinosaur quiz."
+	for _, reason := range []parentReason{parentQuiet, parentLimit, parentPause} {
+		t.Run(string(reason), func(t *testing.T) {
+			var speech atomic.Int32
+			stub := &buildStub{allow: make(chan struct{}), reply: quizProposal}
+			b, base := stubBuildBridge(t, stub, true, &speech)
+			s := testConnectWS(t, base, "unit", true)
+			s.hello(t, device, "Cat")
+			finishSpeech := func(label string) {
+				t.Helper()
+				seenCard := label == ""
+				var end wsFrame
+				s.until(t, func(f wsFrame) bool {
+					seenCard = seenCard || hasWS("svg", label)(f)
+					if hasWS("tts", `"state":"end"`)(f) {
+						end = f
+					}
+					return seenCard && end.data != nil
+				})
+				s.json(t, object{"ev": "tts_ack", "state": "done", "audio": testObject(t, end.data)["audio"]})
+				s.barrier(t)
+			}
+			s.json(t, object{"ev": "text", "text": prompt})
+			finishSpeech("Cancel build")
+			var job string
+			select {
+			case job = <-stub.prompted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("builder did not receive the prompt")
+			}
+
+			h := b.ws
+			h.mu.Lock()
+			d := h.devices[device]
+			turn := d.turn
+			now := time.Now().UTC()
+			settings := parentSettings{Timezone: "UTC"}
+			switch reason {
+			case parentQuiet:
+				settings.QuietStart = now.Add(-time.Hour).Format("15:04")
+				settings.QuietEnd = now.Add(time.Hour).Format("15:04")
+			case parentLimit:
+				settings.DailyMinutes = 1
+				h.parents[device].used = time.Minute
+			case parentPause:
+				settings.PauseUntil = now.Add(time.Hour).UnixMilli()
+			}
+			err := h.parentSet(device, settings, time.UTC, now)
+			restricted := d.parentReason
+			h.mu.Unlock()
+			if err != nil || restricted != reason {
+				t.Fatal(restricted, err)
+			}
+			if reason == parentLimit {
+				finishSpeech("") // Parent controls' own lockout announcement.
+			}
+			before := speech.Load()
+
+			// Complete the running job concurrently with a late acknowledgement
+			// and a new request from the now restricted device.
+			close(stub.allow)
+			h.buildAcknowledgement(t.Context(), d, turn, "Building it now!", job)
+			testRequest(t, "POST", base+"/api/chat", "unit", object{"device_id": device, "text": prompt}, 423)
+			s.json(t, object{"ev": "text", "text": prompt})
+			s.barrier(t)
+			if id, err := b.builders.enqueue(t.Context(), d.who, buildIntent{kind: "new"}, prompt); err == nil || id != "" {
+				t.Fatalf("restricted enqueue: %q, %v", id, err)
+			}
+			expectValue(t, stub.deleted, job)
+			result := waitBuildState(t, b, job, "ready")
+			h.announceBuild(t.Context(), buildJob{id: job, device: device, state: "ready", result: result})
+
+			var announced bool
+			if err := b.db.QueryRow(`SELECT announced FROM build_jobs WHERE id=?`, job).Scan(&announced); err != nil || announced {
+				t.Fatal("Ready was consumed under restriction", announced, err)
+			}
+			h.mu.Lock()
+			if d.card != nil || d.stopAudio != nil {
+				t.Error("a build card or speech reached the restricted device")
+			}
+			h.mu.Unlock()
+			if speech.Load() != before {
+				t.Error("builder synthesized speech under restriction")
+			}
+
+			// A queued job accepted before a restriction must not be claimed
+			// even if the worker already read it from the database.
+			const queued = "synthetic-queued-race"
+			if _, err := b.db.Exec(`INSERT INTO build_jobs (id,device_id,state,spec,created_at) VALUES (?,?,'queued','{}',?)`,
+				queued, device, now.UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
+			if b.builders.claim(t.Context(), buildJob{id: queued, device: device}) {
+				t.Fatal("worker claimed a build under restriction")
+			}
+			if _, err := b.builders.cancel(t.Context(), device, queued); err != nil {
+				t.Fatal(err)
+			}
+
+			h.mu.Lock()
+			err = h.parentSet(device, parentSettings{Timezone: "UTC"}, time.UTC, time.Now())
+			h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.builders.signal()
+			finishSpeech("build-done")
+			if err := b.db.QueryRow(`SELECT announced FROM build_jobs WHERE id=?`, job).Scan(&announced); err != nil || !announced {
+				t.Fatal("Ready did not deliver when allowed", announced, err)
+			}
+			if speech.Load() != before+1 {
+				t.Error("Ready did not speak exactly once")
+			}
+		})
+	}
+}
+
 func TestBuildRejectsNewerAppAndFace(t *testing.T) {
 	for _, kind := range []string{"edit", "face", "new"} {
 		t.Run(kind, func(t *testing.T) {
