@@ -105,7 +105,7 @@ func (h *wsHub) shutdown() {
 }
 
 func (h *wsHub) serve(w http.ResponseWriter, r *http.Request) error {
-	if !tokenMatches(r.Header.Values("X-EchoEar-Token"), h.b.token) && !tokenMatches(r.URL.Query()["token"], h.b.token) {
+	if !tokenHeaderMatches(r.Header, "Token", h.b.token) && !tokenMatches(r.URL.Query()["token"], h.b.token) {
 		return problem(401, "Unauthorized")
 	}
 	return h.serveScope(w, r, nil)

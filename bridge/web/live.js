@@ -1,7 +1,7 @@
 import {audioBusy, canCaptureMic, endMic, handleCall, handleTTS, micStopping, playChime, playPCM, setVolume, startMic, stopCall, unlockAudio} from "./audio.js";
 import {loadHistory, receiveChat, reloadArchivedHistory, resetTranscript} from "./chat.js";
 import {applyVolume, refreshDevices, renderCallTarget, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
-import {$, colors, isLive, nodes, say, screen, svgNS} from "./dom.js";
+import {$, colors, companionName, isLive, nodes, say, screen, svgNS} from "./dom.js";
 import {busyMode, idleWatch} from "./idle.js";
 import {loadSaved, loadSavedCats, loadTimers} from "./library.js";
 import {clearPhotos, stagePhotos} from "./photos.js";
@@ -40,6 +40,11 @@ function updateStatus(text) {
   say("screen-description", text);
 }
 
+function liveLabel({device, virtual}) {
+  const name = companionName(device);
+  return virtual ? `${name} · Live companion` : `Mirroring ${name}`;
+}
+
 function clearScene() {
   state.rev = 0;
   state.pointer = null;
@@ -56,7 +61,7 @@ function select(d, quick = false) {
   const id = d?.device_id || "";
   if (id === state.view?.id) return;
   state.view?.loading?.abort();
-  // Virtual cats identify themselves per socket; never reuse their audio connection.
+  // Virtual companions identify themselves per socket; never reuse their audio connection.
   disconnect();
   state.view = {id, device:d, virtual:d?.kind === "virtual", quick};
   syncFaceSettings();
@@ -80,7 +85,7 @@ function select(d, quick = false) {
     loadTimers();
     if (!quick) loadHistory();
     connect();
-  } else say("link-state", "No cat selected");
+  } else say("link-state", "No companion selected");
 }
 
 function renderCurrent() {
@@ -92,13 +97,13 @@ function renderCurrent() {
   $("workspace").dataset.view = state.view?.virtual ? "virtual" : "mirror";
   colors($("workspace"), d?.cat);
   updateInstall(state.view, state.app);
-  say("chat-name", d?.character || "Choose a cat");
+  say("chat-name", companionName(d) || "Choose a companion");
   $("chat-mode").hidden = !d;
   say("chat-mode", !d ? "" : paused === "occupied" ? "In use" : paused ? "Paused" :
     state.view.virtual ? active ? (modeLabel[state.view.mode] || "Idle") : "Connecting" :
     isLive(d) ? mode || "Live WS" : "Offline");
   $("reconnect-overlay").hidden = !paused;
-  say("reconnect-note", paused === "occupied" ? "This cat is open in another tab or device." :
+  say("reconnect-note", paused === "occupied" ? "This companion is open in another tab or device." :
     paused === "lost" ? "The live connection was lost." : "Disconnected while idle. Your chat is still here.");
   $("screen-content").inert = !ready;
   $("screen-controls").hidden = !ready;
@@ -113,7 +118,7 @@ function renderCurrent() {
   say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
     "Mic needs localhost or an HTTPS opentunnel.xyz link");
   $("text").disabled = !d || resting || state.view.virtual && (!active || busyCall);
-  $("text").placeholder = state.view?.parentMessage || (d?.cat?.configured === false ? "Say hi to design your cat…" : "Message your cat…");
+  $("text").placeholder = state.view?.parentMessage || (d?.cat?.configured === false ? "Say hi to meet me!" : "Message your companion…");
   $("send").disabled = $("text").disabled || !!state.view?.sending || !!state.view?.resetting;
   $("share-photo").disabled = !d || !!state.view?.sharingPhoto || state.view?.virtual && !active;
   $("reset").hidden = !!state.app?.scope;
@@ -155,7 +160,7 @@ function pause(reason) {
   if (!state.view?.virtual) return;
   state.view.paused = reason;
   disconnect({keepFace:true});
-  say("link-state", reason === "occupied" ? "Cat in use" : "Not connected");
+  say("link-state", reason === "occupied" ? "Companion in use" : "Not connected");
   updateStatus(reason === "idle" ? "Live screen paused." : "Live screen disconnected.");
   renderCurrent();
   renderDevices();
@@ -242,7 +247,7 @@ function updateCat({device_id, character, cat, voice}) {
   if (device) Object.assign(device, fields);
   if (state.view?.id === device_id) {
     Object.assign(state.view.device, fields);
-    if (state.rev) updateStatus(state.view.virtual ? `${character} · Live Virtual Cat` : `Mirroring ${character}`);
+    if (state.rev) updateStatus(liveLabel(state.view));
     renderCurrent();
   }
   renderDevices();
@@ -319,8 +324,8 @@ function command(msg) {
       $("screen-placeholder").setAttribute("display", "none");
       screen.dataset.interactive = "true";
       if (first) {
-        say("link-state", state.app.scope ? "Private live cat" : "LAN dashboard");
-        updateStatus(state.view.parentMessage || (state.view.virtual ? `${state.view.device.character} · Live Virtual Cat` : `Mirroring ${state.view.device.character}`));
+        say("link-state", state.app.scope ? "Private connection" : "LAN dashboard");
+        updateStatus(state.view.parentMessage || liveLabel(state.view));
         loadHistory({replace:false});
         if (state.view.virtual) renderDevices();
       }

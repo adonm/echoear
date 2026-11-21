@@ -719,13 +719,14 @@ func (s *e2eSuite) photosAndScope(t *testing.T) {
 		get := func(path string, code int) []byte { return e2eRequest(t, scope, "GET", path, "", nil, code) }
 		get("/app", 200)
 		worker := get("/app/sw.js", 200)
-		if !bytes.Contains(worker, []byte("echoear-shell-scoped-")) || bytes.Contains(worker, []byte("photo-library.js")) {
+		if !bytes.Contains(worker, []byte("lark-shell-scoped-")) ||
+			!bytes.Contains(worker, []byte(`"/app/lark.svg"`)) || bytes.Contains(worker, []byte("photo-library.js")) {
 			t.Fatal("scoped app did not serve the restricted offline shell")
 		}
 		manifest := testObject(t, get(phonePWAPath+"manifest.webmanifest?token="+url.QueryEscape(scope.token), 200))
 		icons, _ := manifest["icons"].([]any)
 		if manifest["display"] != "standalone" || manifest["orientation"] != "portrait" || len(icons) != 3 {
-			t.Fatal("scoped Phone Cat did not serve an installable portrait manifest")
+			t.Fatal("scoped Phone Lark did not serve an installable portrait manifest")
 		}
 		for _, icon := range icons {
 			raw := get(str(icon.(object)["src"]), 200)

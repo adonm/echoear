@@ -143,7 +143,7 @@ test("renders the selected live device after the dashboard modules load", async 
     const requests = [];
     let accepted = false;
     globalThis.confirm = message => {
-      assert.match(message, /fresh cat and chat session/i);
+      assert.match(message, /fresh companion and chat session/i);
       assert.match(message, /archived, not deleted/i);
       return accepted;
     };

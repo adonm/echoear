@@ -41,7 +41,7 @@ func TestParentPage(t *testing.T) {
 	if w.Code != 200 || w.Header().Get("Content-Type") != "text/html; charset=utf-8" || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("parent fragment: %d %s", w.Code, w.Body)
 	}
-	for _, field := range []string{"Quiet hours and daily limit", "Activity in the last 7 days", "Open this cat's chat history", "Clover"} {
+	for _, field := range []string{"Quiet hours and daily limit", "Activity in the last 7 days", "Open this companion's chat history", "Clover"} {
 		if !strings.Contains(w.Body.String(), field) {
 			t.Errorf("parent fragment is missing %q", field)
 		}

@@ -194,7 +194,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	}
 	dev := testConnectWS(t, base, "unit", false)
 	dev.json(t, object{"ev": "hello", "role": "web", "device_id": id})
-	f := dev.until(t, hasWS("svg", "Say hi to design me!"))
+	f := dev.until(t, hasWS("svg", "Say hi to meet me!"))
 	if strings.Contains(string(f.data), "#F59E0B") {
 		t.Fatal("starter face did not show its setup cue")
 	}
@@ -202,7 +202,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	web.json(t, object{"ev": "hello", "role": "web"})
 	web.until(t, hasWS("peers", id))
 	web.json(t, object{"ev": "watch", "device_id": id})
-	web.until(t, hasWS("svg", "Say hi to design me!"))
+	web.until(t, hasWS("svg", "Say hi to meet me!"))
 	for _, fields := range []object{
 		{"face_bg": "navy"}, {"voice": "unknown"}, {"name": strings.Repeat("x", 41)},
 		{"personality": strings.Repeat("x", 161)}, {"configured": "false"},
@@ -253,7 +253,7 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		t.Fatal("reset_blank left configured state", c)
 	}
 	expectValue(t, title, "EchoEar: New Cat ("+id+")")
-	dev.until(t, hasWS("svg", "Say hi to design me!"))
+	dev.until(t, hasWS("svg", "Say hi to meet me!"))
 	got := call(false, "load_saved", object{"slug": "cosmo"})["cat"]
 	if !reflect.DeepEqual(cosmo, got) {
 		t.Fatal("profile did not round-trip", got)
@@ -271,6 +271,37 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	testRequest(t, "DELETE", base+"/api/cats/cosmo", "unit", nil, 204)
 	if len(apiObjects(t, base+"/api/cats", "cats")) != 0 {
 		t.Fatal("profile was not deleted")
+	}
+}
+
+func TestCompanionShiftsWithoutOverwritingSettledForm(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, _ string) { b.virtual = virtualStore(b.db) })
+	v := testObject(t, testRequest(t, "POST", base+"/api/virtual-clients", "unit", object{}, 201))
+	id := str(v["id"])
+	entry := newChat("user", "You", "Let's try a new shape.", "typed")
+	b.history.add(id, entry)
+	patch := func(changes object) object {
+		return toolTest(t, base, "patch", object{"device_id": id, "cat": changes}, false)["cat"].(object)
+	}
+	const owl = `<svg><circle cx="180" cy="150" r="70" fill="#AB6010"/></svg>`
+	const robot = `<svg><rect x="110" y="80" width="140" height="140" fill="#492256"/></svg>`
+	patch(object{"name": "Glimmer", "face_svg": owl, "voice": fableVoice, "save_profile": false})
+	if len(apiObjects(t, base+"/api/cats", "cats")) != 0 {
+		t.Fatal("temporary form was saved")
+	}
+	saved := patch(object{"save_profile": true})
+	shifted := patch(object{"face_svg": robot, "voice": heartVoice, "save_profile": false})
+	if shifted["name"] != saved["name"] || shifted["face_svg"] == saved["face_svg"] || shifted["voice"] != heartVoice {
+		t.Fatal("shift did not apply to the active form")
+	}
+	patch(object{"op": "reset_blank"})
+	restored := patch(object{"op": "load", "slug": "glimmer"})
+	if !reflect.DeepEqual(restored, saved) {
+		t.Fatal("settled form was overwritten by a shift")
+	}
+	got, err := b.history.list(t.Context(), id)
+	if err != nil || len(got) != 1 || got[0].ID != entry.ID {
+		t.Fatal("shift changed the conversation", err)
 	}
 }
 
@@ -329,7 +360,7 @@ func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	dev.hello(t, id, "Ignored")
 	toolTest(t, base, "app", object{"devices": id, "svg": `<svg><text x="180" y="180">Party</text></svg>`}, false)
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
-	dev.until(t, hasWS("svg", "Say hi to design me!"))
+	dev.until(t, hasWS("svg", "Say hi to meet me!"))
 	s := stateMe(t, base, id)
 	if s["active_app"] != nil || s["device"].(object)["screen"].(object)["title"] != "Cat" {
 		t.Fatal("reset did not close app", s)

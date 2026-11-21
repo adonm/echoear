@@ -7,7 +7,7 @@ self.addEventListener("install", event => {
 
 self.addEventListener("activate", event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys
-    .filter(key => key.startsWith("echoear-shell-") && key !== CACHE)
+    .filter(key => key !== CACHE && (key.startsWith("lark-shell-") || key.startsWith("echoear-shell-")))
     .map(key => caches.delete(key)))).then(() => self.clients.claim()));
 });
 

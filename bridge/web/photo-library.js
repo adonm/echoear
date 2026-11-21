@@ -1,5 +1,5 @@
 import {api, request} from "./api.js";
-import {$, node, say} from "./dom.js";
+import {$, companionName, node, say} from "./dom.js";
 import {state} from "./state.js";
 
 const dialog = node("dialog", "photo-library");
@@ -14,11 +14,11 @@ dialog.innerHTML = `
     <form method="dialog"><button id="photo-library-close" class="outline" type="submit" autofocus>Close</button></form>
   </header>
   <div class="photo-body">
-    <p class="small">Manage which cats can see your library, organize photos, and review people groups.</p>
+    <p class="small">Manage which companions can see your library, organize photos, and review people groups.</p>
     <div class="photo-toolbar" role="group" aria-label="Photo access">
-      <label data-field for="photo-library-cat">Cat or device <select id="photo-library-cat"></select></label>
+      <label data-field for="photo-library-cat">Companion or device <select id="photo-library-cat"></select></label>
       <label class="switch" for="photo-library-allow">
-        <input id="photo-library-allow" type="checkbox" role="switch" disabled> Allow photo access for this cat
+        <input id="photo-library-allow" type="checkbox" role="switch" disabled> Allow photo access for this companion
       </label>
     </div>
     <search>
@@ -228,7 +228,7 @@ async function refresh(search = false) {
     find.disabled = !data.ready || data.hidden;
     peopleButton.disabled = find.disabled;
     say("photo-library-status", !data.ready ? "Waiting for fresh Ente metadata." :
-      data.hidden ? "The library is hidden from this cat." :
+      data.hidden ? "The library is hidden from this companion." :
       search ? data.items.length ? `${data.items.length} photo${data.items.length === 1 ? "" : "s"} found.` : "No matching photos." :
       "Search for photos or open People to review face groups.");
     for (const item of data.items) showResult(current, path, item, stamp);
@@ -241,12 +241,12 @@ $("library-toggle").onclick = () => {
   const current = state.app;
   if (!current || current.scope || dialog.open) return;
   cats.replaceChildren(...current.devices.map(d => {
-    const option = node("option", "", d.character || d.device_id);
+    const option = node("option", "", companionName(d) || d.device_id);
     option.value = d.device_id;
     return option;
   }));
   dialog.showModal();
-  say("photo-library-status", cats.value ? "" : "No cats found.");
+  say("photo-library-status", cats.value ? "" : "No companions found.");
   refresh();
 };
 dialog.onclose = () => { resetResults(); mergeTarget = null; };

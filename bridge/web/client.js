@@ -73,7 +73,7 @@ async function authorize(token) {
       $("open-link").removeAttribute("href");
       select({...scope, kind:"virtual"});
     } else {
-      say("link-state", "Looking for cats…");
+      say("link-state", "Looking for companions…");
       renderDevices();
       select(null);
       refreshDevices();

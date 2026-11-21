@@ -180,10 +180,12 @@ func hitID(hits []hitBox, x, y int) string {
 	return ""
 }
 
+func isExitNode(id string) bool { return id == exitNode || id == "lark-exit" }
+
 func layoutWarnings(hits []hitBox, round bool) []string {
 	var exits []hitBox
 	for _, h := range hits {
-		if h.id == exitNode {
+		if isExitNode(h.id) {
 			exits = append(exits, h)
 		}
 	}
@@ -193,13 +195,13 @@ func layoutWarnings(hits []hitBox, round bool) []string {
 	}
 	var warnings []string
 	for _, h := range hits {
-		if h.id == exitNode {
+		if isExitNode(h.id) {
 			continue
 		}
 		if slices.ContainsFunc(exits, func(e hitBox) bool {
 			return h.x1 <= e.x2 && e.x1 <= h.x2 && h.y1 <= e.y2 && e.y1 <= h.y2
 		}) {
-			warnings = append(warnings, fmt.Sprintf("control %q overlaps bottom Cat exit button (keep controls above y=296)", h.id))
+			warnings = append(warnings, fmt.Sprintf("control %q overlaps bottom Face exit button (keep controls above y=296)", h.id))
 		}
 		if round {
 			b := h.bounds
@@ -723,7 +725,7 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 				min(last, int(math.Ceil(out.x2))+pad), min(last, int(math.Ceil(out.y2))+pad), out}
 			if h.x1 <= h.x2 && h.y1 <= h.y2 {
 				hits = append(hits, h)
-				hasExit = hasExit || id == exitNode
+				hasExit = hasExit || isExitNode(id)
 				// The browser uses these logical bounds, not DOM geometry, for pointer and keyboard input.
 				n.attr["data-echoear-hit"] = fmt.Sprintf("%d %d %d %d", h.x1, h.y1, h.x2, h.y2)
 			}
@@ -746,7 +748,7 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 	}
 	background := root.background()
 	if exit && !hasExit {
-		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Cat</text></g></svg>`)
+		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Face</text></g></svg>`)
 		_ = walk(pill, rasterx.Identity, svgTextStyle{}, false, 4)
 		if root.attr["transform"] != "" || root.attr["opacity"] != "" {
 			// Keep the bridge's escape hatch outside the author's transform/opacity.

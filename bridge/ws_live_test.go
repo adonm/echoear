@@ -33,8 +33,8 @@ func TestLiveWebSocket(t *testing.T) {
 	c := liveClient{client, base, token}
 	html, res := c.read(t, "/app", nil, "", nil, 200)
 	if !bytes.Contains(html, []byte(`<svg id="stage" viewBox="0 0 360 360"`)) ||
-		!bytes.Contains(html, []byte("Join as Phone Cat")) ||
-		!bytes.Contains(html, []byte("+ New Cat")) ||
+		!bytes.Contains(html, []byte("Join on Phone")) ||
+		!bytes.Contains(html, []byte("+ New Companion")) ||
 		!bytes.Contains(html, []byte("Reassign / Load Cat")) ||
 		!bytes.Contains(html, []byte("New Chat")) ||
 		res.Header.Get("Content-Type") != "text/html; charset=utf-8" {
@@ -102,7 +102,7 @@ function onTick(){if(text==="Live tap")text="Live reset";}`
 	phone := testConnectWS(t, base, token, true)
 	phone.json(t, object{"ev": "hello", "role": "web", "device_id": phoneID, "character": "New Cat", "firmware": "web", "volume": 65})
 	face := phone.until(t, hasWS("svg", "cat-ring"))
-	if !hasWS("svg", "#F3F4F6")(face) || !hasWS("svg", "Say hi to design me!")(face) {
+	if !hasWS("svg", "#F3F4F6")(face) || !hasWS("svg", "Say hi to meet me!")(face) {
 		t.Fatal("live Phone Cat did not start blank")
 	}
 	viewer.until(t, hasWS("peers", phoneID))

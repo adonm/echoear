@@ -1,7 +1,7 @@
 import {api} from "./api.js";
 import {setVolume, unlockAudio, volume} from "./audio.js";
 import {loadHistory} from "./chat.js";
-import {$, colors, getLocal, isLive, node, persisted, say, setLocal, wide} from "./dom.js";
+import {$, colors, companionName, getLocal, isLive, node, persisted, say, setLocal, wide} from "./dom.js";
 import {loadSavedCats} from "./library.js";
 import {canStartCall, renderCurrent, select, startPeerCall} from "./live.js";
 import {state} from "./state.js";
@@ -23,11 +23,11 @@ function renderSidebar() {
 function renderReassign() {
   const select = $("reassign-target");
   const choices = state.view?.id ? state.app.devices.filter(d => d.device_id !== state.view.id) : [];
-  const version = JSON.stringify(choices.map(d => [d.device_id, d.character]));
+  const version = JSON.stringify(choices.map(d => [d.device_id, companionName(d)]));
   if (select.dataset.choices !== version) {
     const previous = select.value;
     select.replaceChildren(new Option("Choose a device…", ""),
-      ...choices.map(d => new Option(`${d.character} · ${d.device_id}`, d.device_id)));
+      ...choices.map(d => new Option(`${companionName(d)} · ${d.device_id}`, d.device_id)));
     select.value = choices.some(d => d.device_id === previous) ? previous : "";
     select.dataset.choices = version;
   }
@@ -40,7 +40,7 @@ async function reassignCat(mode) {
   if (!current || current.scope || current.reassigning || !selected?.id || !to) return;
   current.reassigning = true;
   renderReassign();
-  say("reassign-note", mode === "swap" ? "Swapping cats…" : "Moving cat…");
+  say("reassign-note", mode === "swap" ? "Swapping companions…" : "Moving companion…");
   try {
     await api(current, "/api/cats/reassign", {method:"POST",
       body:{from_device_id:selected.id, to_device_id:to, mode}});
@@ -48,11 +48,11 @@ async function reassignCat(mode) {
     refreshDevices();
     loadSavedCats();
     if (state.view === selected) {
-      say("reassign-note", mode === "swap" ? "Cats swapped." : "Cat moved. This device now has a blank starter.");
+      say("reassign-note", mode === "swap" ? "Companions swapped." : "Companion moved. This device now has a fresh starter.");
       loadHistory();
     }
   } catch {
-    if (state.app === current && state.view === selected) say("reassign-note", "Could not reassign cats.");
+    if (state.app === current && state.view === selected) say("reassign-note", "Could not reassign companions.");
   } finally {
     current.reassigning = false;
     if (state.app === current) renderReassign();
@@ -112,8 +112,9 @@ function renderDevices() {
       button.setAttribute("aria-pressed", String(state.view?.id === d.device_id));
       call.hidden = !state.view?.virtual || !isLive(d) || !d.caps?.call || state.view.id === d.device_id;
       call.disabled = !canStartCall();
-      call.setAttribute("aria-label", `Call ${d.character}`);
-      if (name.textContent !== d.character) name.textContent = d.character;
+      const label = companionName(d);
+      call.setAttribute("aria-label", `Call ${label}`);
+      if (name.textContent !== label) name.textContent = label;
       status.setAttribute("data-variant", isLive(d) ? "success" : d.online ? "warning" : "secondary");
       status.textContent = isLive(d) ? "Live WS" : d.online ? "HTTP only" : "Offline";
       meta.textContent = virtual ? "" : [
@@ -126,10 +127,10 @@ function renderDevices() {
       if (!row.isConnected) nav.append(row);
     }
     for (const stale of rows.values()) stale.remove();
-    if (!list.length) nav.append(node("p", "small", virtual ? "No saved Virtual Cats." : "No EchoEars found."));
+    if (!list.length) nav.append(node("p", "small", virtual ? "No virtual companions yet." : "No devices found."));
   }
   renderTargets(state.app.devices);
-  $("join").textContent = state.view?.quick ? "Switch to mirror" : "Join as Phone Cat";
+  $("join").textContent = state.view?.quick ? "Switch to mirror" : "Join on Phone";
   $("join").setAttribute("aria-pressed", String(!!state.view?.quick));
   renderTunnel();
   renderReassign();
@@ -146,10 +147,10 @@ function renderTargets(devices) {
   const target = $("target");
   const choices = devices.filter(d => d.online && d.device_id !== state.view?.id);
   callTargets = new Set(choices.filter(d => d.caps?.call).map(d => d.device_id));
-  const values = choices.map(d => `${d.device_id}:${d.character}`).join("\n");
+  const values = choices.map(d => `${d.device_id}:${companionName(d)}`).join("\n");
   if (target.dataset.choices !== values) {
     const prior = target.value;
-    target.replaceChildren(new Option("Ask my cat", ""), ...choices.map(d => new Option(d.character, d.device_id)));
+    target.replaceChildren(new Option("Ask my companion", ""), ...choices.map(d => new Option(companionName(d), d.device_id)));
     target.value = choices.some(d => d.device_id === prior) ? prior : "";
     target.dataset.choices = values;
   }
@@ -159,7 +160,7 @@ function renderTargets(devices) {
 const preferredCat = devices => devices.find(d => d.kind !== "virtual" && isLive(d))
   || devices.find(d => d.kind !== "virtual") || devices.find(persisted);
 function joinPhone(d) {
-  select(d || {device_id:phone, character:"New Cat", kind:"virtual"}, true);
+  select(d || {device_id:phone, character:"New Cat", cat:{configured:false}, kind:"virtual"}, true);
 }
 
 async function refreshDevices() {
@@ -227,7 +228,7 @@ function renderTunnel() {
     else $("open-link").removeAttribute("href");
   }
   if (!show) return;
-  say("tunnel-cat", d.character);
+  say("tunnel-cat", companionName(d));
   $("share").hidden = !share;
   $("tunnel-create").hidden = !!tunnel?.active;
   $("tunnel-create").disabled = lock || (!status?.installed && !tunnel);
@@ -250,14 +251,14 @@ function safeShareURL(link) {
 $("create-cat").onclick = async e => {
   const current = state.app, button = e.currentTarget;
   button.disabled = true;
-  say("device-note", "Creating cat…");
+  say("device-note", "Creating companion…");
   try {
     const cat = await api(current, "/api/virtual-clients", {method:"POST", body:{}});
     if (state.app !== current) return;
     const d = {...cat, device_id:cat.id, kind:"virtual"};
     current.deviceVersion++;
     current.devices.push(d);
-    say("device-note", "Say hi to design your new cat!");
+    say("device-note", "Say hi to meet your new companion!");
     select(d);
     if (!wide.matches) {
       current.sidebar = false;
@@ -266,7 +267,7 @@ $("create-cat").onclick = async e => {
     }
     refreshDevices();
   } catch {
-    if (state.app === current) say("device-note", "Could not create a cat.");
+    if (state.app === current) say("device-note", "Could not create a companion.");
   } finally {
     button.disabled = false;
   }
@@ -289,7 +290,7 @@ async function changeTunnel(action) {
     if (action === "delete") {
       current.devices = current.devices.filter(d => d.device_id !== cat.id);
       if (state.view === cat) select(preferredCat(current.devices));
-      say("device-note", "Virtual Cat deleted.");
+      say("device-note", "Virtual companion deleted.");
     } else if (d) {
       d.tunnel = result;
       if (state.view === cat) state.view.device = d;
@@ -298,7 +299,7 @@ async function changeTunnel(action) {
     refreshDevices();
     refreshTunnel();
   } catch {
-    if (state.app === current && state.view === cat) say("tunnel-note", `Could not ${action} ${action === "delete" ? "the cat" : "the tunnel"}.`);
+    if (state.app === current && state.view === cat) say("tunnel-note", `Could not ${action} ${action === "delete" ? "the companion" : "the tunnel"}.`);
   } finally {
     current.tunnelBusy = false;
     if (state.app === current) renderDevices();
@@ -311,7 +312,7 @@ $("delete-cat").onclick = () => {
   if (state.view.confirmDelete) changeTunnel("delete");
   else {
     state.view.confirmDelete = true;
-    say("tunnel-note", "Delete this cat? Its share link will stop working.");
+    say("tunnel-note", "Delete this companion? Its share link will stop working.");
     renderTunnel();
   }
 };

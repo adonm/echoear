@@ -55,7 +55,7 @@ func (b *bridge) parentAPI(r *http.Request, id string) (any, error) {
 	if b.parentToken == "" || b.ws == nil || b.db == nil {
 		return nil, problem(503, "Parent controls aren't configured on this bridge")
 	}
-	if !tokenMatches(r.Header.Values("X-EchoEar-Parent-Token"), b.parentToken) {
+	if !tokenHeaderMatches(r.Header, "Parent-Token", b.parentToken) {
 		return nil, problem(403, "Parent token not accepted")
 	}
 	if r.Method == http.MethodGet && id == "" {

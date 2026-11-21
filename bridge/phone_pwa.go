@@ -29,7 +29,7 @@ func (b *bridge) setPhoneCookie(w http.ResponseWriter) {
 var phoneWorkers = [2][]byte{phoneWorker(false), phoneWorker(true)}
 
 func phoneWorker(scoped bool) []byte {
-	paths := []string{"/app", "/app/style.css"}
+	paths := []string{"/app", "/app/style.css", "/app/lark.svg"}
 	files, _ := webFiles.ReadDir("web")
 	for _, file := range files {
 		name := file.Name()
@@ -54,7 +54,7 @@ func phoneWorker(scoped bool) []byte {
 		mode = "scoped"
 	}
 	shell, _ := json.Marshal(paths)
-	return append(fmt.Appendf(nil, "const CACHE = \"echoear-shell-%s-%x\", SHELL = %s;\n", mode, hash.Sum(nil), shell), worker...)
+	return append(fmt.Appendf(nil, "const CACHE = \"lark-shell-%s-%x\", SHELL = %s;\n", mode, hash.Sum(nil), shell), worker...)
 }
 
 func (b *bridge) servePhonePWA(w http.ResponseWriter, r *http.Request, path string, scope *virtualClient, token string) bool {
@@ -109,9 +109,9 @@ func (b *bridge) servePhonePWA(w http.ResponseWriter, r *http.Request, path stri
 		if v, ok := b.virtualByID(id); ok {
 			cat = b.catFor(peer{DeviceID: id, Character: v.Character})
 		} else if phoneID.MatchString(id) {
-			cat = b.catFor(peer{DeviceID: id, Character: "New Cat"})
+			cat = b.catFor(peer{DeviceID: id})
 		} else {
-			sendError(w, problem(404, "Virtual cat not found"))
+			sendError(w, problem(404, "Virtual companion not found"))
 			return true
 		}
 		start.RawQuery = url.Values{"device_id": {id}}.Encode()
@@ -127,9 +127,13 @@ func (b *bridge) servePhonePWA(w http.ResponseWriter, r *http.Request, path stri
 			iconList = append(iconList, object{"src": phonePWAPath + name + "?" + iconQuery.Encode(), "type": "image/png",
 				"sizes": fmt.Sprintf("%dx%d", icons[name], icons[name]), "purpose": purpose})
 		}
+		name := cat.Name
+		if !cat.Configured && name == "New Cat" {
+			name = "Phone Lark"
+		}
 		data, _ := json.Marshal(object{
 			"id": "/app?device_id=" + id, "start_url": start.String(), "scope": "/app",
-			"name": cat.Name, "short_name": cat.Name, "display": "standalone", "orientation": "portrait",
+			"name": name, "short_name": name, "display": "standalone", "orientation": "portrait",
 			"theme_color": cat.MarkColor, "background_color": cat.FaceBG, "icons": iconList,
 		})
 		sendBytes(w, 200, "application/manifest+json", data)
@@ -151,6 +155,6 @@ func (b *bridge) servePhonePWA(w http.ResponseWriter, r *http.Request, path stri
 			return true
 		}
 	}
-	sendError(w, problem(502, "Cannot render cat icon"))
+	sendError(w, problem(502, "Cannot render companion icon"))
 	return true
 }

@@ -310,12 +310,12 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 	}
 	next := current
 	profilesChanged := false
-	archive := func(c catState) error {
+	archive := func(c catState, replace bool) error {
 		if strings.HasPrefix(strings.ToLower(c.Name), "live-") || strings.HasPrefix(id, "echoear-live-") || catSlug(c.Name) == "" {
 			return nil
 		}
 		profilesChanged = true
-		return saveCatProfile(ctx, tx, c, true)
+		return saveCatProfile(ctx, tx, c, replace)
 	}
 	switch op {
 	case "get":
@@ -326,8 +326,10 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 		if err != nil {
 			return catState{}, false, err
 		}
-		if save || next.Configured {
-			if err := archive(next); err != nil {
+		// An omitted flag retains legacy auto-save; an explicit false is a
+		// temporary shift that must not overwrite a named favorite.
+		if _, explicit := args["save_profile"]; save || !explicit && next.Configured {
+			if err := archive(next, true); err != nil {
 				return catState{}, false, unavailable
 			}
 		}
@@ -344,7 +346,7 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 			return catState{}, false, unavailable
 		}
 		if current.Configured && catSlug(current.Name) != slug {
-			if err := archive(current); err != nil {
+			if err := archive(current, false); err != nil {
 				return catState{}, false, unavailable
 			}
 		}
@@ -354,7 +356,7 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 		}
 	case "reset_blank", "new_session":
 		if current.Configured {
-			if err := archive(current); err != nil {
+			if err := archive(current, false); err != nil {
 				return catState{}, false, unavailable
 			}
 		}
@@ -627,7 +629,7 @@ func (b *bridge) transferCats(ctx context.Context, from, to peer, mode string) (
 		nextFrom, nextTo = target, source
 		if mode == "move" {
 			if target.cat.Configured {
-				if err := saveCatProfile(ctx, tx, target.cat, true); err != nil {
+				if err := saveCatProfile(ctx, tx, target.cat, false); err != nil {
 					return err
 				}
 				archived = true

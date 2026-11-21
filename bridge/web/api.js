@@ -10,7 +10,7 @@ if (params.searchParams.has("token")) {
 }
 
 function request(token, path, {method = "GET", body, signal} = {}) {
-  const headers = {"X-EchoEar-Token": token};
+  const headers = {"X-Lark-Token": token};
   if (body && !(body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(body);

@@ -6,7 +6,7 @@ let access, pending = false;
 try { $("bridge-token").value = localStorage.getItem("echoear-token") || ""; } catch {}
 
 async function request(path, fields) {
-  const headers = {"X-EchoEar-Token": access.bridge, "X-EchoEar-Parent-Token": access.parent, Accept:"text/html"};
+  const headers = {"X-Lark-Token": access.bridge, "X-Lark-Parent-Token": access.parent, Accept:"text/html"};
   const method = fields ? "POST" : "GET";
   const failed = (text = "") => {
     try { return JSON.parse(text).error; } catch { return "Cannot reach parent controls."; }
@@ -91,5 +91,5 @@ controls.onsubmit = e => {
   if (!id || !action) return;
   const fields = action === "end_override" ? {} : Object.fromEntries(new FormData(e.target));
   work(() => request(`/api/devices/${encodeURIComponent(id)}/parent`, {action, ...fields}),
-    {settings:"Rules saved.", end_override:"Override ended.", pause:"Cat paused.", unlock:"Cat unlocked."}[action]);
+    {settings:"Rules saved.", end_override:"Override ended.", pause:"Companion paused.", unlock:"Companion unlocked."}[action]);
 };

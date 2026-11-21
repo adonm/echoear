@@ -501,7 +501,7 @@ func TestAppLayoutWarnings(t *testing.T) {
 			<rect data-id="next" x="150" y="270" width="60" height="21"/>
 			<rect data-id="only-padded-corner-clips" x="76" y="36" width="70" height="66"/>`, nil},
 		{"padded overlap", `<rect data-id="next" x="150" y="270" width="60" height="25"/>`,
-			[]string{`control "next" overlaps bottom Cat exit button (keep controls above y=296)`}},
+			[]string{`control "next" overlaps bottom Face exit button (keep controls above y=296)`}},
 		{"one corner", `<g data-id="prev" data-hit="74,20,64,40"/>`,
 			[]string{`control "prev" clips outside the round display bezel`}},
 		{"two corners", `<rect data-id="wide" x="80" y="12" width="200" height="24"/>`,

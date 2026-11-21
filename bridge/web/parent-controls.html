@@ -6,12 +6,12 @@
       <button type="button" id="parent-signout" class="ghost">Sign out</button>
     </div>
   </div>
-  <label data-field for="parent-device">Cat or device
+  <label data-field for="parent-device">Companion or device
     <select id="parent-device" {{if not .Devices}}disabled{{end}}>
       {{range .Devices}}<option value="{{.device_id}}" {{if eq .device_id $.Selected}}selected{{end}}>{{.character}} ({{.device_id}})</option>{{end}}
     </select>
   </label>
-  <p id="no-devices" class="small" {{if .Devices}}hidden{{end}}>No cats or devices are registered.</p>
+  <p id="no-devices" class="small" {{if .Devices}}hidden{{end}}>No companions or devices are registered.</p>
 </header>
 {{with .Usage}}
 <div id="parent-selected" class="parent-columns">
@@ -33,7 +33,7 @@
       <dt>Intercom notes</dt><dd>{{.Activity.intercom}}</dd>
       <dt>Timer cards</dt><dd>{{.Activity.timer_cards}}</dd>
     </dl>
-    <a id="parent-history" href="{{.History}}">Open this cat's chat history</a>
+    <a id="parent-history" href="{{.History}}">Open this companion's chat history</a>
   </article>
     <form id="parent-settings" class="card parent-panel" method="post" aria-labelledby="parent-rules-heading">
       <h3 id="parent-rules-heading">Quiet hours and daily limit</h3>

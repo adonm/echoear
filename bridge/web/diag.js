@@ -16,7 +16,7 @@ function setDiagnostics(open) {
   $("diagnostics").hidden = !diagnosticsOpen;
   $("workspace").hidden = !state.app || diagnosticsOpen;
   $("sidebar-toggle").hidden = !state.app || !!state.app.scope || diagnosticsOpen;
-  $("diagnostics-toggle").textContent = diagnosticsOpen ? "Cat Club" : "Diagnostics";
+  $("diagnostics-toggle").textContent = diagnosticsOpen ? "Back to Lark" : "Diagnostics";
   $("diagnostics-toggle").setAttribute("aria-expanded", String(diagnosticsOpen));
   if (!diagnosticsOpen) return;
   say("diag-status", "Connecting…");

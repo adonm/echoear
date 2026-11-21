@@ -45,7 +45,7 @@ new ResizeObserver(() => {
 
 function transcriptStatus() {
   $("empty-chat").hidden = chat.size !== 0;
-  say("empty-chat", !state.view.id ? "Choose a cat to open its chat." : state.view.loading ? "Loading chat…" :
+  say("empty-chat", !state.view.id ? "Choose a companion to open its chat." : state.view.loading ? "Loading chat…" :
     state.view.historyError ? "Could not load chat. Try Refresh." : "No messages yet — say hi or tap the mic!");
   $("load-older").hidden = !state.view.cursor;
   $("load-older").disabled = !!state.view.loading || !!state.view.resetting;
@@ -144,7 +144,7 @@ $("load-older").onclick = () => loadHistory({older:true});
 $("reset").onclick = async () => {
   const cat = state.view, current = state.app;
   if (!current || current.scope || !cat?.id) return;
-  if (!confirm("Start a fresh cat and chat session on this device? The previous chat will be archived, not deleted.")) return;
+  if (!confirm("Start a fresh companion and chat session on this device? The previous chat will be archived, not deleted.")) return;
   cancelHistoryLoad(cat);
   cat.resetting = true;
   renderCurrent();
@@ -209,7 +209,7 @@ $("photo-file").onchange = async e => {
   try {
     const {displayed} = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/photo`, {method:"POST", body});
     if (state.view !== cat) return;
-    say("chat-note", displayed ? "Photo sent." : "Photo saved. This cat is offline.");
+    say("chat-note", displayed ? "Photo sent." : "Photo saved. This companion is offline.");
     if (!displayed || !state.rev) loadHistory({replace:false});
   } catch {
     if (state.view === cat) say("chat-note", "Could not send the photo. Use a PNG, JPEG or WebP.");

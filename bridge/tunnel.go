@@ -113,7 +113,7 @@ func (m *tunnelManager) restore() {
 	defer m.mu.Unlock()
 	data, err := m.store.all()
 	if err != nil {
-		log.Print("EchoEar could not read saved tunnels")
+		log.Print("Lark could not read saved tunnels")
 		return
 	}
 	for id, record := range data {
@@ -124,7 +124,7 @@ func (m *tunnelManager) restore() {
 			if scope, _, err := m.listen(v, record.Token, record.LocalPort); err == nil {
 				m.live[id] = scope
 			} else {
-				log.Printf("EchoEar could not restore scoped listener for %s", id)
+				log.Printf("Lark could not restore scoped listener for %s", id)
 			}
 		}
 	}
@@ -369,7 +369,7 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			sendError(w, problem(404, "Not found"))
 			return
 		}
-		if !tokenMatches(r.Header.Values("X-EchoEar-Token"), token) && !tokenMatches(r.URL.Query()["token"], token) {
+		if !tokenHeaderMatches(r.Header, "Token", token) && !tokenMatches(r.URL.Query()["token"], token) {
 			sendError(w, problem(401, "Unauthorized"))
 			return
 		}

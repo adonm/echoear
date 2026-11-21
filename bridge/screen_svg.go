@@ -257,7 +257,7 @@ func menuDetail(title string, row menuRow) sceneView {
 		s.art += svgText(180, 134+i*17, 15, line, menuInk, `font-family="monospace"`)
 	}
 	s.control(bounds{92, 276, 79, 42}, actionTile("menu-back", "Back", "back", navPalette))
-	s.control(bounds{189, 276, 79, 42}, actionTile("cat", "Cat", "", navPalette))
+	s.control(bounds{189, 276, 79, 42}, actionTile("cat", "Face", "", navPalette))
 	return s
 }
 
@@ -310,7 +310,7 @@ func peerScene(peers []menuPeer, page int, calling bool) sceneView {
 	}
 	s := tileGrid(title, choices, page)
 	if len(choices) == 0 {
-		s.art += svgLabel(180, 167, 19, "No call-ready cats online", menuMuted)
+		s.art += svgLabel(180, 167, 18, "No call-ready devices online", menuMuted)
 	}
 	return s
 }

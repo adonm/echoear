@@ -127,14 +127,14 @@ async function loadSavedCats() {
       const dot = node("span", "cat-dot");
       dot.setAttribute("aria-hidden", "true");
       heading.append(dot, node("span", "compact-label", profile.name));
-      const load = removeButton("Assign to selected", profile.name, async () => {
+      const load = removeButton("Load form", profile.name, async () => {
         try {
           const result = await api(current, `/api/devices/${encodeURIComponent(selected.id)}/cat`,
             {method:"POST", body:{slug:profile.slug}});
           if (state.app === current) updateCat({...result, character:result.cat.name, voice:result.cat.voice});
-          if (state.view === selected) say("saved-cat-note", `Assigned ${profile.name}. Chat history kept.`);
+          if (state.view === selected) say("saved-cat-note", `Loaded ${profile.name}. Chat history kept.`);
         } catch {
-          if (state.view === selected) say("saved-cat-note", "Could not load that cat.");
+          if (state.view === selected) say("saved-cat-note", "Could not load that form.");
         }
       });
       load.disabled = !selected?.id;
@@ -150,9 +150,9 @@ async function loadSavedCats() {
       return item;
     });
     $("saved-cat-items").replaceChildren(...items);
-    say("saved-cat-note", cats.length ? "" : "No saved cats yet.");
+    say("saved-cat-note", cats.length ? "" : "No saved forms yet.");
   } catch {
-    if (active()) say("saved-cat-note", "Could not load saved cats.");
+    if (active()) say("saved-cat-note", "Could not load saved forms.");
   }
 }
 $("reassign-cat").ontoggle = loadSavedCats;

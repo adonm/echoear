@@ -51,6 +51,10 @@ func TestPhonePWAInstallAssets(t *testing.T) {
 	request(t, scoped, manifest+"?token="+grant+"&device_id=virt-00000000", nil, 403)
 	request(t, scoped, phonePWAPath+"icon-192.png?device_id="+id, cookie, 401)
 	request(t, scoped, "/app/parent", nil, 404)
+	assertAsset := request(t, scoped, "/app/lark.svg", nil, 200)
+	if assertAsset.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Fatal("wrong favicon MIME type")
+	}
 	request(t, scoped, "/app/photo-library.js", nil, 404)
 	request(t, scoped, "/api/library?token="+grant, nil, 404)
 	for _, tc := range []struct {
@@ -109,7 +113,7 @@ func TestPhonePWAInstallAssets(t *testing.T) {
 	}
 	quick := request(t, b, manifest+"?device_id=phone-abcd", cookie, 200)
 	quickApp := testObject(t, quick.Body.Bytes())
-	if quickApp["name"] != "New Cat" || quickApp["start_url"] != "/app?device_id=phone-abcd" {
+	if quickApp["name"] != "Phone Lark" || quickApp["start_url"] != "/app?device_id=phone-abcd" {
 		t.Fatal("Quick Join cat cannot be launched again")
 	}
 	lanWorker := request(t, b, "/app/sw.js", nil, 200)
@@ -118,7 +122,8 @@ func TestPhonePWAInstallAssets(t *testing.T) {
 		!strings.Contains(lanWorker.Body.String(), `"/app/photo-library.js"`) ||
 		strings.Contains(privateWorker.Body.String(), `"/app/photo-library.js"`) ||
 		strings.Contains(privateWorker.Body.String(), grant) || bytes.Equal(lanWorker.Body.Bytes(), privateWorker.Body.Bytes()) ||
-		!strings.Contains(privateWorker.Body.String(), `"echoear-shell-scoped-`) {
+		!strings.Contains(privateWorker.Body.String(), `"/app/lark.svg"`) ||
+		!strings.Contains(privateWorker.Body.String(), `"lark-shell-scoped-`) {
 		t.Fatal("worker scope or shell allowlist is incorrect")
 	}
 }

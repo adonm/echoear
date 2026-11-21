@@ -89,7 +89,7 @@ a { color: var(--primary); }
 dialog:modal { max-block-size: min(88dvh, var(--visual-height, 88dvh)); overscroll-behavior: contain; }
 dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 
-/* Cat Club shell */
+/* Lark shell */
 .masthead, .workspace, .diagnostics, .parent-layout {
   width: min(calc(100% - 2 * var(--gutter)), 96rem);
   margin-inline: auto;

@@ -19,7 +19,7 @@ test("LAN install assets use a cat ID, scoped assets use only the existing share
 
 test("worker caches only the versioned shell; runtime navigation never writes private URLs", async () => {
   const listen = {}, calls = [], origin = "https://fixture.invalid";
-  const offlineShell = new Response("offline shell"), online = new Response("online"), cache = "echoear-shell-scoped-new";
+  const offlineShell = new Response("offline shell"), online = new Response("online"), cache = "lark-shell-scoped-new";
   let offline = false;
   const context = {
     URL, Request, Response,
@@ -33,7 +33,7 @@ test("worker caches only the versioned shell; runtime navigation never writes pr
           match: async path => { calls.push(["match", path]); return offlineShell; },
         };
       },
-      keys:async () => ["echoear-shell-scoped-old", cache, "other-app"],
+      keys:async () => ["echoear-shell-scoped-old", "lark-shell-scoped-old", cache, "other-app"],
       delete:async key => calls.push(["delete", key]),
     },
     fetch:async request => {
@@ -42,14 +42,15 @@ test("worker caches only the versioned shell; runtime navigation never writes pr
       return online;
     },
   };
-  runInNewContext(`const CACHE = "${cache}", SHELL = ["/app", "/app/client.js", "/app/style.css"];\n` +
+  runInNewContext(`const CACHE = "${cache}", SHELL = ["/app", "/app/client.js", "/app/style.css", "/app/lark.svg"];\n` +
     readFileSync(new URL("./sw.js", import.meta.url), "utf8"), context);
   let done;
   listen.install({waitUntil: promise => done = promise});
   await done;
   listen.activate({waitUntil: promise => done = promise});
   await done;
-  assert.deepEqual(calls, [["precache", "/app", "/app/client.js", "/app/style.css"], ["delete", "echoear-shell-scoped-old"]]);
+  assert.deepEqual(calls, [["precache", "/app", "/app/client.js", "/app/style.css", "/app/lark.svg"],
+    ["delete", "echoear-shell-scoped-old"], ["delete", "lark-shell-scoped-old"]]);
   calls.length = 0;
 
   function request(path, mode = "cors", method = "GET") {

@@ -106,7 +106,7 @@ func catChrome(cat catState, pose catPose) sceneView {
 			svgLabel(180, 262, 14, strconv.Itoa(pose.volume)+"%", menuInk)
 	}
 	if !cat.Configured && pose.mood == "idle" && !pose.meter {
-		s.art += svgLabel(180, 267, 14, "Say hi to design me!", "#475569")
+		s.art += svgLabel(180, 267, 14, "Say hi to meet me!", "#475569")
 	}
 	switch pose.mood {
 	case "", "idle":
@@ -186,7 +186,7 @@ func (card intercomCard) scene(canCall bool) sceneView {
 func noticeScene(title, message string) sceneView {
 	cat := blankCat()
 	s := messageScene(title, title, message, cat)
-	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Cat", "", navPalette))
+	s.control(bounds{139, 300, 82, 32}, actionTile("cat", "Face", "", navPalette))
 	return s
 }
 

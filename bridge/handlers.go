@@ -64,6 +64,14 @@ func sendJSON(w http.ResponseWriter, status int, v any) {
 	sendBytes(w, status, jsonType, data)
 }
 
+func tokenHeaderMatches(h http.Header, name, want string) bool {
+	lark, legacy := h.Values("X-Lark-"+name), h.Values("X-EchoEar-"+name)
+	if len(lark) != 0 {
+		return len(legacy) == 0 && tokenMatches(lark, want)
+	}
+	return tokenMatches(legacy, want)
+}
+
 func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.EscapedPath()
 	w.Header().Set("Cache-Control", "no-store")
@@ -72,7 +80,7 @@ func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ota/") {
-		if !tokenMatches(r.Header.Values("X-EchoEar-Token"), b.token) {
+		if !tokenHeaderMatches(r.Header, "Token", b.token) {
 			sendError(w, problem(401, "Unauthorized"))
 			return
 		}

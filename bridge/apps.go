@@ -1009,7 +1009,7 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		a.Name = save
 	}
 	if a.Title == "" {
-		a.Title = "EchoEar App"
+		a.Title = "Lark App"
 	}
 	if a.Name == "" {
 		a.Name = truncate(catSlug(a.Title), 48)
@@ -1317,7 +1317,7 @@ func (h *wsHub) tickApps(now time.Time) {
 }
 
 func (h *wsHub) updateApp(a *appInstance, ev appEvent) bool {
-	if ev.kind == "tap" && ev.id == exitNode {
+	if ev.kind == "tap" && isExitNode(ev.id) {
 		h.closeApp(a, ev.now)
 		return true
 	}

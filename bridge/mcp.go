@@ -47,7 +47,7 @@ func validRPCID(id json.RawMessage) bool {
 }
 
 func (b *bridge) serveMCP(w http.ResponseWriter, r *http.Request) {
-	if b.token == "" || !tokenMatches(r.Header.Values("X-EchoEar-Token"), b.token) &&
+	if b.token == "" || !tokenHeaderMatches(r.Header, "Token", b.token) &&
 		!tokenMatches(r.Header.Values("Authorization"), "Bearer "+b.token) {
 		sendError(w, problem(401, "Unauthorized"))
 		return
@@ -201,7 +201,7 @@ var mcpTools = func() []object {
 					"face_edits": array(schema(object{"part": enum(faceParts...), "pose": enum(faceEditPoses...),
 						"svg": object{"type": "string", "maxLength": 16384, "description": "Replacement SVG fragment. Omit pose for all matching parts."}}, "part", "svg")),
 					"slug": object{"type": "string", "description": "Saved cat slug for load/delete_saved"}, "configured": flag,
-					"save_profile": object{"type": "boolean", "description": "Save an updated cat as a reusable profile"}}),
+					"save_profile": object{"type": "boolean", "description": "True saves the current form by name; false shifts without replacing a favorite"}}),
 				"memory": object{"anyOf": []object{memory, array(memory)}},
 				"apps":   schema(object{"delete": array(text), "rename": array(rename), "update": object{"anyOf": []object{update, array(update)}}}),
 				"timer":  schema(object{"op": enum("set", "update", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),

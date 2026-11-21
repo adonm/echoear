@@ -477,6 +477,24 @@ func TestAppSFXChimeAndUnknownSoundKeepGameRunning(t *testing.T) {
 	checkLevel("3")
 }
 
+func TestAppExitAcceptsBothControlIDs(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-app-exit"
+	board := testConnectWS(t, base, "unit", false)
+	board.helloV2(t, id, "Cake")
+	for _, exit := range []string{exitNode, "lark-exit"} {
+		code := `function render(){return '<svg><rect data-id="` + exit + `" x="140" y="290" width="80" height="25"/></svg>'}`
+		out := toolTest(t, base, "app", object{"devices": id, "code": code}, false)
+		if hits := out["hit_ids"].([]any); !slices.Equal(hits, []any{exit}) {
+			t.Fatalf("custom exit should suppress the injected pill: %v", hits)
+		}
+		board.until(t, isDisplay)
+		board.json(t, object{"ev": "tap", "x": 180, "y": 302})
+		eventually(t, func() bool { return stateMe(t, base, id)["active_app"] == nil })
+		board.until(t, isDisplay)
+	}
+}
+
 func TestAppLaunchReportsLayoutWarnings(t *testing.T) {
 	_, base := wsHarness(t, nil)
 	const roundID, rectID = "echoear-round", "box3-rect"
@@ -487,7 +505,7 @@ func TestAppLaunchReportsLayoutWarnings(t *testing.T) {
 	}
 	const svg = `<svg><rect data-id="next" x="150" y="270" width="60" height="25"/>
 		<rect data-id="wide" x="80" y="12" width="200" height="24"/></svg>`
-	const overlap = `control "next" overlaps bottom Cat exit button (keep controls above y=296)`
+	const overlap = `control "next" overlaps bottom Face exit button (keep controls above y=296)`
 	const bezel = `control "wide" clips outside the round display bezel`
 	for _, tc := range []struct {
 		title   string

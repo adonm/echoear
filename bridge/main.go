@@ -25,6 +25,8 @@ func env(key, fallback string) string {
 
 var tokenRE = regexp.MustCompile(`^[!-~]+$`)
 
+const bridgeListeningPrefix = "Lark bridge listening on "
+
 func openCodeSettings(agent string) ocSettings {
 	s := ocSettings{Agent: agent, Permissions: []ocPermission{{"*", "*", "deny"}}}
 	if agent == "echoear" {
@@ -73,7 +75,7 @@ func run() error {
 		return errors.New("could not load the pinned Silero v5 model")
 	}
 	vad.close()
-	log.Print("EchoEar endpoint VAD ready (in-process Silero v5)")
+	log.Print("Lark endpoint VAD ready (in-process Silero v5)")
 	endpointConfig := &endpointSettings{newVAD: func() endpointVAD { return newSileroVAD(vadPath) }}
 	ocURL, ocPassword := os.Getenv("ECHOEAR_OPENCODE_URL"), os.Getenv("ECHOEAR_OPENCODE_PASSWORD")
 	ocAPI, err := openCodeUpstream(pooledClient(), state, ocURL, ocPassword)
@@ -147,6 +149,7 @@ func run() error {
 	b := &bridge{root: root, token: token, parentToken: parentToken, db: db, peers: peers{deviceStore(db)},
 		deferMCPCompaction: os.Getenv("ECHOEAR_DEFER_MCP_COMPACTION") == "1",
 		stt:                parakeet.transcribe, endpoint: endpointConfig, oc: oc, pairPort: pairPort, worker: worker,
+		// Keep hashing the prompt behind the installed echoear agent symlink.
 		agentPath: filepath.Join(project, "agents/echoear.md"),
 		voices:    deviceVoiceStore(db, fallbackVoice),
 		virtual:   virtualStore(db), history: &chatHistory{db},
@@ -235,7 +238,7 @@ func run() error {
 	}()
 	server := &http.Server{Handler: b, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 105 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
-	log.Printf("EchoEar bridge listening on %s", listener.Addr())
+	log.Print(bridgeListeningPrefix + listener.Addr().String())
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	served := make(chan error, 1)

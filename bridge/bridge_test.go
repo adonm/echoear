@@ -256,6 +256,29 @@ func TestStateAndDirectMessage(t *testing.T) {
 
 func TestBridgeAuthAndBody(t *testing.T) {
 	b := &bridge{token: "correct", peers: peers{deviceStore(testDB(t, ":memory:", ""))}}
+	for _, tc := range []struct {
+		lark, legacy []string
+		want         int
+	}{
+		{[]string{"correct"}, nil, 200},
+		{nil, []string{"correct"}, 200},
+		{[]string{"wrong"}, nil, 401},
+		{[]string{"correct", "correct"}, nil, 401},
+		{[]string{"correct"}, []string{"wrong"}, 401},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/scope", nil)
+		for _, token := range tc.lark {
+			req.Header.Add("X-Lark-Token", token)
+		}
+		for _, token := range tc.legacy {
+			req.Header.Add("X-EchoEar-Token", token)
+		}
+		res := httptest.NewRecorder()
+		b.ServeHTTP(res, req)
+		if res.Code != tc.want {
+			t.Fatalf("bridge auth: HTTP %d, want %d", res.Code, tc.want)
+		}
+	}
 	for _, path := range []string{"/api/register", "/api/text", "/api/voice", "/api/intercom", "/api/assets"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
 		req.Header.Set("X-EchoEar-Token", "correct")

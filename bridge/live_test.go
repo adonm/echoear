@@ -249,7 +249,7 @@ func liveIsolated(t *testing.T, data string, conf map[string]string, token strin
 	go func() {
 		s := bufio.NewScanner(logs)
 		for s.Scan() {
-			if _, a, ok := strings.Cut(s.Text(), "EchoEar bridge listening on "); ok {
+			if _, a, ok := strings.Cut(s.Text(), bridgeListeningPrefix); ok {
 				addr <- a
 			}
 		}
