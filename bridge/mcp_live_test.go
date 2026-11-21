@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -15,20 +16,34 @@ import (
 	"time"
 )
 
-func TestLiveEchoEarCodeMode(t *testing.T) {
+func TestRealModelEchoEarCodeMode(t *testing.T) {
+	if os.Getenv("ECHOEAR_REAL_MODEL") != "1" {
+		t.Skip("opt in with scripts/check.sh --real-model")
+	}
+	smokeHome := os.Getenv("ECHOEAR_SMOKE_CONFIG_HOME")
+	if smokeHome == "" {
+		t.Fatal("set ECHOEAR_SMOKE_CONFIG_HOME to the separate config of a disposable bridge and OpenCode pair")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("XDG_CONFIG_HOME", smokeHome)
 	config := liveConfig(t, home)
 	port := config["ECHOEAR_BRIDGE_PORT"]
-	if port == "" {
-		port = "8765"
+	ocURL, err := url.Parse(config["ECHOEAR_OPENCODE_URL"])
+	portNum, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || portNum < 1 || portNum > 65535 || portNum == 8765 {
+		t.Fatal("the smoke requires separate loopback ports; never point it at the installed bridge or OpenCode")
+	}
+	ocPort, err := strconv.Atoi(ocURL.Port())
+	if err != nil || ocPort == 49375 || ocPort == 49376 {
+		t.Fatal("the smoke requires separate loopback ports; never point it at the installed bridge or OpenCode")
 	}
 	client := pooledClient()
 	client.Timeout = 105 * time.Second
 	defer client.CloseIdleConnections()
-	c := liveClient{client, env("ECHOEAR_TEST_URL", "http://"+net.JoinHostPort("127.0.0.1", port)), config["ECHOEAR_BRIDGE_TOKEN"]}
+	c := liveClient{client, "http://" + net.JoinHostPort("127.0.0.1", port), config["ECHOEAR_BRIDGE_TOKEN"]}
 	catalog := liveJSON[struct {
 		Result struct{ Tools []struct{ Name string } }
 	}](t, c, "/mcp", object{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, nil, "", nil)
@@ -105,9 +120,11 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 			"',chime:'tap'}), and tools.echoear.app({devices:'"+id+
 			"',exit:true}). Return all four tool results from execute, then say one short sentence. Do not call any other tool.",
 		legacyCat(character, "cake"))
-	_, sid, err := o.ask(root, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
+	turn, endTurn := context.WithTimeout(root, 60*time.Second)
+	defer endTurn()
+	_, sid, err := o.ask(turn, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("real-model Code Mode smoke failed (separate from release checks): %v", err)
 	}
 	assertLiveActor(t, api, sid, settings)
 	type toolPart struct {

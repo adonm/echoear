@@ -45,7 +45,9 @@ func TestLiveWebSocket(t *testing.T) {
 	}
 	c.read(t, "/api/diagnostics", nil, "", nil, 200)
 	token = "echoear-live-ws-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	iso := liveIsolated(t, home, env("XDG_DATA_HOME", filepath.Join(home, ".local/share")), conf, token, client)
+	stub, _ := liveModelStub(t, ocModel{Provider: "test", ID: "deterministic"})
+	conf["ECHOEAR_OPENCODE_URL"], conf["ECHOEAR_OPENCODE_PASSWORD"] = stub, ""
+	iso := liveIsolated(t, env("XDG_DATA_HOME", filepath.Join(home, ".local/share")), conf, token, client)
 	base = iso.base
 
 	var suffix [2]byte

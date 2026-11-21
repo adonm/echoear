@@ -14,12 +14,15 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -211,7 +214,7 @@ func assertLiveActor(t *testing.T, oc upstream, sid string, settings ocSettings)
 	}
 }
 
-func liveIsolated(t *testing.T, home, data string, conf map[string]string, token string, client *http.Client) liveClient {
+func liveIsolated(t *testing.T, data string, conf map[string]string, token string, client *http.Client) liveClient {
 	t.Helper()
 	root := t.TempDir()
 	state := filepath.Join(root, "echoear")
@@ -223,14 +226,17 @@ func liveIsolated(t *testing.T, home, data string, conf map[string]string, token
 			t.Fatal(err)
 		}
 	}
-	binary := env("ECHOEAR_TEST_BIN", filepath.Join(home, ".local/share/echoear/echoear-bridge"))
+	binary := os.Getenv("ECHOEAR_TEST_BIN")
+	if binary == "" || !filepath.IsAbs(binary) {
+		t.Fatal("run scripts/check.sh --live to build an isolated bridge from this checkout")
+	}
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+root, "ECHOEAR_BRIDGE_TOKEN="+token, "ECHOEAR_BRIDGE_HOST=127.0.0.1",
 		"ECHOEAR_BRIDGE_PORT=0", "ECHOEAR_DB_PATH="+filepath.Join(state, "echoear.db"),
 		"ECHOEAR_TURSO_URL=", "ECHOEAR_TURSO_AUTH_TOKEN=", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_REPO_DIR=..",
 		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"],
 		"ECHOEAR_OPENCODE_URL="+conf["ECHOEAR_OPENCODE_URL"], "ECHOEAR_OPENCODE_PASSWORD="+conf["ECHOEAR_OPENCODE_PASSWORD"],
-		"ECHOEAR_OPENCODE_DIR="+liveOpenCodeDir(home, conf), "ECHOEAR_OPENCODE_PAIR_PORT=0",
+		"ECHOEAR_OPENCODE_DIR="+filepath.Join(root, "workspace"), "ECHOEAR_OPENCODE_PAIR_PORT=0",
 		"TTS_MODEL_DIR="+conf["TTS_MODEL_DIR"])
 	logs, err := cmd.StderrPipe()
 	if err != nil || cmd.Start() != nil {
@@ -284,18 +290,9 @@ func TestLive(t *testing.T) {
 	}
 	data := env("XDG_DATA_HOME", filepath.Join(home, ".local/share"))
 	conf := liveConfig(t, home)
-	if conf["ECHOEAR_OPENCODE_AGENT"] == "" {
-		conf["ECHOEAR_OPENCODE_AGENT"] = "echoear"
-	}
-	settings := openCodeSettings(conf["ECHOEAR_OPENCODE_AGENT"])
 	client := pooledClient()
 	client.Timeout = 115 * time.Second
 	defer client.CloseIdleConnections()
-	oc := liveOpenCode(t, client, home, conf)
-	settings, err = (&openCode{upstream: oc, project: liveOpenCodeDir(home, conf), settings: settings}).configuredSettings(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
 	port := conf["ECHOEAR_BRIDGE_PORT"]
 	if port == "" {
 		port = "8765"
@@ -308,7 +305,6 @@ func TestLive(t *testing.T) {
 	unauthorized.read(t, "/api/chat", []byte("{}"), jsonType, nil, 401)
 	unauthorized.read(t, "/ota/latest.bin", nil, "", nil, 401)
 	run := "echoear-live-" + hex.EncodeToString([]byte(strconv.FormatInt(time.Now().UnixNano(), 36)))
-	liveSessions(t, oc, run)
 
 	liveDevices := func(t *testing.T) map[string]string {
 		t.Helper()
@@ -361,13 +357,18 @@ func TestLive(t *testing.T) {
 		t.Fatal("direct TTS returned invalid PCM")
 	}
 	t.Run("VoiceAndChat", func(t *testing.T) {
-		iso := liveIsolated(t, home, data, conf, run, client)
+		settings := openCodeSettings("echoear")
+		settings.Model = ocModel{Provider: "test", ID: "deterministic"}
+		stub, oc := liveModelStub(t, settings.Model)
+		conf := maps.Clone(conf)
+		conf["ECHOEAR_OPENCODE_URL"], conf["ECHOEAR_OPENCODE_PASSWORD"], conf["ECHOEAR_OPENCODE_AGENT"] = stub, "", settings.Agent
+		iso := liveIsolated(t, data, conf, run, client)
 		id := run + "-voice"
 		board := testConnectWS(t, iso.base, iso.token, false)
-		board.timeout = 100 * time.Second
+		board.timeout = 25 * time.Second
 		board.helloV2(t, id, "LiveVoice")
 		viewer := testConnectWS(t, iso.base, iso.token, true)
-		viewer.timeout = 100 * time.Second
+		viewer.timeout = 25 * time.Second
 		viewer.watch(t, id)
 		input, _ := json.Marshal(object{"text": liveVoicePrompt})
 		recording, _ := iso.read(t, "/api/tts", input, jsonType, nil, 200)
@@ -377,10 +378,11 @@ func TestLive(t *testing.T) {
 			board.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, chunk...)))
 		}
 		board.json(t, object{"ev": "rec_end"})
+		board.until(t, hasWS("chime", `"kind":"think"`))
 		board.until(t, hasWS("tts", `"state":"start"`))
 		var spoken []byte
 		end := board.until(t, func(f wsFrame) bool {
-			if f.op == wsBinary && f.data[0] == pcmPrefix {
+			if isPlayback(f) {
 				spoken = append(spoken, f.data[1:]...)
 			}
 			return hasWS("tts", `"state":"end"`)(f)
@@ -416,6 +418,21 @@ func TestLive(t *testing.T) {
 			t.Fatal("HTTP chat did not reuse the WebSocket voice session or preserve provenance")
 		}
 		t.Logf("validated voice capture, playback, canonical history, HTTP follow-up and %d replayed PCM bytes", len(pcm))
+
+		board = testConnectWS(t, iso.base, iso.token, false)
+		board.helloV2(t, id, "LiveVoice")
+		viewer = testConnectWS(t, iso.base, iso.token, true)
+		viewer.watch(t, id)
+		board.json(t, object{"ev": "text", "text": liveQuotaPrompt})
+		viewer.until(t, hasWS("svg", "Try again"))
+		board.write(t, maskedFrame(wsPing, true, nil))
+		board.until(t, func(f wsFrame) bool {
+			if hasWS("tts", `"state":"start"`)(f) || isPlayback(f) {
+				t.Fatal("model rejection unexpectedly started audio")
+			}
+			return f.op == wsPong
+		})
+		t.Log("stub model 429 produced the WebSocket error scene instead of TTS")
 	})
 	t.Run("DevicesAfter", func(t *testing.T) {
 		if !maps.Equal(before, liveDevices(t)) {
@@ -423,4 +440,87 @@ func TestLive(t *testing.T) {
 		}
 		t.Logf("%d registered peer addresses unchanged", len(before))
 	})
+}
+
+const liveQuotaPrompt = "Simulate a model usage limit."
+
+// Exercise the production HTTP adapter using OpenCode V2's final projection.
+// The untagged WS tests exercise the eager SSE path separately.
+func liveModelStub(t *testing.T, model ocModel) (string, upstream) {
+	t.Helper()
+	const sid = "ses-live-model-stub"
+	const path = "/api/session/" + sid
+	var messages []object
+	var mu sync.Mutex
+	prompts := 0
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		var data any
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/info":
+			data = object{}
+		case "GET /api/agent/echoear":
+			data = object{"id": "echoear", "model": model}
+		case "POST /api/session", "GET " + path:
+			data = object{"id": sid, "agent": "echoear", "model": model, "permissions": openCodeSettings("echoear").Permissions}
+		case "POST " + path + "/prompt":
+			var input struct{ Text string }
+			if json.NewDecoder(r.Body).Decode(&input) != nil {
+				w.WriteHeader(400)
+				return
+			}
+			prompts++
+			id := strconv.Itoa(prompts)
+			data = object{"id": "user-" + id}
+			messages = append(messages, object{"id": "user-" + id, "type": "user", "text": input.Text})
+			switch p := strings.ToLower(input.Text); {
+			case strings.HasSuffix(input.Text, liveQuotaPrompt):
+				messages = append(messages, object{"id": "idle-" + id, "type": "idle", "outcome": "failed", "error": object{"status": 429}})
+				writeStubJSON(w, data)
+				return
+			case strings.Contains(p, "right triangle"):
+				input.Text = "A right triangle has a ninety degree angle. It looks like a corner."
+			case strings.Contains(p, "paris"):
+				input.Text = "Paris is the capital of France."
+			default:
+				t.Error("stub model received an unexpected prompt")
+				w.WriteHeader(400)
+				return
+			}
+			messages = append(messages, object{"id": "assistant-" + id, "type": "assistant", "agent": "echoear", "model": model,
+				"finish": "stop", "content": []object{{"type": "text", "text": input.Text}}})
+		case "POST /api/experimental/session/" + sid + "/wait", "POST " + path + "/interrupt":
+			data = object{}
+		case "GET " + path + "/message":
+			rows := make([]object, 0, len(messages))
+			for _, row := range messages {
+				if kind := r.URL.Query().Get("type"); kind == "" || row["type"] == kind {
+					rows = append(rows, row)
+				}
+			}
+			if r.URL.Query().Get("order") == "desc" {
+				slices.Reverse(rows)
+			}
+			if limit, _ := strconv.Atoi(r.URL.Query().Get("limit")); limit > 0 && limit < len(rows) {
+				rows = rows[:limit]
+			}
+			data = rows
+		default:
+			w.WriteHeader(404)
+			return
+		}
+		writeStubJSON(w, data)
+	}))
+	t.Cleanup(stub.Close)
+	api, err := openCodeUpstream(stub.Client(), "", stub.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stub.URL, api
+}
+
+func writeStubJSON(w http.ResponseWriter, data any) {
+	w.Header().Set("Content-Type", jsonType)
+	_ = json.NewEncoder(w).Encode(object{"data": data})
 }
