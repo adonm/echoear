@@ -304,7 +304,7 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string) (answer, er
 		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
 		return b.relay(ctx, sender, others, direct.target, direct.text)
 	}
-	if reply, _, err := b.buildReply(ctx, sender, text, source); err != nil {
+	if reply, _, err := b.buildReply(ctx, sender, text); err != nil {
 		return answer{}, err
 	} else if reply != "" {
 		out := answer{Reply: reply}
@@ -316,7 +316,7 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string) (answer, er
 			speech.complete([]string{reply})
 			b.attachAudio(ctx, &out, speech.stream, start)
 		}
-		if err := b.parentAllowed(sender.DeviceID); err != nil {
+		if err := b.deliverOfflineBuildReply(ctx, sender, text, reply, source); err != nil {
 			return answer{}, err
 		}
 		return out, nil

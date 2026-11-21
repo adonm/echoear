@@ -256,22 +256,26 @@ func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
 			b, base := stubBuildBridge(t, stub, true, &speech)
 			s := testConnectWS(t, base, "unit", true)
 			s.hello(t, device, "Cat")
-			finishSpeech := func(label string) {
+			finishSpeech := func(label, chat string) {
 				t.Helper()
 				seenCard := label == ""
+				seenChat := chat == ""
 				var end wsFrame
 				s.until(t, func(f wsFrame) bool {
 					seenCard = seenCard || hasWS("svg", label)(f)
+					if f.op == wsText && strings.Contains(string(f.data), `"type":"chat"`) {
+						seenChat = seenChat || strings.Contains(string(f.data), chat)
+					}
 					if hasWS("tts", `"state":"end"`)(f) {
 						end = f
 					}
-					return seenCard && end.data != nil
+					return seenCard && seenChat && end.data != nil
 				})
 				s.json(t, object{"ev": "tts_ack", "state": "done", "audio": testObject(t, end.data)["audio"]})
 				s.barrier(t)
 			}
 			s.json(t, object{"ev": "text", "text": prompt})
-			finishSpeech("Cancel build")
+			finishSpeech("Cancel build", "Building it now!")
 			var job string
 			select {
 			case job = <-stub.prompted:
@@ -302,14 +306,21 @@ func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
 				t.Fatal(restricted, err)
 			}
 			if reason == parentLimit {
-				finishSpeech("") // Parent controls' own lockout announcement.
+				finishSpeech("", "") // Parent controls' own lockout announcement.
 			}
 			before := speech.Load()
+			beforeChat, err := b.history.list(t.Context(), device)
+			if err != nil || len(beforeChat) != 2 {
+				t.Fatalf("permitted acknowledgement not in chat: %v, %v", beforeChat, err)
+			}
 
 			// Complete the running job concurrently with a late acknowledgement
 			// and a new request from the now restricted device.
 			close(stub.allow)
-			h.buildAcknowledgement(t.Context(), d, turn, "Building it now!", job)
+			h.buildAcknowledgement(t.Context(), d, turn, prompt, "typed", "Building it now!", job)
+			if err := b.deliverOfflineBuildReply(t.Context(), d.who, prompt, "Building it now!", "typed"); err == nil {
+				t.Error("restricted offline acknowledgement delivered")
+			}
 			testRequest(t, "POST", base+"/api/chat", "unit", object{"device_id": device, "text": prompt}, 423)
 			s.json(t, object{"ev": "text", "text": prompt})
 			s.barrier(t)
@@ -319,6 +330,13 @@ func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
 			expectValue(t, stub.deleted, job)
 			result := waitBuildState(t, b, job, "ready")
 			h.announceBuild(t.Context(), buildJob{id: job, device: device, state: "ready", result: result})
+			s.write(t, maskedFrame(wsPing, true, nil))
+			s.until(t, func(f wsFrame) bool {
+				if f.op == wsText && strings.Contains(string(f.data), `"type":"chat"`) {
+					t.Error("chat frame reached the restricted builder device")
+				}
+				return f.op == wsPong
+			})
 
 			var announced bool
 			if err := b.db.QueryRow(`SELECT announced FROM build_jobs WHERE id=?`, job).Scan(&announced); err != nil || announced {
@@ -331,6 +349,10 @@ func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
 			h.mu.Unlock()
 			if speech.Load() != before {
 				t.Error("builder synthesized speech under restriction")
+			}
+			duringChat, err := b.history.list(t.Context(), device)
+			if err != nil || len(duringChat) != len(beforeChat) {
+				t.Fatalf("builder delivered restricted chat: %v, %v", duringChat, err)
 			}
 
 			// A queued job accepted before a restriction must not be claimed
@@ -354,12 +376,16 @@ func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			b.builders.signal()
-			finishSpeech("build-done")
+			finishSpeech("build-done", `"card_title":"Ready"`)
 			if err := b.db.QueryRow(`SELECT announced FROM build_jobs WHERE id=?`, job).Scan(&announced); err != nil || !announced {
 				t.Fatal("Ready did not deliver when allowed", announced, err)
 			}
 			if speech.Load() != before+1 {
 				t.Error("Ready did not speak exactly once")
+			}
+			afterChat, err := b.history.list(t.Context(), device)
+			if err != nil || len(afterChat) != len(beforeChat)+1 || afterChat[len(afterChat)-1].SceneTitle != "Ready" {
+				t.Fatalf("Ready chat did not deliver exactly once: %v, %v", afterChat, err)
 			}
 		})
 	}

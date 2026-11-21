@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
-func (b *bridge) buildReply(ctx context.Context, who peer, text, source string) (reply, job string, err error) {
+func (b *bridge) buildReply(ctx context.Context, who peer, text string) (reply, job string, err error) {
 	if b.builders == nil {
 		return "", "", nil
 	}
@@ -55,9 +56,32 @@ func (b *bridge) buildReply(ctx context.Context, who peer, text, source string) 
 			reply, job = "Building it now!", id
 		}
 	}
-	b.chat(who.DeviceID, newChat("user", "You", text, source), true)
-	b.chat(who.DeviceID, newChat("cat", b.catFor(who).Name, reply, source), true)
 	return reply, job, nil
+}
+
+// Serialize persistence and the web chat frames with the visual and audio
+// admission checks. Callers hold the hub lock when a hub exists.
+func (b *bridge) buildChat(id string, entries ...chatEntry) {
+	for _, entry := range entries {
+		if entry, ok := b.recordChat(id, entry, true); ok && b.ws != nil {
+			b.ws.broadcastChat(id, entry)
+		}
+	}
+}
+
+func (b *bridge) deliverOfflineBuildReply(ctx context.Context, who peer, text, reply, source string) error {
+	if h := b.ws; h != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if r := h.parentRefresh(strings.ToLower(who.DeviceID), time.Now()); r != "" {
+			return r.err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.buildChat(who.DeviceID, newChat("user", "You", text, source), newChat("cat", b.catFor(who).Name, reply, source))
+	return nil
 }
 
 func buildingScene(id string) sceneView {
@@ -69,7 +93,7 @@ func buildingScene(id string) sceneView {
 	return view
 }
 
-func (h *wsHub) buildAcknowledgement(ctx context.Context, d *wsDevice, turn uint64, reply, job string) {
+func (h *wsHub) buildAcknowledgement(ctx context.Context, d *wsDevice, turn uint64, text, source, reply, job string) {
 	view := noticeScene("Build", reply)
 	if job != "" {
 		view = buildingScene(job)
@@ -77,6 +101,7 @@ func (h *wsHub) buildAcknowledgement(ctx context.Context, d *wsDevice, turn uint
 	h.mu.Lock()
 	allowed := h.active(d) && turn == d.turn && h.parentRefresh(d.key, time.Now()) == "" && ctx.Err() == nil
 	if allowed {
+		h.b.buildChat(d.who.DeviceID, newChat("user", "You", text, source), newChat("cat", d.cat.Name, reply, source))
 		d.card = &view
 		h.render(d, time.Now(), false)
 	}
@@ -120,8 +145,8 @@ func (h *wsHub) announceBuild(ctx context.Context, job buildJob) {
 	h.render(d, now, false)
 	entry := newChat("card", d.cat.Name, job.result, "builder")
 	entry.SceneTitle = title
+	h.b.buildChat(job.device, entry)
 	h.mu.Unlock()
-	h.b.chat(job.device, entry, true)
 }
 
 func (h *wsHub) cancelBuildCard(d *wsDevice, id string) {

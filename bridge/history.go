@@ -148,22 +148,28 @@ func (h *chatHistory) readBefore(ctx context.Context, id string, limit int, befo
 }
 
 func (b *bridge) chat(id string, entry chatEntry, persist bool) {
-	entry, ok := canonicalMessage(entry)
-	if !ok {
-		return
-	}
-	if persist && b.history != nil {
-		b.history.add(id, entry)
-	}
-	if b.ws != nil {
+	entry, ok := b.recordChat(id, entry, persist)
+	if ok && b.ws != nil {
 		b.ws.mu.Lock()
 		defer b.ws.mu.Unlock()
-		f := textFrame(object{"type": "chat", "device_id": id, "entry": entry})
-		key := strings.ToLower(id)
-		for c := range b.ws.clients {
-			if c.watch == key || c.device != nil && c.device.key == key && c.device.virtual() {
-				c.enqueue(f)
-			}
+		b.ws.broadcastChat(id, entry)
+	}
+}
+
+func (b *bridge) recordChat(id string, entry chatEntry, persist bool) (chatEntry, bool) {
+	entry, ok := canonicalMessage(entry)
+	if ok && persist && b.history != nil {
+		b.history.add(id, entry)
+	}
+	return entry, ok
+}
+
+func (h *wsHub) broadcastChat(id string, entry chatEntry) {
+	f := textFrame(object{"type": "chat", "device_id": id, "entry": entry})
+	key := strings.ToLower(id)
+	for c := range h.clients {
+		if c.watch == key || c.device != nil && c.device.key == key && c.device.virtual() {
+			c.enqueue(f)
 		}
 	}
 }

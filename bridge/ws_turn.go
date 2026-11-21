@@ -376,11 +376,11 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
 		return
 	}
-	if reply, job, err := h.b.buildReply(ctx, d.who, text, source); err != nil {
+	if reply, job, err := h.b.buildReply(ctx, d.who, text); err != nil {
 		h.finishTurn(d, id, nil, nil)
 		return
 	} else if reply != "" {
-		h.buildAcknowledgement(ctx, d, id, reply, job)
+		h.buildAcknowledgement(ctx, d, id, text, source, reply, job)
 		return
 	}
 	if h.b.oc == nil {
