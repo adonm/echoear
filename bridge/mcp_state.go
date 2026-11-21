@@ -163,6 +163,7 @@ func (b *bridge) mcpDeviceState(out object, id string, include []string) error {
 			cats[key] = entry["cat"]
 		}
 		if strings.EqualFold(key, id) {
+			p["parent_policy"] = b.parentState(key, time.Now())
 			out["me"] = object{"device": p, "cat": entry["cat"], "active_app": p["active_app"]}
 		}
 	}

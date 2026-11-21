@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,6 +67,7 @@ type wsHub struct {
 	conns         sync.WaitGroup
 	clients       map[*wsClient]struct{}
 	devices       map[string]*wsDevice
+	parents       map[string]*parentRuntime
 	closed        bool
 	peers         string
 	storedPeers   []peerDisplay
@@ -84,6 +86,12 @@ func (h *wsHub) shutdown() {
 	h.mu.Lock()
 	if !h.closed {
 		h.closed = true
+		now := time.Now()
+		for key, p := range h.parents {
+			if err := h.parentAccount(key, p, now, true); err != nil {
+				log.Printf("EchoEar parent usage checkpoint for %s: %v", key, err)
+			}
+		}
 		for c := range h.clients {
 			c.cancel()
 		}
@@ -262,6 +270,7 @@ func (h *wsHub) detach(c *wsClient) {
 		h.clearRecording(d)
 		h.cancelTurn(d, "disconnect")
 		h.stopPlayback(d, false)
+		h.parentFinishActivity(d.key, time.Now())
 		h.broadcastPeers()
 	}
 }
@@ -277,6 +286,7 @@ func (h *wsHub) disconnectDevice(id string) {
 		h.clearRecording(d)
 		h.cancelTurn(d, "disconnect")
 		h.stopPlayback(d, false)
+		h.parentFinishActivity(d.key, time.Now())
 		h.broadcastPeers()
 	}
 }

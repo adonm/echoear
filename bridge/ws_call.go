@@ -72,7 +72,7 @@ func (h *wsHub) callNotice(d *wsDevice, message string, now time.Time) {
 }
 
 func (h *wsHub) startCall(caller *wsDevice, peerID string) {
-	if err := h.ringCall(caller, peerID, callRingLimit); err != nil && h.active(caller) && caller.callState == callNone {
+	if err := h.ringCall(caller, peerID, callRingLimit); err != nil && h.active(caller) && caller.parentReason == "" && caller.callState == callNone {
 		now := time.Now()
 		h.interruptForCall(caller, now)
 		h.callNotice(caller, err.Error(), now)
@@ -85,6 +85,13 @@ func (h *wsHub) ringCall(caller *wsDevice, peerID string, limit time.Duration) e
 	}
 	key := strings.ToLower(peerID)
 	callee := h.devices[key]
+	now := time.Now()
+	if r := h.parentRefresh(caller.key, now); r != "" {
+		return r.err()
+	}
+	if callee != nil && h.active(callee) && h.parentRefresh(key, now) != "" {
+		return problem(423, callee.cat.Name+" is resting right now. Try again later.")
+	}
 	// The first request already installed both halves. A reciprocal request
 	// from the ringing callee is an answer, not a second call.
 	if caller.callState == callRingingIn && callee != nil && h.callPeer(caller) == callee &&
@@ -118,7 +125,6 @@ func (h *wsHub) ringCall(caller *wsDevice, peerID string, limit time.Duration) e
 	case callee.callState != callNone:
 		return problem(409, name+" is busy.")
 	}
-	now := time.Now()
 	h.nextCall++
 	if h.nextCall == 0 {
 		h.nextCall++
@@ -238,6 +244,11 @@ func (h *wsHub) ringUntilAnswered(ctx context.Context, caller *wsDevice, id uint
 				h.mu.Unlock()
 				return
 			}
+			now := time.Now()
+			if h.parentRefresh(caller.key, now) != "" || h.parentRefresh(peer.key, now) != "" {
+				h.mu.Unlock()
+				return
+			}
 			h.chime(caller, "ring")
 			h.chime(peer, "ring")
 			h.mu.Unlock()
@@ -254,9 +265,12 @@ func (h *wsHub) answerCall(callee *wsDevice) {
 		h.endCall(callee, "disconnected")
 		return
 	}
+	now := time.Now()
+	if h.parentRefresh(callee.key, now) != "" || h.parentRefresh(caller.key, now) != "" {
+		return
+	}
 	caller.callCancel()
 	caller.callCancel = nil
-	now := time.Now()
 	logCall("answer", caller, callee, "", 0)
 	for _, d := range []*wsDevice{caller, callee} {
 		h.interruptForCall(d, now)
@@ -308,7 +322,7 @@ func (h *wsHub) endCall(d *wsDevice, reason string) {
 		side.callOrigin, side.callFramesIn, side.callFramesOut = false, 0, 0
 		if h.active(side) {
 			h.push(side, object{"op": "call", "state": "end", "call": id, "reason": reason}, false)
-			if answered {
+			if answered && side.parentReason == "" {
 				h.chime(side, "cancel")
 			}
 			h.wake(side, now)
@@ -318,6 +332,10 @@ func (h *wsHub) endCall(d *wsDevice, reason string) {
 			}
 			if outgoing && p != nil && reason == "no answer" {
 				h.callNotice(side, "No answer from "+p.cat.Name, now)
+				continue
+			}
+			if side.parentReason == "" && reason == "Cat is resting" {
+				h.callNotice(side, "The other cat is resting. Try again later.", now)
 				continue
 			}
 			h.render(side, now, false)
@@ -355,7 +373,7 @@ func (h *wsHub) relayCallPCM(d *wsDevice, packet []byte) {
 		return
 	}
 	p := h.callPeer(d)
-	if p == nil || !h.active(p) || p.callState != callActive {
+	if p == nil || !h.active(p) || p.callState != callActive || h.parentRefresh(p.key, time.Now()) != "" {
 		return
 	}
 	c := p.client

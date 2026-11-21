@@ -234,10 +234,10 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
 	defer cancel()
-	if b.oc == nil {
-		return nil, problem(503, "Chat unavailable")
-	}
 	if path == "/api/reset" {
+		if b.oc == nil {
+			return nil, problem(503, "Chat unavailable")
+		}
 		who, err := b.lookupDevice(id)
 		var status *apiError
 		if errors.As(err, &status) && status.status == 404 && !virtualID.MatchString(strings.ToLower(id)) {
@@ -257,23 +257,58 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	minutes := childPauseMinutes(text)
 	if b.ws != nil {
 		b.ws.mu.Lock()
-		d := b.ws.devices[strings.ToLower(id)]
+		key, now := strings.ToLower(id), time.Now()
+		if r := b.ws.parentRefresh(key, now); r != "" {
+			b.ws.mu.Unlock()
+			return nil, r.err()
+		}
+		d := b.ws.devices[key]
 		if d != nil && b.ws.active(d) {
+			if b.oc == nil && minutes == 0 {
+				b.ws.mu.Unlock()
+				return nil, problem(503, "Chat unavailable")
+			}
 			if d.callState != callNone {
 				b.ws.mu.Unlock()
 				return nil, problem(409, "Cat is in a call")
 			}
-			b.ws.startTurn(d, time.Now(), false, "typed", func(ctx context.Context, turn uint64) {
+			b.ws.startTurn(d, now, false, "typed", func(ctx context.Context, turn uint64) {
 				b.ws.runTurn(ctx, d, turn, text, "typed", nil)
 			})
 			b.ws.mu.Unlock()
 			return object{"ok": true, "device_id": sender.DeviceID}, nil
 		}
+		if minutes > 0 {
+			err := b.ws.childPause(key, minutes, now)
+			b.ws.mu.Unlock()
+			_, reply := parentPause.notice()
+			return object{"ok": true, "device_id": sender.DeviceID, "reply": reply}, err
+		}
+		if b.oc == nil {
+			b.ws.mu.Unlock()
+			return nil, problem(503, "Chat unavailable")
+		}
+		child, done, err := b.ws.parentOffline(ctx, key, now)
 		b.ws.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+		ctx = child
+	}
+	if b.oc == nil {
+		return nil, problem(503, "Chat unavailable")
 	}
 	out, err := b.turn(ctx, sender, text)
+	if ctx.Err() != nil {
+		if policyErr := b.parentAllowed(id); policyErr != nil {
+			return nil, policyErr
+		}
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}

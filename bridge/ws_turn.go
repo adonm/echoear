@@ -38,6 +38,9 @@ func (h *wsHub) clearRecording(d *wsDevice) {
 }
 
 func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, request bool) {
+	if h.parentRefresh(d.key, now) != "" {
+		return
+	}
 	bridgeEndpoint := request && target == "" && h.b.endpoint != nil && d.caps.BridgeEndpoint
 	if bridgeEndpoint && d.queuedVoice != nil {
 		// Recording remains explicitly initiated; no automatic reopening.
@@ -100,7 +103,7 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := c.device
-	if d == nil || !h.active(d) {
+	if d == nil || !h.active(d) || h.parentRefresh(d.key, time.Now()) != "" {
 		return
 	}
 	if d.callState != callNone {
@@ -142,6 +145,9 @@ func (h *wsHub) stopRecordingAtLimit(d *wsDevice, now time.Time) {
 }
 
 func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
+	if h.parentRefresh(d.key, now) != "" {
+		return
+	}
 	if d.capture != nil && !ev.Cancelled {
 		h.finishEndpoint(d, now)
 		return
@@ -193,9 +199,13 @@ func (h *wsHub) cancelLocalTurn(d *wsDevice) {
 	}
 }
 
-func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) {
+func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) bool {
+	if h.parentRefresh(d.key, now) != "" {
+		return false
+	}
 	h.cancelTurn(d, "superseded")
 	h.beginTurn(d, now, keepView, source, run)
+	return true
 }
 
 func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) {
@@ -307,7 +317,7 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		}
 		recipients := h.b.intercomTargets(others, target)
 		voice := h.b.voiceFor(sender)
-		receipts := h.deliverOnline(sender, recipients, voice, "", pcm, traceFrom(ctx))
+		receipts := h.deliverOnline(ctx, sender, recipients, voice, "", pcm)
 		// Connected peers can play the original clip before Hex generates a caption.
 		if len(receipts) != 0 {
 			go func() {
@@ -343,6 +353,18 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 	}
 	if ctx.Err() != nil {
 		h.finishTurn(d, id, nil, nil)
+		return
+	}
+	if minutes := childPauseMinutes(text); minutes > 0 && source != "timer" {
+		h.mu.Lock()
+		var err error
+		if h.active(d) && d.turn == id && ctx.Err() == nil {
+			err = h.childPause(d.key, minutes, time.Now())
+		}
+		h.mu.Unlock()
+		if err != nil {
+			h.turnError(d, id, "I couldn't start a break. Please ask a grown-up.")
+		}
 		return
 	}
 	if target := parseCallCommand(text); target != "" {
@@ -654,7 +676,7 @@ func (b *bridge) intercomTargets(others []peer, target string) []peer {
 	return connected
 }
 
-func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string, pcm []byte, trace *turnTrace) []wsReceipt {
+func (h *wsHub) deliverOnline(ctx context.Context, sender peer, recipients []peer, voice, text string, pcm []byte) []wsReceipt {
 	h.mu.Lock()
 	var connected []*wsDevice
 	for _, p := range recipients {
@@ -679,8 +701,13 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 	receipts := make([]wsReceipt, 0, len(connected))
 	cat := h.b.catFor(sender)
 	h.mu.Lock()
+	now := time.Now()
+	if ctx.Err() != nil || h.parentRefresh(strings.ToLower(sender.DeviceID), now) != "" {
+		h.mu.Unlock()
+		return nil
+	}
 	for _, d := range connected {
-		if !h.active(d) || d.callState != callNone {
+		if !h.active(d) || h.parentRefresh(d.key, now) != "" || d.callState != callNone {
 			continue
 		}
 		view := (intercomCard{sender, text, cat}).scene(false)
@@ -696,14 +723,13 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 		} else {
 			d.view, d.card = &view, nil
 		}
-		now := time.Now()
 		h.wake(d, now)
 		h.render(d, now, false)
 		h.push(d, object{"op": "chime", "kind": "intercom"}, false)
 		if d.client.ctx.Err() == nil {
 			receipts = append(receipts, wsReceipt{d, &view})
 			if pcm != nil {
-				h.playTraced(d, stream, trace, time.Time{})
+				h.playTraced(d, stream, traceFrom(ctx), time.Time{})
 			} else {
 				h.play(d, stream)
 			}
@@ -764,7 +790,7 @@ func (b *bridge) deliver(ctx context.Context, sender peer, recipients []peer, te
 	sender.Character = b.catFor(sender).Name
 	sent := make(map[string]bool, len(recipients))
 	if b.ws != nil {
-		for _, r := range b.ws.deliverOnline(sender, recipients, b.voiceFor(sender), text, raw, traceFrom(ctx)) {
+		for _, r := range b.ws.deliverOnline(ctx, sender, recipients, b.voiceFor(sender), text, raw) {
 			sent[r.device.who.DeviceID] = true
 		}
 	}

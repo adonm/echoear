@@ -42,6 +42,8 @@ type bridge struct {
 	diag      diagnostics
 	catMu     sync.Mutex // Serializes cat and voice writes through hub publication.
 	catTitles sync.Mutex
+
+	parentToken string
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
@@ -436,6 +438,12 @@ func (b *bridge) generateReply(ctx, audioBase context.Context, sender peer, text
 func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any, error) {
 	ctx := r.Context()
 	switch {
+	case path == "/api/parent":
+		return b.parentAPI(r, "")
+	case strings.HasSuffix(path, "/parent"):
+		if id, ok := deviceSettingID(path, "parent"); ok {
+			return b.parentAPI(r, id)
+		}
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/photo"):
 		if id, ok := deviceSettingID(path, "photo"); ok {
 			return b.postPhoto(w, r, id)
@@ -527,6 +535,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			}
 			id, err := deviceID(r, obj, false)
 			if err != nil {
+				return nil, err
+			}
+			if err := b.parentAllowed(id); err != nil {
 				return nil, err
 			}
 			who, _ := b.lookupDevice(id)

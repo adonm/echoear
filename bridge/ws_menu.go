@@ -35,7 +35,8 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			if target := h.devices[strings.ToLower(ev.DeviceID)]; target != nil && h.active(target) && target.caps.WakeWord &&
 				target.client.role == "device" {
 				target.wakeWord = *ev.Enabled
-				f := object{"op": "wake_word", "enabled": target.wakeWord, "device_id": target.who.DeviceID}
+				enabled := h.parentRefresh(target.key, now) == "" && target.wakeWord
+				f := object{"op": "wake_word", "enabled": enabled, "device_id": target.who.DeviceID}
 				h.push(target, f, false)
 				c.enqueue(textFrame(f))
 			}
@@ -53,6 +54,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 				}
 				c.enqueue(textFrame(d.volumeFrame(false)))
 				c.enqueue(textFrame(object{"op": "power", "brightness": d.brightness()}))
+				c.enqueue(textFrame(parentFrame(d)))
 			} else {
 				c.watch = ""
 			}
@@ -76,6 +78,19 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		return
 	}
 	native := c.role == "device"
+	if h.parentRefresh(d.key, now) != "" {
+		switch ev.Event {
+		case "status", "tts_ack", "rec_end":
+		case "rec_start", "rec_request":
+			h.push(d, object{"op": "rec", "action": "stop", "cancelled": true}, false)
+			return
+		default:
+			if native && (ev.Event == "tap" || ev.Event == "head") {
+				h.push(d, object{"op": "power", "brightness": d.brightness()}, false)
+			}
+			return
+		}
+	}
 	if d.callState != callNone {
 		switch ev.Event {
 		case "status", "tap", "head", "call", "call_end", "tts_ack":

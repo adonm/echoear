@@ -45,6 +45,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	parentToken, err := loadParentToken(filepath.Join(env("XDG_CONFIG_HOME", filepath.Join(home, ".config")), "echoear", "parent.token"), token)
+	if err != nil {
+		return err
+	}
 	data := env("XDG_DATA_HOME", filepath.Join(home, ".local/share"))
 	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
 	local := filepath.Join(data, "echoear")
@@ -126,7 +130,7 @@ func run() error {
 	worker := newSynthWorker(root, func() (speechEngine, error) {
 		return openKokoro(modelDir, min(kokoroThreads, runtime.GOMAXPROCS(0)))
 	})
-	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
+	b := &bridge{root: root, token: token, parentToken: parentToken, db: db, peers: peers{deviceStore(db)},
 		hex: hex, endpoint: endpointConfig, oc: oc, pairPort: pairPort, worker: worker,
 		agentPath: filepath.Join(project, "agents/echoear.md"),
 		voices:    deviceVoiceStore(db, fallbackVoice),

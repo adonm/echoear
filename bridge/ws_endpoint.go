@@ -128,7 +128,7 @@ func (h *wsHub) finishEndpoint(d *wsDevice, now time.Time) {
 // same regular prompt gate as any other turn, without interrupt or retry.
 func (h *wsHub) maybeStartVoice(d *wsDevice, now time.Time) bool {
 	c := d.queuedVoice
-	if c == nil || d.busy || d.stopAudio != nil || d.awaitAck || d.callState != callNone || !h.active(d) {
+	if c == nil || d.busy || d.stopAudio != nil || d.awaitAck || d.callState != callNone || !h.active(d) || h.parentRefresh(d.key, now) != "" {
 		return false
 	}
 	d.queuedVoice = nil
