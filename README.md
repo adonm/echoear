@@ -313,6 +313,14 @@ smaller. BOX-3 announces its native size; the bridge centers the square
 artwork and maps raw touch coordinates back into SVG space. Browsers receive
 `op: "svg"` with `device_id`; controls share the boards’ hit targets and also
 work with Tab, Enter, and Space.
+
+### Ente Photos
+
+The optional LAN-only **Photo Library** uses your hosted Ente Photos account. It syncs
+metadata nightly and fetches originals only when needed; the bridge keeps small local
+JPEG previews, not a full originals export. Parents can hide the library per cat, add
+labels, and review face groups if local models are installed. See
+[Ente Photos setup](docs/ente-photos.md) for interactive login, storage and backfill costs.
 `0x01` note upload and `0x02` playback carry 16 kHz signed 16-bit
 little-endian mono PCM. Clients with `caps.call_pcm` use `0x04` for 40 ms call
 uploads when `call.start` sets `mic_prefix: 4`; legacy clients use `0x01`.
