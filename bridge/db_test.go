@@ -194,7 +194,7 @@ func TestTursoMigration(t *testing.T) {
 	assertRows("sessions", 2)
 	assertRows("chat_events", 2)
 	var version int
-	if err := db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil || version != 7 {
+	if err := db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil || version != 8 {
 		t.Fatal("current schema version missing", version, err)
 	}
 }
@@ -289,7 +289,7 @@ func TestSchemaResumesFailedStep(t *testing.T) {
 	}
 	db := testDB(t, path, dir)
 	if err := db.QueryRow(`SELECT MAX(version), (SELECT count(*) FROM cats) FROM schema_version`).Scan(&version, &count); err != nil ||
-		version != 7 || count != 1 {
+		version != 8 || count != 1 {
 		t.Fatalf("import did not resume: version %d, cats %d: %v", version, count, err)
 	}
 }

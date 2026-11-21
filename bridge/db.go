@@ -15,6 +15,10 @@ import (
 	turso "turso.tech/database/tursogo"
 )
 
+const createHistoryBackfill = `CREATE TABLE IF NOT EXISTS history_backfill (
+	device_id TEXT NOT NULL, session_id TEXT NOT NULL, next TEXT NOT NULL, source TEXT NOT NULL,
+	PRIMARY KEY (device_id, session_id))`
+
 var schemaBaseline = []string{
 	`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, character TEXT NOT NULL, ip TEXT NOT NULL, port INTEGER NOT NULL, last_seen INTEGER NOT NULL)`,
@@ -40,6 +44,7 @@ var schemaBaseline = []string{
 	`CREATE INDEX IF NOT EXISTS build_jobs_state ON build_jobs (state, device_id)`,
 	`CREATE TABLE IF NOT EXISTS parent_settings (device_id TEXT PRIMARY KEY, timezone TEXT NOT NULL, quiet_start TEXT NOT NULL, quiet_end TEXT NOT NULL, daily_minutes INTEGER NOT NULL, pause_until_ms INTEGER NOT NULL, override_until_ms INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS parent_usage (device_id TEXT NOT NULL, day TEXT NOT NULL, used_ms INTEGER NOT NULL, PRIMARY KEY (device_id, day))`,
+	createHistoryBackfill,
 }
 
 type bridgeDB struct {

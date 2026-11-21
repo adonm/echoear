@@ -613,42 +613,63 @@ type ocMessagePage struct {
 }
 
 func (o *openCode) GetSessionMessages(ctx context.Context, sid string) ([]chatEntry, error) {
-	if !sessionIDRE.MatchString(sid) {
-		return nil, problem(400, "Invalid session ID")
-	}
-	params := url.Values{"order": {"asc"}, "limit": {"50"}}
 	entries := []chatEntry{}
-	source := "text"
+	cursor, source := "", "text"
 	seen := make(map[string]bool)
 	for {
-		var result ocMessagePage
-		if err := o.jsonCall(ctx, http.MethodGet, "/api/session/"+sid+"/message?"+params.Encode(), nil, &result); err != nil {
+		page, err := o.sessionMessagePage(ctx, sid, cursor, source)
+		if err != nil {
 			return nil, err
 		}
-		for _, message := range result.Data {
-			if message.Type == "assistant" && message.Finish != "" && message.Finish != "stop" && message.Finish != "length" {
-				continue
-			}
-			if message.Type == "user" {
-				switch message.Metadata.EchoEarSource {
-				case "typed", "voice", "tap":
-					source = message.Metadata.EchoEarSource
-				default:
-					source = "text"
-				}
-			}
-			if entry := message.chat(source); entry.ID != "" && (entry.Text != "" || entry.ToolSummary != "") {
-				entries = append(entries, entry)
-			}
+		entries = append(entries, page.entries...)
+		if page.next == "" || seen[page.next] {
+			return entries, nil
 		}
-		if result.Cursor.Next == "" || seen[result.Cursor.Next] || len(result.Data) == 0 {
-			break
-		}
-		seen[result.Cursor.Next] = true
-		params.Del("order")
-		params.Set("cursor", result.Cursor.Next)
+		seen[page.next] = true
+		cursor, source = page.next, page.source
 	}
-	return entries, nil
+}
+
+type sessionHistoryPage struct {
+	entries      []chatEntry
+	next, source string
+}
+
+func (o *openCode) sessionMessagePage(ctx context.Context, sid, cursor, source string) (sessionHistoryPage, error) {
+	if !sessionIDRE.MatchString(sid) {
+		return sessionHistoryPage{}, problem(400, "Invalid session ID")
+	}
+	params := url.Values{"limit": {"50"}}
+	if cursor == "" {
+		params.Set("order", "asc")
+	} else {
+		params.Set("cursor", cursor)
+	}
+	var result ocMessagePage
+	if err := o.jsonCall(ctx, http.MethodGet, "/api/session/"+sid+"/message?"+params.Encode(), nil, &result); err != nil {
+		return sessionHistoryPage{}, err
+	}
+	page := sessionHistoryPage{source: source}
+	for _, message := range result.Data {
+		if message.Type == "assistant" && message.Finish != "" && message.Finish != "stop" && message.Finish != "length" {
+			continue
+		}
+		if message.Type == "user" {
+			switch message.Metadata.EchoEarSource {
+			case "typed", "voice", "tap":
+				page.source = message.Metadata.EchoEarSource
+			default:
+				page.source = "text"
+			}
+		}
+		if entry := message.chat(page.source); entry.ID != "" && (entry.Text != "" || entry.ToolSummary != "") {
+			page.entries = append(page.entries, entry)
+		}
+	}
+	if len(result.Data) != 0 {
+		page.next = result.Cursor.Next
+	}
+	return page, nil
 }
 
 func (o *openCode) lockPrompt(ctx context.Context, device string) (context.Context, func(), error) {

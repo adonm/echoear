@@ -36,6 +36,10 @@ func (d *bridgeDB) upgradeSchema(ctx context.Context, legacy, fallbackVoice stri
 				ON CONFLICT DO NOTHING`)
 			return err
 		}},
+		{"add OpenCode history checkpoints", func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, createHistoryBackfill)
+			return err
+		}},
 	}
 	version, err := d.initSchema(ctx)
 	if err != nil {
@@ -358,13 +362,22 @@ func (b *bridge) migrateSessionMessages(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var batch []backfillMessage
 	for _, id := range ids {
-		active, err := b.oc.get(id)
+		// The empty session ID marks a finished device. On retry there is no
+		// need to list that device's sessions again.
+		var done bool
+		if err := b.db.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM history_backfill WHERE device_id=? AND session_id='')`, id).Scan(&done); err != nil {
+			return err
+		}
+		if done {
+			continue
+		}
+		active, _, err := b.oc.store.getContext(ctx, id)
 		if err != nil {
 			return err
 		}
-		alias, err := b.oc.get("scope-" + id)
+		alias, _, err := b.oc.store.getContext(ctx, "scope-"+id)
 		if err != nil {
 			return err
 		}
@@ -379,24 +392,14 @@ func (b *bridge) migrateSessionMessages(ctx context.Context) error {
 		if err != nil {
 			who = peer{DeviceID: id, Character: "EchoEar"}
 		}
+		who.DeviceID = id
 		for _, sid := range sessions {
-			entries, err := b.oc.GetSessionMessages(ctx, sid)
-			var status *upstreamStatus
-			if errors.As(err, &status) && status.code == http.StatusNotFound {
-				continue
-			}
-			if err != nil {
+			if err := b.backfillSession(ctx, who, sid); err != nil {
 				return err
 			}
-			for _, e := range entries {
-				if e.Role != "user" && e.Role != "assistant" {
-					continue
-				}
-				if e.Role == "assistant" {
-					e.Sender = who.Character
-				}
-				batch = append(batch, backfillMessage{id, e})
-			}
+		}
+		if _, err := b.db.ExecContext(ctx, `INSERT INTO history_backfill VALUES (?,'','','')`, id); err != nil {
+			return err
 		}
 	}
 	tx, err := b.db.BeginTx(ctx, nil)
@@ -404,10 +407,67 @@ func (b *bridge) migrateSessionMessages(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := insertBackfill(ctx, tx, batch); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_backfill`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?, '1') ON CONFLICT DO NOTHING`, marker); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (b *bridge) backfillSession(ctx context.Context, who peer, sid string) error {
+	var cursor, source string
+	err := b.db.QueryRowContext(ctx, `SELECT next,source FROM history_backfill WHERE device_id=? AND session_id=?`,
+		who.DeviceID, sid).Scan(&cursor, &source)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		source = "text"
+	case err != nil || cursor == "":
+		return err
+	}
+	seen := map[string]bool{cursor: true}
+	for {
+		page, err := b.oc.sessionMessagePage(ctx, sid, cursor, source)
+		var status *upstreamStatus
+		if err != nil && !(errors.As(err, &status) && status.code == http.StatusNotFound) {
+			return err
+		}
+		if seen[page.next] {
+			page.next = ""
+		}
+		var batch []backfillMessage
+		for _, e := range page.entries {
+			if e.Role != "user" && e.Role != "assistant" {
+				continue
+			}
+			if e.Role == "assistant" {
+				e.Sender = who.Character
+			}
+			batch = append(batch, backfillMessage{who.DeviceID, e})
+		}
+		if err := b.db.saveHistoryPage(ctx, who.DeviceID, sid, page, batch); err != nil || page.next == "" {
+			return err
+		}
+		seen[page.next] = true
+		cursor, source = page.next, page.source
+	}
+}
+
+func (d *bridgeDB) saveHistoryPage(ctx context.Context, id, sid string, page sessionHistoryPage, batch []backfillMessage) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertBackfill(ctx, tx, batch); err != nil {
+		return err
+	}
+	// A page becomes visible together with its cursor and speaker source, or
+	// not at all. Reopening after a deadline cannot skip or repeat that page.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO history_backfill VALUES (?,?,?,?)
+		ON CONFLICT(device_id,session_id) DO UPDATE SET next=excluded.next,source=excluded.source`,
+		id, sid, page.next, page.source); err != nil {
 		return err
 	}
 	return tx.Commit()
