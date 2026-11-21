@@ -476,7 +476,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			ready := b.worker != nil && b.worker.ready.Load()
 			engine := "unavailable"
 			if ready {
-				engine = "kokoro-onnx"
+				engine = kokoroEngine
 			}
 			return object{"ok": true, "hex": <-h, "opencode": o, "tts": ready, "tts_engine": engine}, nil
 		case path == "/api/devices":

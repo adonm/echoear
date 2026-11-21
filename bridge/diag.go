@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"math"
 	"os"
 	"runtime"
@@ -218,10 +217,9 @@ type diagBridge struct {
 	LastBackup *time.Time `json:"last_backup"`
 }
 
-type diagWorker struct {
-	diagProcess
-	PID   int  `json:"pid"`
-	Ready bool `json:"ready"`
+type diagTTS struct {
+	Engine string `json:"engine"`
+	Ready  bool   `json:"ready"`
 }
 
 type diagHost struct {
@@ -240,7 +238,7 @@ type diagServices struct {
 
 type diagSystem struct {
 	Bridge   diagBridge   `json:"bridge"`
-	Worker   diagWorker   `json:"tts_worker"`
+	TTS      diagTTS      `json:"tts"`
 	Host     diagHost     `json:"host"`
 	Services diagServices `json:"services"`
 }
@@ -473,7 +471,7 @@ func (b *bridge) sampleDiagnostics(start time.Time, path string) func() {
 		ticker := time.NewTicker(diagInterval)
 		defer ticker.Stop()
 		hz := linuxClockTicks()
-		var self, worker procReading
+		var self procReading
 		var cpu cpuReading
 		last := time.Now()
 		for ctx.Err() == nil {
@@ -488,13 +486,8 @@ func (b *bridge) sampleDiagnostics(start time.Time, path string) func() {
 				Uptime: int64(now.Sub(start) / time.Second), DB: fileBytes(path) + fileBytes(path+"-wal"),
 			}, Host: sampleHost(&cpu)}
 			if b.worker != nil {
-				report.Worker.PID, report.Worker.Ready = b.worker.pid(), b.worker.ready.Load()
-				if report.Worker.PID > 0 {
-					report.Worker.diagProcess = sampleProcess(fmt.Sprintf("/proc/%d", report.Worker.PID), report.Worker.PID, &worker, seconds, hz)
-				} else {
-					worker = procReading{}
-				}
-				report.Services.TTS = report.Worker.Ready
+				report.TTS = diagTTS{kokoroEngine, b.worker.ready.Load()}
+				report.Services.TTS = report.TTS.Ready
 			}
 			report.Services.OpenTunnel = b.tunnels != nil && b.tunnels.runner != nil
 			var wg sync.WaitGroup

@@ -99,7 +99,7 @@ function diagSparkline(samples) {
 }
 
 function renderDiagnostics(data) {
-  const {bridge, tts_worker:tts, host, services, latency, recent_turns:turns, devices} = data;
+  const {bridge, tts, host, services, latency, recent_turns:turns, devices} = data;
   const usage = Number.isFinite(host.mem_used_bytes) && host.mem_total_bytes > 0 ? host.mem_used_bytes / host.mem_total_bytes * 100 : null;
   const system = [
     diagTile("Go bridge", [
@@ -109,9 +109,9 @@ function renderDiagnostics(data) {
       ["Turso DB + WAL", diagBytes(bridge.db_bytes)],
       ["Last backup", bridge.last_backup ? new Date(bridge.last_backup).toLocaleString() : "—"],
     ]),
-    diagTile("Kokoro worker", [
-      ["CPU / RSS", `${diagPct(tts.cpu_pct)} / ${diagMB(tts.rss_bytes)}`],
-      ["Process", tts.pid > 0 ? `PID ${tts.pid}` : "—"],
+    diagTile("Kokoro TTS", [
+      ["Engine", tts.engine || "—"],
+      ["CPU / RSS", "Included in Go bridge"],
       ["State", tts.ready ? "Ready" : "Not ready"],
     ]),
     diagTile("Linux host", [
@@ -125,7 +125,7 @@ function renderDiagnostics(data) {
     node("li", services[key] ? "is-up" : "", `${label} · ${services[key] ? (key === "opentunnel" ? "installed" : "ready") : "unavailable"}`)));
   $("diag-latency").replaceChildren(...Object.entries({stt_ms:"Hex STT", gate_ms:"OpenCode Gate",
     llm_first_ms:"OpenCode TTFT", first_sentence_ms:"First Sentence", llm_total_ms:"OpenCode Total",
-    tts_queue_ms:"TTS Queue", tts_infer_ms:"TTS Worker", tts_first_ms:"Kokoro TTS", first_pcm_ms:"First PCM",
+    tts_queue_ms:"TTS Queue", tts_infer_ms:"TTS Inference", tts_first_ms:"Kokoro TTS", first_pcm_ms:"First PCM",
     e2e_ms:"Voice E2E", render_ms:"SVG→RLE565 Render"}).map(([key, title]) => {
     const m = latency[key] || {samples:[]};
     const card = diagTile(title, [["Last", diagMS(m.last)], ["p50 / p95", `${diagMS(m.p50)} / ${diagMS(m.p95)}`]]);

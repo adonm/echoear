@@ -34,18 +34,20 @@ type voiceChoice struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Lang string `json:"lang"`
+	SID  int    `json:"-"`
 }
 
+// SIDs match the speaker2id metadata in kokoro-multi-lang-v1_0/model.onnx.
 var voiceCatalog = [...]voiceChoice{
-	{heartVoice, "Heart", "en-us"},
-	{fableVoice, "Fable", "en-gb"},
-	{emmaVoice, "Emma", "en-gb"},
-	{"bm_george", "George", "en-gb"},
-	{"bf_alice", "Alice", "en-gb"},
-	{"bf_isabella", "Isabella", "en-gb"},
-	{"bf_lily", "Lily", "en-gb"},
-	{"bm_daniel", "Daniel", "en-gb"},
-	{"bm_lewis", "Lewis", "en-gb"},
+	{heartVoice, "Heart", "en-us", 3},
+	{fableVoice, "Fable", "en-gb", 25},
+	{emmaVoice, "Emma", "en-gb", 21},
+	{"bm_george", "George", "en-gb", 26},
+	{"bf_alice", "Alice", "en-gb", 20},
+	{"bf_isabella", "Isabella", "en-gb", 22},
+	{"bf_lily", "Lily", "en-gb", 23},
+	{"bm_daniel", "Daniel", "en-gb", 24},
+	{"bm_lewis", "Lewis", "en-gb", 27},
 }
 
 func voiceByID(id string) voiceChoice {

@@ -92,10 +92,10 @@ func BenchmarkSentenceExtractor(b *testing.B) {
 	}
 }
 
-func sineFloats(n, hz int, gain float64) []byte {
-	raw := make([]byte, n*4)
+func sineFloats(n, hz int, gain float64) []float32 {
+	raw := make([]float32, n)
 	for i := range n {
-		le.PutUint32(raw[4*i:], math.Float32bits(float32(gain*math.Sin(2*math.Pi*float64(hz*i)/24000))))
+		raw[i] = float32(gain * math.Sin(2*math.Pi*float64(hz*i)/24000))
 	}
 	return raw
 }

@@ -396,6 +396,10 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 	if board == "" {
 		board = device.Kind
 	}
+	tts := "off"
+	if sys.TTS.Ready {
+		tts = "ready"
+	}
 	rows := []string{
 		fmt.Sprintf("%s · %s · %s", truncate(device.Character, 15), truncate(fw, 12), board),
 		fmt.Sprintf("CPU %s · WiFi %s · RTT %s", value(device.CPU, "%"), integer(device.WiFi, "dBm"), value(device.RTT, "ms")),
@@ -403,7 +407,7 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 		fmt.Sprintf("Vol %d%% (%s) · Amb %s", d.vol, mode, value(device.Ambient, "")),
 		fmt.Sprintf("STT %s · LLM %s · TTS %s · Frame %s", value(latest[0], ""), value(latest[1], ""), value(latest[2], ""), value(latest[3], "")),
 		fmt.Sprintf("Go %s %s · TTS %s · Up %s", value(sys.Bridge.CPU, "%"), bytes(sys.Bridge.RSS, 1<<20, "M"),
-			bytes(sys.Worker.RSS, 1<<20, "M"), (time.Duration(sys.Bridge.Uptime) * time.Second).Truncate(time.Second).String()),
+			tts, (time.Duration(sys.Bridge.Uptime) * time.Second).Truncate(time.Second).String()),
 	}
 	for i, row := range rows {
 		tint := menuInk

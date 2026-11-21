@@ -93,7 +93,7 @@ func liveConfig(t *testing.T, home string) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(string(raw), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || !strings.HasPrefix(key, "ECHOEAR_") {
+		if !ok || (!strings.HasPrefix(key, "ECHOEAR_") && key != "TTS_MODEL_DIR") {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -108,7 +108,7 @@ func liveConfig(t *testing.T, home string) map[string]string {
 	}
 	for _, key := range []string{"ECHOEAR_BRIDGE_TOKEN", "ECHOEAR_BRIDGE_PORT", "ECHOEAR_OPENCODE_AGENT",
 		"ECHOEAR_OPENCODE_MODEL", "ECHOEAR_OPENCODE_URL", "ECHOEAR_OPENCODE_PASSWORD", "ECHOEAR_OPENCODE_DIR",
-		"ECHOEAR_TTS_MODEL", "ECHOEAR_TTS_PYTHON"} {
+		"TTS_MODEL_DIR"} {
 		out[key] = env(key, out[key])
 	}
 	if !tokenRE.MatchString(out["ECHOEAR_BRIDGE_TOKEN"]) {
@@ -142,7 +142,7 @@ func liveHealthy(t *testing.T, c liveClient) {
 			t.Fatalf("unhealthy live backend %s", k)
 		}
 	}
-	if health["tts_engine"] != "kokoro-onnx" {
+	if health["tts_engine"] != kokoroEngine {
 		t.Fatal("TTS engine metadata mismatch")
 	}
 }
@@ -224,22 +224,14 @@ func liveIsolated(t *testing.T, home, data string, conf map[string]string, token
 		}
 	}
 	binary := env("ECHOEAR_TEST_BIN", filepath.Join(home, ".local/share/echoear/echoear-bridge"))
-	worker, err := filepath.Abs("tts_worker.py")
-	if err != nil {
-		t.Fatal(err)
-	}
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+root, "ECHOEAR_BRIDGE_TOKEN="+token, "ECHOEAR_BRIDGE_HOST=127.0.0.1",
 		"ECHOEAR_BRIDGE_PORT=0", "ECHOEAR_DB_PATH="+filepath.Join(state, "echoear.db"),
-		"ECHOEAR_TURSO_URL=", "ECHOEAR_TURSO_AUTH_TOKEN=", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_TTS_WORKER="+worker,
+		"ECHOEAR_TURSO_URL=", "ECHOEAR_TURSO_AUTH_TOKEN=", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_REPO_DIR=..",
 		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"], "ECHOEAR_OPENCODE_MODEL="+conf["ECHOEAR_OPENCODE_MODEL"],
 		"ECHOEAR_OPENCODE_URL="+conf["ECHOEAR_OPENCODE_URL"], "ECHOEAR_OPENCODE_PASSWORD="+conf["ECHOEAR_OPENCODE_PASSWORD"],
 		"ECHOEAR_OPENCODE_DIR="+liveOpenCodeDir(home, conf), "ECHOEAR_OPENCODE_PAIR_PORT=0",
-		"ECHOEAR_TTS_MODEL="+conf["ECHOEAR_TTS_MODEL"],
-		"ECHOEAR_TTS_PYTHON="+env("ECHOEAR_TTS_PYTHON", filepath.Join(home, ".local/share/echoear/tts-venv/bin/python")))
-	if conf["ECHOEAR_TTS_PYTHON"] != "" {
-		cmd.Env = append(cmd.Env, "ECHOEAR_TTS_PYTHON="+conf["ECHOEAR_TTS_PYTHON"])
-	}
+		"TTS_MODEL_DIR="+conf["TTS_MODEL_DIR"])
 	logs, err := cmd.StderrPipe()
 	if err != nil || cmd.Start() != nil {
 		t.Fatal("cannot start isolated Go bridge")

@@ -18,7 +18,6 @@ printf 'PASS shell checks\n'
 # shellcheck source=scripts/go-bin.sh
 source scripts/go-bin.sh
 GO_BIN=$(resolve_go)
-python3 -m py_compile bridge/tts_worker.py
 for module in bridge/web/*.js; do
     node --check "$module"
 done

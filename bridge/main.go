@@ -74,11 +74,13 @@ func run() error {
 	if err := os.MkdirAll(ocDir, 0o700); err != nil {
 		return err
 	}
-	workerPath, err := filepath.Abs(env("ECHOEAR_TTS_WORKER", "tts_worker.py"))
+	project, err := filepath.Abs(env("ECHOEAR_REPO_DIR", "."))
 	if err != nil {
 		return err
 	}
-	project := filepath.Dir(workerPath)
+	if os.Getenv("ECHOEAR_REPO_DIR") == "" && filepath.Base(project) == "bridge" {
+		project = filepath.Dir(project)
+	}
 	if err := os.MkdirAll(local, 0o700); err != nil {
 		return err
 	}
@@ -122,20 +124,17 @@ func run() error {
 	oc := newOpenCode(root, ocAPI, db, ocDir, settings)
 	hex := hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: filepath.Join(data, "hex/local-api.json"), read: hexEndpoint}},
 		&fileCache[string]{path: filepath.Join(data, "hex/settings.json"), read: hexQuery}}
-	models := filepath.Join(local, "tts-models")
-	model := env("ECHOEAR_TTS_MODEL", "kokoro-v1.0.onnx")
-	if filepath.Base(model) == model {
-		model = filepath.Join(models, model)
-	}
-	python := env("ECHOEAR_TTS_PYTHON", filepath.Join(home, ".local/share/echoear/tts-venv/bin/python"))
-	worker := newSynthWorker(root, python, workerPath, model, filepath.Join(models, "voices-v1.0.bin"))
+	modelDir := ttsModelDir(local)
+	worker := newSynthWorker(root, func() (speechEngine, error) {
+		return openKokoro(modelDir, kokoroThreads)
+	})
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
 		hex: hex, oc: oc, pairPort: pairPort, worker: worker,
-		agentPath: filepath.Join(project, "../agents/echoear.md"),
+		agentPath: filepath.Join(project, "agents/echoear.md"),
 		voices:    deviceVoiceStore(db, fallbackVoice),
 		virtual:   virtualStore(db), history: &chatHistory{db},
-		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "../firmware/build")), "echoear.bin")},
-		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "../firmware/build-box3")), "echoear_box3.bin")}}
+		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "firmware/build")), "echoear.bin")},
+		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "firmware/build-box3")), "echoear_box3.bin")}}
 	b.ws = newWSHub(b)
 	// Session history is a one-time, retryable backfill; the LAN service and
 	// local history remain available while OpenCode is offline.

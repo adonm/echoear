@@ -97,35 +97,37 @@ var sinc = func() (phases [2][2*sincRadius + 1]float32) {
 	return phases
 }()
 
-func synthPCM(raw []byte, rate uint32) ([]byte, error) {
-	if len(raw)%4 != 0 || len(raw) == 0 || (rate != 24000 && rate != sampleRate) {
+func synthPCM(raw []float32, rate int) ([]byte, error) {
+	if len(raw) == 0 || (rate != kokoroRate && rate != sampleRate) {
 		return nil, errInvalidPCM
 	}
-	n := len(raw) / 4
+	n := len(raw)
 	count := n
-	if rate == 24000 {
+	if rate == kokoroRate {
 		count = (n*2 + 2) / 3
 	}
 	if count > maxPCM/2 {
 		return nil, errInvalidPCM
 	}
-	input := make([]float32, n+2*sincRadius+1)
-	for i := range n {
-		input[sincRadius+i] = math.Float32frombits(le.Uint32(raw[4*i:]))
+	var input []float32
+	if rate == kokoroRate {
+		input = make([]float32, n+2*sincRadius+1)
+		copy(input[sincRadius:], raw)
 	}
 	pcm := make([]byte, count*2)
 	var peak float64
 	const knee, headroom = 0.75, 0.8912509381337456 - 0.75
 	for i := range count {
-		v := input[i+sincRadius]
-		if rate == 24000 {
+		var v float32
+		if rate == kokoroRate {
 			center := 3 * i / 2
 			samples := input[center : center+2*sincRadius+1]
 			weights := &sinc[i&1]
-			v = 0
 			for j, sample := range samples {
 				v += sample * weights[j]
 			}
+		} else {
+			v = raw[i]
 		}
 		scaled := float64(v) * 1.8
 		mag := math.Abs(scaled)

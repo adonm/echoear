@@ -241,7 +241,7 @@ func TestMCPStateSlices(t *testing.T) {
 	diag, now := s["diagnostics"].(object), s["now"].(object)
 	latency := diag["latency"].(object)[diagMetricNames[diagE2E]].(object)
 	if latency["p50"] != json.Number("12") || latency["p95"] != json.Number("12") ||
-		diag["bridge"] == nil || diag["tts_worker"] == nil || diag["host"] == nil || len(diag["devices"].([]any)) != 1 ||
+		diag["bridge"] == nil || diag["tts"] == nil || diag["host"] == nil || len(diag["devices"].([]any)) != 1 ||
 		now["unix_ms"] == nil || now["local"] == "" {
 		t.Fatal(diag, now)
 	}

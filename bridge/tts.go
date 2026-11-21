@@ -5,14 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,176 +33,66 @@ type ttsResult struct {
 }
 
 type synthWorker struct {
-	python, script, model, voices string
-	ready                         atomic.Bool
-	child                         atomic.Int64
-	requests                      chan ttsRequest
-	done                          chan struct{}
+	ready    atomic.Bool
+	requests chan ttsRequest
+	done     chan struct{}
 }
 
-func (w *synthWorker) pid() int { return int(w.child.Load()) }
+type speechEngine interface {
+	generate(text string, voice voiceChoice, keepGoing func() bool) ([]float32, int)
+	close()
+}
 
-func newSynthWorker(ctx context.Context, python, script, model, voices string) *synthWorker {
-	w := &synthWorker{python: python, script: script, model: model, voices: voices,
-		requests: make(chan ttsRequest), done: make(chan struct{})}
-	go w.run(ctx)
+func newSynthWorker(ctx context.Context, open func() (speechEngine, error)) *synthWorker {
+	w := &synthWorker{requests: make(chan ttsRequest), done: make(chan struct{})}
+	go w.run(ctx, open)
 	return w
 }
 
-type workerProcess struct {
-	cmd     *exec.Cmd
-	in, out *os.File
-	exited  chan struct{}
-}
-
-func (w *synthWorker) start() (*workerProcess, error) {
-	cmd := exec.Command(w.python, "-B", w.script, w.model, w.voices)
-	// Do not pass bridge tokens or upstream service credentials to the worker.
-	cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8"}
-	in, stdin, err := os.Pipe()
-	if err != nil {
+func synthesizePCM(ctx context.Context, engine speechEngine, id, text string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	defer in.Close()
-	stdout, out, err := os.Pipe()
-	if err != nil {
-		stdin.Close()
-		return nil, err
-	}
-	defer out.Close()
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, os.Stderr
-	if err = cmd.Start(); err != nil {
-		stdin.Close()
-		stdout.Close()
-		return nil, err
-	}
-	p := &workerProcess{cmd: cmd, in: stdin, out: stdout, exited: make(chan struct{})}
-	go func() {
-		_ = cmd.Wait()
-		close(p.exited)
-	}()
-	return p, nil
-}
-
-func (p *workerProcess) stop() {
-	p.in.Close()
-	timer := time.NewTimer(time.Second)
-	select {
-	case <-p.exited:
-		timer.Stop()
-	case <-timer.C:
-		_ = p.cmd.Process.Kill()
-		<-p.exited
-	}
-	p.out.Close()
-}
-
-type ttsVoiceRequest struct {
-	Voice string `json:"voice"`
-	Lang  string `json:"lang"`
-}
-
-func ttsFrame(id, text string) []byte {
 	voice := voiceByID(id)
 	if voice.ID == "" {
 		voice = voiceByID(heartVoice)
 	}
-	meta, _ := json.Marshal(ttsVoiceRequest{voice.ID, voice.Lang})
-	request := make([]byte, 0, 8+len(meta)+len(text))
-	request = append(le.AppendUint32(request, uint32(len(meta))), meta...)
-	return append(le.AppendUint32(request, uint32(len(text))), text...)
-}
-
-// call reports whether the process is unusable, distinct from an inference error.
-func (p *workerProcess) call(ctx context.Context, voice, text string) (ttsResult, bool) {
+	samples, rate := engine.generate(text, voice, func() bool { return ctx.Err() == nil })
 	if err := ctx.Err(); err != nil {
-		return ttsResult{err: err}, false
+		return nil, err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = p.cmd.Process.Kill() })
-	defer stop()
-	if _, err := p.in.Write(ttsFrame(voice, text)); err != nil {
-		return ttsResult{err: errTTS}, true
-	}
-	var header [9]byte
-	if _, err := io.ReadFull(p.out, header[:]); err != nil {
-		return ttsResult{err: errTTS}, true
-	}
-	rate, size := le.Uint32(header[1:]), le.Uint32(header[5:])
-	status := header[0]
-	if status > 1 || status == 1 && size > 4096 || size > maxPCM*3 {
-		return ttsResult{err: errTTS}, true
-	}
-	if text == "" {
-		if status != 0 || rate != 0 || size != 0 {
-			return ttsResult{err: errTTS}, true
-		}
-		return ttsResult{}, false
-	}
-	raw := make([]byte, size)
-	if _, err := io.ReadFull(p.out, raw); err != nil {
-		return ttsResult{err: errTTS}, true
-	}
-	if status == 1 {
-		return ttsResult{err: errTTS}, false
-	}
-	pcm, err := synthPCM(raw, rate)
-	return ttsResult{pcm, err}, false
+	return synthPCM(samples, rate)
 }
 
-func (w *synthWorker) run(ctx context.Context) {
+func (w *synthWorker) run(ctx context.Context, open func() (speechEngine, error)) {
 	defer close(w.done)
-	backoff := 100 * time.Millisecond
+	engine, err := open()
+	if err != nil {
+		log.Printf("EchoEar TTS unavailable: %v", err)
+		return
+	}
+	defer engine.close()
+	w.ready.Store(true)
+	defer w.ready.Store(false)
 	for ctx.Err() == nil {
-		p, err := w.start()
-		if err == nil {
-			w.child.Store(int64(p.cmd.Process.Pid))
-			timeout, cancel := context.WithTimeout(ctx, ttsWait)
-			probe, _ := p.call(timeout, heartVoice, "")
-			cancel()
-			err = probe.err
-			if err == nil {
-				backoff = 100 * time.Millisecond
-				w.ready.Store(true)
-			serve:
-				for {
-					select {
-					case <-ctx.Done():
-						break serve
-					case <-p.exited:
-						break serve
-					case req := <-w.requests:
-						if err := req.ctx.Err(); err != nil {
-							req.done <- ttsResult{err: err}
-							continue
-						}
-						turn, cancel := context.WithTimeout(ctx, ttsWait)
-						trace := traceFrom(req.ctx)
-						admitted := time.Now()
-						trace.measure(diagTTSQueue, admitted.Sub(req.queuedAt))
-						result, broken := p.call(turn, req.voice, req.text)
-						trace.measure(diagTTSInfer, time.Since(admitted))
-						cancel()
-						req.done <- result
-						if broken {
-							break serve
-						}
-					}
-				}
-				w.ready.Store(false)
-			}
-			p.stop()
-			w.child.Store(0)
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		log.Print("EchoEar TTS worker unavailable; restarting")
-		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-		case <-timer.C:
-			backoff = min(5*time.Second, backoff*2)
+			return
+		case req := <-w.requests:
+			if err := req.ctx.Err(); err != nil {
+				req.done <- ttsResult{err: err}
+				continue
+			}
+			turn, cancel := context.WithTimeout(req.ctx, ttsWait)
+			stop := context.AfterFunc(ctx, cancel)
+			trace := traceFrom(req.ctx)
+			admitted := time.Now()
+			trace.measure(diagTTSQueue, admitted.Sub(req.queuedAt))
+			pcm, err := synthesizePCM(turn, engine, req.voice, req.text)
+			trace.measure(diagTTSInfer, time.Since(admitted))
+			stop()
+			cancel()
+			req.done <- ttsResult{pcm, err}
 		}
 	}
 }

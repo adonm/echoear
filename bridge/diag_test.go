@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -186,45 +185,41 @@ func TestDiagnosticsFirstSpokenDeltaAndAudio(t *testing.T) {
 }
 
 func TestDiagnosticsTTSQueueDropsCanceledSpeechWithoutRestart(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	script, calls := filepath.Join(dir, "worker.py"), filepath.Join(dir, "requests")
-	if err := os.WriteFile(script, []byte(`import struct, sys
-r, w = sys.stdin.buffer, sys.stdout.buffer
-while header := r.read(4):
-    r.read(struct.unpack("<I", header)[0])
-    text = r.read(struct.unpack("<I", r.read(4))[0])
-    with open(sys.argv[1], "ab") as calls:
-        calls.write(text + b"\n")
-    pcm = struct.pack("<f", 0.25) if text else b""
-    w.write(struct.pack("<BII", 0, 16000 if text else 0, len(pcm)) + pcm)
-    w.flush()
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
 	root, stop := context.WithCancel(t.Context())
-	worker := newSynthWorker(root, python, script, calls, "")
+	var calls []string
+	loads := 0
+	stale, cancel := context.WithCancel(root)
+	defer cancel()
+	worker := newSynthWorker(root, func() (speechEngine, error) {
+		loads++
+		return fakeSpeechEngine(func(text string, _ voiceChoice, keepGoing func() bool) ([]float32, int) {
+			calls = append(calls, text)
+			if text == "Interrupt me" {
+				cancel()
+				if keepGoing() {
+					t.Error("native callback did not observe request cancellation")
+				}
+			}
+			return []float32{0.25}, sampleRate
+		}), nil
+	})
 	defer func() { stop(); <-worker.done }()
 	b := &bridge{}
 	ctx := b.traceTurn(root, "vocat", "Cake", "typed", time.Now())
 	if pcm, err := worker.synthesizeQueued(ctx, heartVoice, "First", time.Now().Add(-10*time.Millisecond)); err != nil || len(pcm) != 2 {
 		t.Fatalf("worker did not return PCM: %v, %v", pcm, err)
 	}
-	pid := worker.pid()
-	stale, cancel := context.WithCancel(ctx)
-	cancel()
+	if _, err := worker.synthesize(stale, heartVoice, "Interrupt me"); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
 	if _, err := worker.synthesize(stale, heartVoice, "Discard me"); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if _, err := worker.synthesize(ctx, heartVoice, "Second"); err != nil || worker.pid() != pid {
+	if _, err := worker.synthesize(ctx, heartVoice, "Second"); err != nil || !worker.ready.Load() || loads != 1 {
 		t.Fatalf("worker did not stay warm: %v", err)
 	}
-	data, err := os.ReadFile(calls)
-	if err != nil || string(data) != "\nFirst\nSecond\n" {
-		t.Fatalf("canceled work reached Python: %q (%v)", data, err)
+	if got := strings.Join(calls, ","); got != "First,Interrupt me,Second" {
+		t.Fatalf("unexpected synthesis calls: %s", got)
 	}
 	report := b.diagnosticReport()
 	if row := report.Turns[0]; row.TTSQueue == nil || *row.TTSQueue < 10 || row.TTSInfer == nil ||
