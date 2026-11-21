@@ -150,7 +150,7 @@ func (b *bridge) mcpDeviceState(out object, id string, include []string) error {
 		key := str(entry["device_id"])
 		p := object{"device_id": key, "name": entry["character"]}
 		for _, field := range []string{"kind", "board", "online", "ws_connected", "width", "height", "mode", "sleeping", "volume", "auto_volume", "voice", "battery_pct",
-			"screen", "active_app", "last_app_error", "wifi_rssi", "cpu_pct"} {
+			"screen", "active_app", "last_app_error", "can_call", "call", "wifi_rssi", "cpu_pct"} {
 			p[field] = entry[field]
 		}
 		if state, ok := entry["active_app_state"]; ok {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,60 @@ func TestMCPHistoryCursorAndPhotoMetadata(t *testing.T) {
 	}
 	toolTest(t, base, "state", object{"device_id": id, "include": []string{"messages"},
 		"messages_cursor": object{"before_ts": now.UnixMilli()}}, true)
+}
+
+func TestMCPCallStatusHangupAndEmitReceipts(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	cake := callClient(t, b, base, callCake, "Cake")
+	mint := callClient(t, b, base, callMint, "Mint")
+	const speaker = "echoear-speaker"
+	board := testConnectWS(t, base, "unit", false)
+	board.helloV2(t, speaker, "Speaker")
+	device := func(id string) object { return stateMe(t, base, id)["device"].(object) }
+	start := toolTest(t, base, "emit", object{"to": callMint, "call": object{"from": callCake}}, false)
+	call := start["call"].(object)
+	callID := call["id"].(json.Number)
+	if d := device(callMint); d["can_call"] != true || d["call"].(object)["peer_device_id"] != callCake ||
+		d["call"].(object)["direction"] != "incoming" || d["call"].(object)["state"] != "ringing" {
+		t.Fatal(d)
+	}
+	mint.until(t, hasWS("svg", "call-answer"))
+	tapCallControl(t, mint, "call-answer")
+	mint.until(t, hasWS("call", `"state":"start"`))
+	if c := device(callCake)["call"].(object); c["id"] != callID || c["state"] != "connected" || c["started_at"] == nil {
+		t.Fatal(c)
+	}
+	suppressed := toolTest(t, base, "emit", object{"to": callMint, "notes": "C5:150"}, false)
+	if r := suppressed["receipts"].([]any)[0].(object); suppressed["played"] != false || r["status"] != "skipped" || r["reason"] != "on_call" {
+		t.Fatal(suppressed)
+	}
+	offline := toolTest(t, base, "emit", object{"to": "everyone", "sfx": "pop"}, false)
+	if rs := offline["receipts"].([]any); offline["played"] != false || len(rs) != 1 || rs[0].(object)["reason"] != "not_connected" {
+		t.Fatal(offline)
+	}
+	result := toolTest(t, base, "emit", object{"to": "all", "chime": "tap", "intercom": object{"from": callCake, "text": "Hello"}}, false)
+	check := map[string]string{}
+	for _, item := range result["receipts"].([]any) {
+		r := item.(object)
+		check[str(r["action"])+"/"+str(r["device_id"])] = str(r["status"])
+	}
+	if result["played"] != true || check["chime/"+speaker] != "queued" || check["chime/"+callMint] != "skipped" ||
+		check["intercom/"+speaker] != "queued" || check["intercom/"+callMint] != "skipped" {
+		t.Fatal(result)
+	}
+	if result := toolTest(t, base, "emit", object{"to": callMint, "call": object{"op": "hangup", "id": 42}}, false); result["call"] != nil ||
+		result["receipts"].([]any)[0].(object)["reason"] != "call_changed" {
+		t.Fatal(result)
+	}
+	hangup := toolTest(t, base, "emit", object{"to": callMint, "call": object{"op": "hangup", "id": callID}}, false)
+	if c := hangup["call"].(object); c["state"] != "ended" || c["id"] != callID || len(hangup["receipts"].([]any)) != 2 {
+		t.Fatal(hangup)
+	}
+	cake.until(t, hasWS("call", `"state":"end"`))
+	mint.until(t, hasWS("call", `"state":"end"`))
+	if device(callCake)["call"] != nil || device(callMint)["call"] != nil {
+		t.Fatal("hangup left one participant in the call")
+	}
 }
 
 func TestMCPFacePartEditsAndFullSVGFallback(t *testing.T) {

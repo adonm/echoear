@@ -165,12 +165,7 @@ var mcpTools = func() []object {
 	text, number, flag := object{"type": "string"}, object{"type": "integer"}, object{"type": "boolean"}
 	enum := func(items ...string) object { return object{"type": "string", "enum": items} }
 	array := func(items object) object { return object{"type": "array", "items": items} }
-	schema := func(props object, required ...string) object {
-		if required == nil {
-			required = []string{}
-		}
-		return closedObject(props, required...)
-	}
+	schema := closedObject
 	tool := func(name, description string, in object) object {
 		return object{"name": name, "description": description, "inputSchema": in}
 	}
@@ -210,10 +205,10 @@ var mcpTools = func() []object {
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"template": enum(templateNames()...), "data": appTemplateSchema(""),
 				"save_current": schema(object{"name": text, "title": text}, "name"),
-				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
-		tool("emit", "Call, send a spoken intercom and card, or play notes or effects. Use exact device IDs; calls cannot target all.",
+				"load":         text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
+		tool("emit", "Start or hang up a call, send intercom, or play notes/effects. Receipts describe queued or skipped deliveries, not playback. Calls use exact device IDs, never all.",
 			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"),
-				"call":  schema(object{"from": text}, "from"),
+				"call":  schema(object{"op": enum("start", "hangup"), "from": text, "id": object{"type": "integer", "minimum": 1, "maximum": uint64(1<<32 - 1)}}),
 				"notes": notes, "sfx": enum(chimes...), "chime": enum(chimes...)}, "to")),
 	}
 }()
@@ -276,12 +271,14 @@ func (h *wsHub) deviceStatus(entry object, id string, full bool) {
 	entry["ws_connected"], entry["ws"], entry["mode"] = false, false, "offline"
 	entry["battery_pct"], entry["volume"], entry["scene_rev"] = nil, nil, uint64(0)
 	entry["sleeping"] = false
+	entry["can_call"] = false
 	h.mu.Lock()
 	if d := h.devices[key]; d != nil && h.active(d) {
 		entry["ws_connected"], entry["ws"], entry["online"], entry["mode"] = true, true, true, d.pose.mood
 		entry["character"], entry["cat"], entry["voice"] = d.cat.Name, d.cat.catLook, d.voice
 		entry["volume"], entry["scene_rev"], entry["firmware"] = d.vol, d.rev, d.firmware
 		entry["caps"] = d.caps
+		entry["can_call"], entry["call"] = d.caps.Call, h.callSnapshot(d)
 		entry["auto_volume"], entry["sleeping"] = d.autoVol, d.asleep
 		if d.board != "" {
 			entry["board"], entry["shape"], entry["width"], entry["height"] = d.board, d.screen.shape, d.screen.width, d.screen.height
@@ -360,19 +357,37 @@ func (b *bridge) mcpEmit(ctx context.Context, args object) (object, error) {
 	}
 	out := object{"ok": true, "to": to}
 	if raw, ok := args["call"]; ok {
-		call, _ := raw.(object)
-		from := str(call["from"])
-		if len(args) != 2 || broadcast(to) || !deviceIDRE.MatchString(from) {
-			return nil, fieldError("call", "use only call.from and to with exact device IDs")
+		call, valid := raw.(object)
+		if len(args) != 2 || broadcast(to) || !valid {
+			return nil, fieldError("call", "use only call and to with exact device IDs")
 		}
 		if b.ws == nil {
 			return nil, problem(503, "Device hub unavailable")
 		}
-		result, err := b.ws.mcpCall(from, to)
-		if err != nil {
-			return nil, err
+		op, specified := call["op"]
+		if op == "hangup" {
+			_, hasFrom := call["from"]
+			id, err := mcpUint(call, "id")
+			if hasFrom || err != nil || id != nil && (*id == 0 || *id > 1<<32-1) {
+				return nil, fieldError("call", "hangup uses to as a participant and optionally call.id")
+			}
+			result, receipts := b.ws.mcpHangup(to, id)
+			out["call"], out["receipts"] = result, receipts
+			return out, nil
 		}
-		out["call"] = result
+		from := str(call["from"])
+		if _, hasID := call["id"]; specified && op != "start" || hasID || broadcast(from) ||
+			!deviceIDRE.MatchString(from) || strings.EqualFold(from, to) {
+			return nil, fieldError("call", "use only call.from and to with exact device IDs")
+		}
+		result, err := b.ws.mcpCall(from, to)
+		var receipt object
+		if err != nil {
+			receipt = deliveryReceipt("call", to, err.Error())
+		} else {
+			receipt = deliveryReceipt("call", to, "")
+		}
+		out["call"], out["receipts"] = result, []object{receipt}
 		return out, nil
 	}
 	var pcm []byte
@@ -401,26 +416,31 @@ func (b *bridge) mcpEmit(ctx context.Context, args object) (object, error) {
 			}
 		}
 	}
+	receipts := []object{}
 	if raw, ok := args["intercom"]; ok {
 		i, ok := raw.(object)
 		if !ok {
 			return nil, fieldError("intercom", "expected from and text")
 		}
-		r, err := b.mcpIntercom(ctx, object{"from_device_id": i["from"], "to_device_id": to, "text": i["text"]})
+		r, delivered, err := b.mcpIntercom(ctx, object{"from_device_id": i["from"], "to_device_id": to, "text": i["text"]})
 		if err != nil {
 			return nil, err
 		}
 		out["intercom"] = r
+		receipts = append(receipts, delivered...)
 	}
 	if audioField != "" {
-		if err := b.playChime(to, kind, pcm); err != nil {
+		delivered, err := b.emitSignal(to, audioField, kind, pcm)
+		if err != nil {
 			return nil, err
 		}
-		out["played"] = true
+		receipts = append(receipts, delivered...)
+		out["played"] = slices.ContainsFunc(delivered, func(receipt object) bool { return receipt["status"] == "queued" })
 	}
 	if len(out) == 2 {
 		return nil, problem(400, "Expected an action")
 	}
+	out["receipts"] = receipts
 	return out, nil
 }
 
@@ -508,77 +528,112 @@ func validChime(kind string) bool {
 	return slices.Contains(basicChimes, kind)
 }
 
-func (h *wsHub) chime(d *wsDevice, kind string) {
+func (h *wsHub) chime(d *wsDevice, kind string) bool {
 	if kind == "celebrate" {
 		kind = "intercom" // Existing firmware's happy tone.
 	}
-	h.push(d, object{"op": "chime", "kind": kind}, false)
+	return d.client.enqueue(textFrame(object{"op": "chime", "kind": kind}))
 }
 
-func (b *bridge) playChime(id, kind string, pcm []byte) error {
-	if b.ws == nil {
-		return problem(503, "Device hub unavailable")
+func deliveryReceipt(action, id, reason string) object {
+	r := object{"device_id": id, "action": action, "status": "queued"}
+	if reason != "" {
+		r["status"], r["reason"] = "skipped", reason
 	}
+	return r
+}
+
+func (h *wsHub) signalTarget(id string) (*wsDevice, string) {
+	d := h.devices[strings.ToLower(id)]
+	if d == nil || d.who.DeviceID != id || !h.active(d) {
+		return nil, "not_connected"
+	}
+	if d.callState != callNone {
+		return nil, "on_call"
+	}
+	return d, ""
+}
+
+func (b *bridge) emitSignal(id, action, kind string, pcm []byte) ([]object, error) {
+	if b.ws == nil {
+		return nil, problem(503, "Device hub unavailable")
+	}
+	ids := []string{id}
+	if id == "all" {
+		list, err := b.peerSnapshot("")
+		if err != nil {
+			return nil, err
+		}
+		ids = make([]string, 0, len(list))
+		for _, p := range list {
+			ids = append(ids, p.DeviceID)
+		}
+	}
+	receipts := make([]object, 0, len(ids))
 	h := b.ws
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if id == "all" {
-		played := false
-		for _, d := range h.devices {
-			if h.active(d) {
-				h.playSignal(d, kind, pcm)
-				played = true
-			}
+	for _, id := range ids {
+		d, reason := h.signalTarget(id)
+		if d != nil && !h.playSignal(d, kind, pcm) {
+			reason = "queue_unavailable"
 		}
-		if !played {
-			return problem(409, "No devices connected")
-		}
-		return nil
+		receipts = append(receipts, deliveryReceipt(action, id, reason))
 	}
-	d := h.devices[strings.ToLower(id)]
-	if d == nil || !h.active(d) || d.who.DeviceID != id {
-		return problem(409, "Device is not connected")
-	}
-	h.playSignal(d, kind, pcm)
-	return nil
+	return receipts, nil
 }
 
-func (h *wsHub) playSignal(d *wsDevice, kind string, pcm []byte) {
+func (h *wsHub) playSignal(d *wsDevice, kind string, pcm []byte) bool {
 	if len(pcm) > 0 {
-		h.playPCM(d, pcm)
-	} else {
-		h.chime(d, kind)
+		return h.playPCM(d, pcm)
 	}
+	return h.chime(d, kind)
 }
 
-func (b *bridge) mcpIntercom(ctx context.Context, args object) (object, error) {
+func (b *bridge) mcpIntercom(ctx context.Context, args object) (object, []object, error) {
 	sender, err := b.lookupDevice(str(args["from_device_id"]))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	text := shortText(args["text"], maxMessage, true)
 	if _, err := spokenText(text); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	to := str(args["to_device_id"])
 	others, err := b.peerSnapshot(sender.DeviceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var recipients []peer
-	if to == "all" {
-		recipients = b.intercomTargets(others, to)
-	} else {
+	recipients := others
+	if to != "all" {
 		recipients = slices.DeleteFunc(others, func(p peer) bool { return p.DeviceID != to })
+		if len(recipients) == 0 {
+			if p, _, err := b.findDevice(to); err == nil && p.DeviceID == to && p.DeviceID != sender.DeviceID {
+				recipients = []peer{p}
+			}
+		}
 	}
-	if len(recipients) == 0 {
-		return nil, problem(404, "Recipient not found")
+	if len(recipients) == 0 && to != "all" {
+		return nil, nil, problem(404, "Recipient not found")
 	}
 	out := b.deliver(ctx, sender, recipients, text, nil)
-	if len(out.sent) == 0 {
-		return nil, problem(409, "No recipients connected")
+	receipts := make([]object, 0, len(recipients))
+	for _, p := range recipients {
+		reason := ""
+		if !slices.Contains(out.sent, p.DeviceID) {
+			reason = "not_connected"
+			if h := b.ws; h != nil {
+				h.mu.Lock()
+				_, reason = h.signalTarget(p.DeviceID)
+				h.mu.Unlock()
+				if reason == "" {
+					reason = "queue_unavailable"
+				}
+			}
+		}
+		receipts = append(receipts, deliveryReceipt("intercom", p.DeviceID, reason))
 	}
-	return object{"ok": true, "sent_to": out.sent, "delivered_to": out.delivered, "failed_to": out.failed}, nil
+	return object{"ok": len(out.sent) > 0, "sent_to": out.sent, "delivered_to": out.delivered, "failed_to": out.failed}, receipts, nil
 }
 
 func fieldError(path, format string, args ...any) error {

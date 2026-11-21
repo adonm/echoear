@@ -163,6 +163,60 @@ func (h *wsHub) mcpCall(from, to string) (object, error) {
 	return object{"id": caller.callID, "state": state}, nil
 }
 
+func (h *wsHub) callSnapshot(d *wsDevice) object {
+	if d.callState == callNone {
+		return nil
+	}
+	state := "ringing"
+	if d.callState == callActive {
+		state = "connected"
+	}
+	peerID := d.callPeer
+	if p := h.callPeer(d); p != nil {
+		peerID = p.who.DeviceID
+	}
+	direction := "incoming"
+	if d.callOrigin {
+		direction = "outgoing"
+	}
+	out := object{"id": d.callID, "state": state, "direction": direction, "peer_device_id": peerID, "muted": d.callMuted}
+	if d.callState == callActive {
+		out["started_at"] = d.callStarted.UTC()
+	}
+	return out
+}
+
+func (h *wsHub) mcpHangup(id string, expected *uint64) (object, []object) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := h.devices[strings.ToLower(id)]
+	skip := func(reason string) (object, []object) {
+		return nil, []object{deliveryReceipt("hangup", id, reason)}
+	}
+	if d == nil || d.who.DeviceID != id || !h.active(d) {
+		return skip("not_connected")
+	}
+	if d.callState == callNone {
+		return skip("no_call")
+	}
+	if expected != nil && uint64(d.callID) != *expected {
+		return skip("call_changed")
+	}
+	callID, p := d.callID, h.callPeer(d)
+	h.endCall(d, "hung up")
+	receipts := []object{}
+	for _, side := range []*wsDevice{d, p} {
+		if side != nil {
+			reason := ""
+			if !h.active(side) {
+				reason = "not_connected"
+			}
+			receipts = append(receipts, deliveryReceipt("hangup", side.who.DeviceID, reason))
+		}
+	}
+	return object{"id": callID, "state": "ended"}, receipts
+}
+
 func (h *wsHub) ringUntilAnswered(ctx context.Context, caller *wsDevice, id uint32) {
 	tick := time.NewTicker(callRingEvery)
 	defer tick.Stop()

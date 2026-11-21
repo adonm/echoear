@@ -147,9 +147,9 @@ func parseMelody(raw any, path string) ([]string, []byte, error) {
 	return notes, pcm, nil
 }
 
-func (h *wsHub) playPCM(d *wsDevice, pcm []byte) {
+func (h *wsHub) playPCM(d *wsDevice, pcm []byte) bool {
 	stream := newAudioStream()
 	stream.append(pcm)
 	stream.finish(nil)
-	h.play(d, stream)
+	return h.play(d, stream).Err() == nil
 }
