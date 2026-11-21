@@ -47,7 +47,6 @@ type bridge struct {
 
 	parentToken        string
 	deferMCPCompaction bool
-	atmosphere         bool
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {

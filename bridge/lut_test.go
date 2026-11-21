@@ -19,7 +19,14 @@ func TestAtmospherePhasesAndContrast(t *testing.T) {
 			t.Errorf("%d: got %d, want %d", tc.h, g, tc.g)
 		}
 	}
-	if g := gradeAt(at(13, 0), time.FixedZone("configured", 9*60*60)); g != gradeNight {
+	var hub wsHub
+	if g := hub.frameGrade(&wsDevice{}, at(23, 0)); g != gradeDay {
+		t.Fatalf("unconfigured hub did not keep the identity grade: %d", g)
+	}
+	board := &wsDevice{key: "board", client: &wsClient{role: "device"}}
+	hub.atmosphere = true
+	hub.parents = map[string]*parentRuntime{"board": {loc: time.FixedZone("configured", 9*60*60), configured: true}}
+	if g := hub.frameGrade(board, at(13, 0)); g != gradeNight {
 		t.Fatalf("device timezone not used: %d", g)
 	}
 	if gradeAt(at(5, 1), time.UTC) != gradeAt(at(5, 29), time.UTC) {

@@ -200,7 +200,7 @@ func wsHarness(t *testing.T, setup func(*bridge, string)) (*bridge, string) {
 	if setup != nil {
 		setup(b, dir)
 	}
-	b.ws = newWSHub(b)
+	b.ws = newWSHub(b, false)
 	srv := httptest.NewServer(b)
 	t.Cleanup(func() {
 		b.ws.shutdown()

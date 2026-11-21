@@ -198,7 +198,7 @@ func TestTimerRestartPrunesAndFiresOnce(t *testing.T) {
 	root, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	b = &bridge{db: db, root: root, virtual: virtualStore(db), history: &chatHistory{db}, peers: peers{deviceStore(db)}}
-	b.ws = newWSHub(b)
+	b.ws = newWSHub(b, false)
 	defer b.ws.shutdown()
 	m := newTimerManager(b)
 	defer m.close()

@@ -78,10 +78,11 @@ type wsHub struct {
 	refreshing    bool
 	refreshNeeded bool
 	nextCall      uint32
+	atmosphere    bool
 }
 
-func newWSHub(b *bridge) *wsHub {
-	h := &wsHub{b: b, clients: make(map[*wsClient]struct{}), devices: make(map[string]*wsDevice)}
+func newWSHub(b *bridge, atmosphere bool) *wsHub {
+	h := &wsHub{b: b, atmosphere: atmosphere, clients: make(map[*wsClient]struct{}), devices: make(map[string]*wsDevice)}
 	go h.animate(b.root)
 	return h
 }

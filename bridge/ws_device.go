@@ -665,7 +665,7 @@ func (h *wsHub) catPose(d *wsDevice, now time.Time, mood string) catPose {
 }
 
 func (h *wsHub) frameGrade(d *wsDevice, now time.Time) gradeKey {
-	if !h.b.atmosphere || d.client.role != "device" {
+	if !h.atmosphere || d.client.role != "device" {
 		return gradeDay
 	}
 	var loc *time.Location
@@ -945,7 +945,7 @@ func (h *wsHub) animate(ctx context.Context) {
 				return
 			}
 			now := time.Now()
-			checkGrade := h.b.atmosphere && !now.Before(nextGrade)
+			checkGrade := h.atmosphere && !now.Before(nextGrade)
 			if checkGrade {
 				nextGrade = now.Truncate(time.Minute).Add(time.Minute)
 			}
