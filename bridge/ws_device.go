@@ -525,7 +525,15 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		return
 	}
 	if old := h.devices[d.key]; old != nil {
-		old.client.cancel()
+		if ev.Role == "web" && ev.IfFree && h.active(old) {
+			c.stop(wsCatOccupied)
+			return
+		}
+		if old.virtual() {
+			old.client.stop(wsCatOccupied)
+		} else {
+			old.client.cancel()
+		}
 		h.endCall(old, "disconnected")
 		h.dropApp(old)
 		old.recording.clear()

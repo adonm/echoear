@@ -809,20 +809,16 @@ func (s screenScanner) Draw() {
 	}
 }
 
-func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) (fb []uint16, err error) {
+func (s preparedScene) raster(w, h int, x, y float64, side int, fill imagecolor.Color, lookup photoLookup) (img *image.RGBA, err error) {
 	// oksvg and rasterx are also fed untrusted geometry.
 	defer func() {
 		if recover() != nil {
-			err = fmt.Errorf("Invalid SVG geometry")
+			img, err = nil, fmt.Errorf("Invalid SVG geometry")
 		}
 	}()
-	w, h := screen.width, screen.height
-	side := min(w, h)
-	x, y := float64(w-side)/2, float64(h-side)/2
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(img, img.Bounds(), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
+	img = image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), image.NewUniform(fill), image.Point{}, draw.Src)
 	scan := screenScanner{rasterx.NewScannerGV(w, h, img, img.Bounds()), img}
-	clip := image.Rect(int(x), int(y), int(math.Ceil(x+float64(side))), int(math.Ceil(y+float64(side))))
 	drawSVG := func(svg string) error {
 		icon, err := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.StrictErrorMode)
 		if err != nil {
@@ -838,10 +834,19 @@ func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) (fb [
 		scale := float64(side) / screenSize
 		err = rasterPhotos(s.root, img, rasterx.Identity.Translate(x, y).Scale(scale, scale), lookup, drawSVG)
 	}
+	return img, err
+}
+
+func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) ([]uint16, error) {
+	w, h := screen.width, screen.height
+	side := min(w, h)
+	x, y := float64(w-side)/2, float64(h-side)/2
+	img, err := s.raster(w, h, x, y, side, imagecolor.Black, lookup)
 	if err != nil {
 		return nil, err
 	}
-	fb = make([]uint16, w*h)
+	clip := image.Rect(int(x), int(y), int(math.Ceil(x+float64(side))), int(math.Ceil(y+float64(side))))
+	fb := make([]uint16, w*h)
 	br, bgc, bb, _ := s.background.RGBA()
 	bar := uint16(br>>11)<<11 | uint16(bgc>>10)<<5 | uint16(bb>>11)
 	for y := range h {
