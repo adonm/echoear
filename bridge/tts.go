@@ -53,7 +53,7 @@ func synthesizePCM(ctx context.Context, engine speechEngine, id, text string) ([
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	voice := voiceByID(id)
+	voice := voiceByID(storedVoice(id))
 	if voice.ID == "" {
 		voice = voiceByID(heartVoice)
 	}

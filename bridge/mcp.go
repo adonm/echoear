@@ -176,6 +176,11 @@ var mcpTools = func() []object {
 	}
 	notes := object{"anyOf": []object{text, array(text)}, "description": "PITCH:MS separated by spaces or an array, e.g. C5:150 E5:150"}
 	chimes := append(slices.Clone(basicChimes), slices.Sorted(maps.Keys(sfxPresets))...)
+	voices := make([]string, 0, len(voiceCatalog))
+	for _, voice := range voiceCatalog {
+		voices = append(voices, voice.ID)
+	}
+	voice := enum(voices...)
 	memory := schema(object{"op": enum("set", "delete"), "scope": text, "key": text, "value": object{},
 		"expected_version": object{"type": "integer", "minimum": 0, "description": "Require this version; 0 means absent"}}, "scope", "key")
 	rename := schema(object{"from": text, "to": text, "title": text}, "from")
@@ -187,9 +192,9 @@ var mcpTools = func() []object {
 				"app_name": text, "include_code": flag, "messages_limit": object{"type": "integer", "minimum": 1, "maximum": 30, "default": 10}})),
 		tool("patch", "Change device controls, cat appearance, persistent JSON memory, a timer, or saved apps. Memory and saved app batches each commit atomically. Saved app deletes run before renames; missing deletes are ignored. Cat edits default to update; timer creation accepts in_seconds or at.",
 			schema(object{"device_id": text,
-				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": text}),
+				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": voice}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
-					"personality": text, "voice": text, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"},
+					"personality": text, "voice": voice, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"},
 					"slug": object{"type": "string", "description": "Saved cat slug for load/delete_saved"}, "configured": flag,
 					"save_profile": object{"type": "boolean", "description": "Save an updated cat as a reusable profile"}}),
 				"memory": object{"anyOf": []object{memory, array(memory)}},

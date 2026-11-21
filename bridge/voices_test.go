@@ -23,6 +23,8 @@ func TestTTSVoiceSelection(t *testing.T) {
 		sid      int
 	}{
 		{heartVoice, "en-us", 3}, {emmaVoice, "en-gb", 21}, {fableVoice, "en-gb", 25},
+		{"af_bella", "en-us", 2}, {"am_puck", "en-us", 18}, {"bm_george", "en-gb", 26},
+		{"bf_alice", "en-gb", 21}, {"bm_lewis", "en-gb", 25},
 		{"", "en-us", 3}, {"unsupported", "en-us", 3},
 	} {
 		const text = "Café"
@@ -34,6 +36,57 @@ func TestTTSVoiceSelection(t *testing.T) {
 		})
 		if _, err := synthesizePCM(context.Background(), engine, tt.id, text); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestRetiredVoicesRemainReadable(t *testing.T) {
+	b, _ := wsHarness(t, func(b *bridge, dir string) {
+		b.voices = deviceVoiceStore(b.db, "")
+		b.virtual = virtualStore(b.db)
+	})
+	const id = "echoear-legacy"
+	for old, want := range map[string]string{
+		"bf_alice": emmaVoice, "bf_isabella": emmaVoice, "bf_lily": emmaVoice,
+		"bm_daniel": fableVoice, "bm_lewis": fableVoice, "retired": heartVoice,
+	} {
+		if err := voiceStore(b.db).save(id, old, false); err != nil {
+			t.Fatal(err)
+		}
+		if b.voices.allowed(old) || b.voices.get(id, "mint") != want || b.catFor(peer{DeviceID: id}).Voice != want {
+			t.Errorf("%q did not resolve to %q", old, want)
+		}
+		if raw, _, err := voiceStore(b.db).get(id); err != nil || raw != old {
+			t.Errorf("reading %q altered the stored voice to %q (%v)", old, raw, err)
+		}
+	}
+	const virtual = "virt-01234567"
+	if err := b.virtual.save(virtual, virtualClient{ID: virtual, Character: "Story Cat", Theme: "mint", Voice: "bf_lily"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.voices.get(virtual, "mint"); got != emmaVoice {
+		t.Fatalf("legacy virtual voice resolved to %q", got)
+	}
+	if _, err := b.db.Exec("INSERT INTO saved_cats ("+savedCatColumns+") VALUES (?,?,?,?,?,?,?,?,?)",
+		"story-cat", "Story Cat", "#FFFFFF", "#000000", "#000000", "", "bm_daniel", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	out, err := b.catTool(t.Context(), object{"op": "list_saved"})
+	if err != nil || len(out["cats"].([]savedCat)) != 1 || out["cats"].([]savedCat)[0].Voice != fableVoice {
+		t.Fatalf("saved cat voice did not resolve to Fable: %v (%v)", out, err)
+	}
+}
+
+func TestMCPVoiceCatalog(t *testing.T) {
+	want := []string{heartVoice, fableVoice, emmaVoice, "bm_george", "af_bella", "am_puck"}
+	if len(voiceCatalog) != len(want) {
+		t.Fatalf("got %d voice choices, want %d", len(voiceCatalog), len(want))
+	}
+	fields := mcpInputSchema("patch")["properties"].(object)
+	for _, key := range []string{"device", "cat"} {
+		schema := fields[key].(object)["properties"].(object)["voice"].(object)
+		if got := schema["enum"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("MCP %s voice choices = %v, want %v", key, got, want)
 		}
 	}
 }
@@ -96,7 +149,7 @@ func TestDeviceVoiceAPI(t *testing.T) {
 	}
 	path := "/api/devices/ECHOEAR-33D8/voice"
 	testRequest(t, "POST", base+path, "", object{"voice": fableVoice}, 401)
-	for _, voice := range []any{"bad", 1, nil} {
+	for _, voice := range []any{"bad", "bf_alice", 1, nil} {
 		testRequest(t, "POST", base+path, "unit", object{"voice": voice}, 400)
 	}
 	testRequest(t, "POST", base+path, "unit", object{"voice": heartVoice}, 200)
@@ -162,6 +215,6 @@ func TestMenuVoicePicker(t *testing.T) {
 	}
 	web.json(t, object{"ev": "tap", "id": "menu-back"})
 	web.until(t, hasWS("svg", "menu-voice"))
-	testRequest(t, "POST", base+"/api/devices/"+id+"/voice", "unit", object{"voice": "bf_alice"}, 200)
-	web.until(t, hasWS("svg", "Alice"))
+	testRequest(t, "POST", base+"/api/devices/"+id+"/voice", "unit", object{"voice": "af_bella"}, 200)
+	web.until(t, hasWS("svg", "Bella"))
 }

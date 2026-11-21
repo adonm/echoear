@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -126,7 +127,7 @@ func run() error {
 		&fileCache[string]{path: filepath.Join(data, "hex/settings.json"), read: hexQuery}}
 	modelDir := ttsModelDir(local)
 	worker := newSynthWorker(root, func() (speechEngine, error) {
-		return openKokoro(modelDir, kokoroThreads)
+		return openKokoro(modelDir, min(kokoroThreads, runtime.GOMAXPROCS(0)))
 	})
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
 		hex: hex, oc: oc, pairPort: pairPort, worker: worker,

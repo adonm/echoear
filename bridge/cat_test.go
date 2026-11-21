@@ -443,7 +443,7 @@ func TestCatReassign(t *testing.T) {
 			post := func(path string, data object, status int) []byte {
 				return testRequest(t, "POST", base+path, "unit", data, status)
 			}
-			target := testObject(t, post("/api/virtual-clients", object{"character": "Target", "theme": "mint", "voice": "bm_daniel"}, 201))
+			target := testObject(t, post("/api/virtual-clients", object{"character": "Target", "theme": "mint", "voice": "bm_george"}, 201))
 			toID := str(target["id"])
 			from := testConnectWS(t, base, "unit", false)
 			to := testConnectWS(t, base, "unit", false)
@@ -482,7 +482,7 @@ func TestCatReassign(t *testing.T) {
 			expectValue(t, interrupts, toSID+"/interrupt")
 			expectValue(t, canceled, fromID)
 			expectValue(t, canceled, toID)
-			wantName, wantBG, wantVoice, wantSID := "Target", "#7BE3C6", "bm_daniel", toSID
+			wantName, wantBG, wantVoice, wantSID := "Target", "#7BE3C6", "bm_george", toSID
 			if mode == "move" {
 				wantName, wantBG, wantVoice, wantSID = "New Cat", "#F3F4F6", heartVoice, ""
 			} else {
@@ -505,7 +505,7 @@ func TestCatReassign(t *testing.T) {
 			}
 			profiles := apiObjects(t, base+"/api/cats", "cats")
 			i := slices.IndexFunc(profiles, func(v any) bool { return v.(object)["slug"] == "target" })
-			if mode == "move" && (i < 0 || profiles[i].(object)["voice"] != "bm_daniel") || mode == "swap" && i >= 0 {
+			if mode == "move" && (i < 0 || profiles[i].(object)["voice"] != "bm_george") || mode == "swap" && i >= 0 {
 				t.Fatal("target archival is incorrect", profiles)
 			}
 		})

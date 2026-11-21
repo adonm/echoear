@@ -186,7 +186,7 @@ func (d *bridgeDB) migrate(ctx context.Context, legacy string) error {
 		return err
 	}
 	if err := migrateMap(ctx, tx, legacy, voiceStore(d), func(id, voice string) bool {
-		return id == strings.ToLower(id) && voiceName(voice) != ""
+		return id == strings.ToLower(id) && voice != ""
 	}); err != nil {
 		return err
 	}

@@ -43,11 +43,8 @@ var voiceCatalog = [...]voiceChoice{
 	{fableVoice, "Fable", "en-gb", 25},
 	{emmaVoice, "Emma", "en-gb", 21},
 	{"bm_george", "George", "en-gb", 26},
-	{"bf_alice", "Alice", "en-gb", 20},
-	{"bf_isabella", "Isabella", "en-gb", 22},
-	{"bf_lily", "Lily", "en-gb", 23},
-	{"bm_daniel", "Daniel", "en-gb", 24},
-	{"bm_lewis", "Lewis", "en-gb", 27},
+	{"af_bella", "Bella", "en-us", 2},
+	{"am_puck", "Puck", "en-us", 18},
 }
 
 func voiceByID(id string) voiceChoice {
@@ -61,13 +58,27 @@ func voiceByID(id string) voiceChoice {
 
 func voiceName(id string) string { return voiceByID(id).Name }
 
+func storedVoice(id string) string {
+	switch {
+	case id == "", voiceByID(id).ID != "":
+		return id
+	case strings.HasPrefix(id, "bf_"):
+		return emmaVoice
+	case strings.HasPrefix(id, "bm_"):
+		return fableVoice
+	default:
+		return heartVoice
+	}
+}
+
 type deviceVoices struct {
 	*store[string]
 	fallback string
 }
 
 func deviceVoiceStore(db *bridgeDB, fallback string) deviceVoices {
-	if voiceName(fallback) == "" {
+	fallback = storedVoice(fallback)
+	if fallback == "" {
 		fallback = heartVoice
 	}
 	return deviceVoices{voiceStore(db), fallback}
@@ -97,7 +108,7 @@ func (v deviceVoices) get(id, theme string) string {
 }
 
 func (v deviceVoices) resolve(voice, theme string) string {
-	if v.allowed(voice) {
+	if voice := storedVoice(voice); voice != "" {
 		return voice
 	}
 	return v.defaultFor(theme)

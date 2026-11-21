@@ -495,7 +495,7 @@ func TestWSPagedVoiceMenu(t *testing.T) {
 		}
 	}
 	tapCallControl(t, cake, "menu-prev")
-	cake.until(t, hasWS("svg", "voice-"+strings.ToLower(voiceCatalog[tilesPerPage].Name)))
+	cake.until(t, hasWS("svg", "voice-"+strings.ToLower(voiceCatalog[0].Name)))
 }
 
 func TestHelloCallCapabilities(t *testing.T) {

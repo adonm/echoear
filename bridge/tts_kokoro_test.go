@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -77,9 +76,10 @@ func TestKokoroReal(t *testing.T) {
 		if rate != kokoroRate || gbRate != kokoroRate || len(us) == 0 || len(gb) == 0 {
 			t.Fatal("missing English audio")
 		}
-		if slices.Equal(us, gb) {
-			t.Fatal("changing the English language override did not change synthesis")
+		if len(us) == len(gb) {
+			t.Fatal("the accent-sensitive fixture had the same duration in both accents")
 		}
+		t.Logf("same speaker: US %.2fs, UK %.2fs", float64(len(us))/kokoroRate, float64(len(gb))/kokoroRate)
 	})
 
 	for _, fixture := range []struct{ name, text string }{

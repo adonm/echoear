@@ -89,6 +89,7 @@ func readSavedCat(row rowScanner) (savedCat, error) {
 	var p savedCat
 	p.Configured = true
 	err := row.Scan(&p.Slug, &p.Name, &p.FaceBG, &p.MarkColor, &p.AccentColor, &p.Personality, &p.Voice, &p.FaceSVG, &p.UpdatedAt)
+	p.Voice = storedVoice(p.Voice)
 	if err == nil && p.FaceSVG == "" {
 		p.FaceSVG = p.defaultFace()
 	}
@@ -159,10 +160,7 @@ func (d *bridgeDB) migrateCats(ctx context.Context, voices deviceVoices) error {
 			s.theme = deviceTheme(s.name)
 		}
 		c := legacyCat(s.name, s.theme)
-		if !voices.allowed(s.voice) {
-			s.voice = voices.defaultFor(s.theme)
-		}
-		c.Voice = s.voice
+		c.Voice = voices.resolve(s.voice, s.theme)
 		if err := writeCat(ctx, tx, s.id, c); err != nil {
 			return err
 		}
@@ -191,6 +189,7 @@ func (b *bridge) readActiveCat(ctx context.Context, q catQuery, who peer) (catSt
 		}
 		err = q.QueryRowContext(ctx, "SELECT "+catVoiceSQL, id, id).Scan(&c.Voice)
 	}
+	c.Voice = storedVoice(c.Voice)
 	return c, err
 }
 
