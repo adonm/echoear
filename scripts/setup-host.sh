@@ -98,6 +98,7 @@ link_file() {
     ln -s -- "$source" "$destination"
 }
 link_file "$REPO_DIR/agents/echoear.md" "$oc_root/config/opencode/agents/echoear.md"
+link_file "$REPO_DIR/agents/echoear-builder.md" "$oc_root/config/opencode/agents/echoear-builder.md"
 python3 "$REPO_DIR/scripts/setup-opencode-config.py" "$oc_root/config/opencode" "$bridge_bin" "$env_file"
 if [[ -f "$data_home/opencode/auth.json" ]]; then
     link_file "$data_home/opencode/auth.json" "$oc_root/data/opencode/auth.json"

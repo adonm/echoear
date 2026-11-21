@@ -364,6 +364,10 @@ func (h *wsHub) broadcastPeerFrames() {
 
 // Called under the hub lock, after committing the cat and profile changes.
 func (h *wsHub) catChanged(id string, cat catState, profilesChanged bool) {
+	h.publishCat(id, cat, profilesChanged, true)
+}
+
+func (h *wsHub) publishCat(id string, cat catState, profilesChanged, clearView bool) {
 	key := strings.ToLower(id)
 	if d := h.devices[key]; d != nil && h.active(d) {
 		d.cat = cat
@@ -371,8 +375,10 @@ func (h *wsHub) catChanged(id string, cat catState, profilesChanged bool) {
 		if !h.b.voices.allowed(d.voice) {
 			d.voice = h.b.voices.defaultFor(d.voiceTheme())
 		}
-		h.clearView(d)
-		d.agentSetScene = d.busy
+		if clearView {
+			h.clearView(d)
+			d.agentSetScene = d.busy
+		}
 		now := time.Now()
 		h.render(d, now, true)
 	}

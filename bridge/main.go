@@ -134,6 +134,13 @@ func run() error {
 		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "firmware/build")), "echoear.bin")},
 		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "firmware/build-box3")), "echoear_box3.bin")}}
 	b.ws = newWSHub(b)
+	b.builders = newBuildManager(b)
+	buildsDone := make(chan struct{})
+	go func() {
+		defer close(buildsDone)
+		b.builders.run(root)
+	}()
+	defer func() { finish(); <-buildsDone }()
 	// Session history is a one-time, retryable backfill; the LAN service and
 	// local history remain available while OpenCode is offline.
 	historyDone := make(chan struct{})

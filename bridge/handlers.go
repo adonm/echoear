@@ -39,6 +39,7 @@ type bridge struct {
 	tunnels   *tunnelManager
 	history   *chatHistory
 	timers    *timerManager
+	builders  *buildManager
 	diag      diagnostics
 	catMu     sync.Mutex // Serializes cat and voice writes through hub publication.
 	catTitles sync.Mutex
@@ -300,6 +301,17 @@ func (b *bridge) turn(ctx context.Context, sender peer, text string) (answer, er
 	if direct != nil {
 		b.chat(sender.DeviceID, newChat("user", "You", text, source), true)
 		return b.relay(ctx, sender, others, direct.target, direct.text)
+	}
+	if reply, _ := b.buildReply(ctx, sender, text, source); reply != "" {
+		out := answer{Reply: reply}
+		if w := b.worker; w != nil && w.ready.Load() {
+			start := time.Now()
+			audioCtx, cancel := context.WithTimeout(b.root, ttsWait)
+			speech := newSpeechTurn(audioCtx, cancel, w, b.voiceFor(sender), nil)
+			speech.complete([]string{reply})
+			b.attachAudio(ctx, &out, speech.stream, start)
+		}
+		return out, nil
 	}
 	options := turnOptions{source: source}
 	gen, err := b.generateReply(ctx, b.root, sender, text, options)

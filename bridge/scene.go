@@ -18,6 +18,7 @@ type sceneView struct {
 	intercom       *intercomCard
 	call           uint32
 	menu           *menuContent
+	build          string // Set only on a progress card.
 }
 
 func (s *sceneView) hasIntercom() bool { return s != nil && s.intercom != nil }

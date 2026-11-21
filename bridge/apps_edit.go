@@ -57,20 +57,32 @@ func (b *bridge) updateSavedApp(ctx context.Context, tx *sql.Tx, edit object) (s
 	if expected != nil && uint64(a.Version) != *expected {
 		return a, &versionConflict{a.Version}
 	}
+	if err := applyAppEdit(&a, edit); err != nil {
+		return a, err
+	}
+	if _, ok := edit["data"]; ok {
+		if _, _, err := initApp(a, []appPlayer{{id: "preview"}}, nil, nil, nil, buildScreen); err != nil {
+			return a, fieldError("apps.update.data", "%s", err)
+		}
+	}
+	return storeAppEdit(ctx, tx, a)
+}
+
+func applyAppEdit(a *savedApp, edit object) error {
 	if raw, ok := edit["title"]; ok {
 		a.Title = shortText(raw, 60, false)
 		if a.Title == "" {
-			return a, fieldError("apps.update.title", "expected a non-empty title")
+			return fieldError("apps.update.title", "expected a non-empty title")
 		}
 	}
 	if raw, ok := edit["code"]; ok {
 		code, isString := raw.(string)
 		if !isString || len(code) > 16<<10 {
-			return a, fieldError("apps.update.code", "expected code up to 16 KB")
+			return fieldError("apps.update.code", "expected code up to 16 KB")
 		}
 		if code != "" {
 			if _, err := goja.Compile("app.js", code, false); err != nil {
-				return a, fieldError("apps.update.code", "%s", err)
+				return fieldError("apps.update.code", "%s", err)
 			}
 		}
 		a.Code, a.Template, a.Data = code, "", nil
@@ -78,20 +90,20 @@ func (b *bridge) updateSavedApp(ctx context.Context, tx *sql.Tx, edit object) (s
 	if raw, ok := edit["svg"]; ok {
 		svg, isString := raw.(string)
 		if !isString || a.Template != "" {
-			return a, fieldError("apps.update.svg", "expected an SVG string for a custom app")
+			return fieldError("apps.update.svg", "expected an SVG string for a custom app")
 		}
 		a.SVG = ""
 		if svg != "" {
 			root, err := parseSVG(svg)
 			if err != nil {
-				return a, fieldError("apps.update.svg", "%s", err)
+				return fieldError("apps.update.svg", "%s", err)
 			}
 			a.SVG = svgString(root)
 		}
 	}
 	if raw, ok := edit["data"]; ok {
 		if a.Template == "" || raw == nil {
-			return a, fieldError("apps.update.data", "expected a data object for a template")
+			return fieldError("apps.update.data", "expected a data object for a template")
 		}
 		if fields, ok := raw.(object); ok && edit["title"] == nil {
 			if title := shortText(fields["title"], 60, false); title != "" {
@@ -99,10 +111,7 @@ func (b *bridge) updateSavedApp(ctx context.Context, tx *sql.Tx, edit object) (s
 			}
 		}
 		if err := a.setTemplate(a.Template, raw); err != nil {
-			return a, err
-		}
-		if _, _, err := initApp(a, []appPlayer{{id: "preview"}}, nil, nil, nil, buildScreen); err != nil {
-			return a, fieldError("apps.update.data", "%s", err)
+			return err
 		}
 	}
 	switch {
@@ -111,14 +120,15 @@ func (b *bridge) updateSavedApp(ctx context.Context, tx *sql.Tx, edit object) (s
 	case a.SVG != "":
 		a.Kind = "drawing"
 	default:
-		return a, fieldError("apps.update", "cannot remove the entire app definition")
+		return fieldError("apps.update", "cannot remove the entire app definition")
 	}
-	if err := a.setTiming(edit); err != nil {
-		return a, err
-	}
-	a, err = scanApp(tx.QueryRowContext(ctx, `UPDATE apps SET title=?,kind=?,svg=?,code=?,tick_ms=?,max_ticks=?,template=?,
+	return a.setTiming(edit)
+}
+
+func storeAppEdit(ctx context.Context, tx *sql.Tx, a savedApp) (savedApp, error) {
+	a, err := scanApp(tx.QueryRowContext(ctx, `UPDATE apps SET title=?,kind=?,svg=?,code=?,tick_ms=?,max_ticks=?,template=?,
 		data_json=?,updated_at=max(updated_at+1,?) WHERE name=? RETURNING `+appColumns,
-		a.Title, a.Kind, a.SVG, a.Code, a.TickMS, a.MaxTicks, a.Template, a.dataJSON(), time.Now().UnixMilli(), name))
+		a.Title, a.Kind, a.SVG, a.Code, a.TickMS, a.MaxTicks, a.Template, a.dataJSON(), time.Now().UnixMilli(), a.Name))
 	if err != nil {
 		return a, errSavedAppEdit
 	}
