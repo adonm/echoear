@@ -17,6 +17,9 @@ var (
 	characterRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._'’-]{0,39}$`)
 	directRE    = regexp.MustCompile(`(?i)^(?:hey\s+[\pL\pN_-]+,?\s+)?(?:tell|message|intercom|walkie|say\s+to|send)\s+`)
 	composeRE   = regexp.MustCompile(`(?i)^(?:about|(?:(?:an?|the|some)\s+(?:[\pL\pN_'-]+\s+){0,5})?(?:joke|story|fact|riddle|quiz))(?:[^\pL\pN_]|$)`)
+	callPrefix  = regexp.MustCompile(`(?i)^(?:(?:hey(?: [\pL\pN_-]+,)?|please|(?:can|could|will|would) you)[, ]+)*`)
+	callSuffix  = regexp.MustCompile(`(?i)[, ]+please$`)
+	callRE      = regexp.MustCompile(`(?i)^(?:(?:call|ring) (.+)|give (.+) an? call)$`)
 )
 
 func runeLen(s string) int { return utf8.RuneCountInString(s) }
@@ -216,6 +219,21 @@ func targets(others []peer, target string) []peer {
 		return ids
 	}
 	return characters
+}
+
+func parseCallCommand(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	trimEnd := func(s string) string { return strings.TrimRight(s, " .,!?:;") }
+	text = trimEnd(callSuffix.ReplaceAllString(trimEnd(text), ""))
+	m := callRE.FindStringSubmatch(callPrefix.ReplaceAllString(text, ""))
+	if m == nil {
+		return ""
+	}
+	target := strings.Trim(m[1]+m[2], " .,!?:;\"“”")
+	if broadcast(target) {
+		return ""
+	}
+	return target
 }
 
 func directBody(text string) string {

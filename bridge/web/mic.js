@@ -5,6 +5,8 @@ class EchoMic extends AudioWorkletProcessor {
   constructor({processorOptions} = {}) {
     super();
     this.call = processorOptions?.mode === "call";
+    this.prefix = this.call && processorOptions.prefix === 4 ? 4 : 1;
+    this.muted = this.call && !!processorOptions.muted;
     this.packetBytes = 1 + 2 * (this.call ? callSamples : vadSamples);
     this.ratio = sampleRate / 16000;
     this.left = this.ratio;
@@ -19,7 +21,16 @@ class EchoMic extends AudioWorkletProcessor {
     this.threshold = 0;
     this.voiced = 0;
     this.quiet = 0;
-    this.port.onmessage = () => { if (!this.call) this.finish("end"); };
+    this.port.onmessage = ({data}) => {
+      if (!this.call) this.finish("end");
+      else if (typeof data?.muted === "boolean") {
+        this.muted = data.muted;
+        this.used = 1;
+        this.sum = 0;
+        this.left = this.ratio;
+        if (!this.muted) this.port.postMessage(data.seq);
+      }
+    };
   }
   finish(message) {
     if (!this.live) return;
@@ -56,7 +67,7 @@ class EchoMic extends AudioWorkletProcessor {
     }
   }
   send() {
-    this.packet[0] = 1;
+    this.packet[0] = this.prefix;
     const frame = this.used === this.packet.length ? this.packet.buffer : this.packet.buffer.slice(0, this.used);
     this.port.postMessage(frame, [frame]);
     this.packet = new Uint8Array(this.packetBytes);
@@ -65,6 +76,7 @@ class EchoMic extends AudioWorkletProcessor {
   }
   process(inputs) {
     if (!this.live) return false;
+    if (this.muted) return true;
     const mono = inputs[0]?.[0];
     if (!mono) return true;
     for (const value of mono) {

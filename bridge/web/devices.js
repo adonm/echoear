@@ -1,5 +1,5 @@
 import {api} from "./api.js";
-import {audioReady, setVolume, volume} from "./audio.js";
+import {setVolume, unlockAudio, volume} from "./audio.js";
 import {loadHistory} from "./chat.js";
 import {$, colors, getLocal, isLive, node, persisted, say, setLocal, wide} from "./dom.js";
 import {loadSavedCats} from "./library.js";
@@ -335,7 +335,7 @@ $("copy").onclick = async () => {
 $("join").onclick = () => {
   if (state.view?.quick) select(preferredCat(state.app.devices));
   else {
-    audioReady();
+    unlockAudio();
     select({device_id:phone, character:"New Cat", kind:"virtual"}, true);
   }
 };

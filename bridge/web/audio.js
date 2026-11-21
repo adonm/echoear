@@ -3,6 +3,7 @@ import {send, state} from "./state.js";
 
 let audio, gain, playAt = 0, volume = 55, endedAudio = null, muted = false, call = null;
 const speaking = new Set();
+const ringing = new Set();
 function speakerUI() {
   say("sound", audio?.state !== "running" ? "Enable speaker" : muted ? "Unmute speaker" : "Mute speaker");
 }
@@ -21,13 +22,13 @@ function canBufferPCM() {
 }
 function syncSpeaker() {
   speakerUI();
-  // A suspended context retains its clock and scheduled PCM until it resumes.
-  if (!canBufferPCM()) {
+  // Keep queued TTS across a suspension, but never replay stale call audio.
+  if (!canBufferPCM() || call && audio.state !== "running") {
     clearPCM();
     ackIfDone();
   }
 }
-async function audioReady() {
+async function unlockAudio() {
   try {
     if (!audio) {
       audio = new AudioContext();
@@ -47,13 +48,22 @@ $("sound").onclick = async () => {
   if (audio?.state === "running") {
     muted = !muted;
     setVolume(volume);
-  } else if (!await audioReady()) {
+  } else if (!await unlockAudio()) {
     say("chat-note", "The browser couldn’t enable audio.");
   }
 };
 function playPCM(raw) {
   if (!(raw instanceof ArrayBuffer) || raw.byteLength < 3 || raw.byteLength % 2 !== 1 || new Uint8Array(raw)[0] !== 2) return;
-  if (!canBufferPCM() || mic && !call) return;
+  if (!canBufferPCM() || mic && !call || call?.problem) return;
+  if (call && audio.state === "suspended") {
+    if (!call.resuming) {
+      const active = call;
+      active.resuming = true;
+      clearPCM();
+      unlockAudio().finally(() => { active.resuming = false; });
+    }
+    return;
+  }
   const wire = new DataView(raw,1), count = wire.byteLength / 2;
   const now = audio.currentTime;
   if (call) {
@@ -104,19 +114,32 @@ function handleTTS(msg) {
   }
   if (msg.state === "abort") stopSound();
 }
-function chime(kind) {
+function stopRing() {
+  for (const osc of ringing) osc.stop();
+  ringing.clear();
+}
+function playChime(kind) {
+  if (call) return;
   if (kind === "cancel") stopSound();
   if (!canPlay()) return;
-  const tones = {tap:[540],think:[440],intercom:[660,880],ring:[660,880],cancel:[280]}[kind] || [];
+  const ring = kind === "ring", length = ring ? .14 : .09;
+  const tones = {tap:[540],think:[440],intercom:[660,880],ring:[523.25,783.99],cancel:[280]}[kind] || [];
+  if (ring) stopRing();
   for (const [i, hz] of tones.entries()) {
-    const at = audio.currentTime+.025+i*.10, osc = audio.createOscillator(), env = audio.createGain();
+    const at = audio.currentTime+.025+i*(length+.01), osc = audio.createOscillator(), env = audio.createGain();
     osc.frequency.value = hz;
     env.gain.setValueAtTime(.001,at);
     env.gain.exponentialRampToValueAtTime(.10,at+.012);
-    env.gain.exponentialRampToValueAtTime(.001,at+.085);
+    env.gain.exponentialRampToValueAtTime(.001,at+length-.005);
     osc.connect(env).connect(gain);
+    if (ring) ringing.add(osc);
+    osc.onended = () => {
+      ringing.delete(osc);
+      osc.disconnect();
+      env.disconnect();
+    };
     osc.start(at);
-    osc.stop(at+.09);
+    osc.stop(at+length);
   }
 }
 
@@ -125,7 +148,7 @@ let recordingChanged;
 function onRecordingChanged(handler) { recordingChanged = handler; }
 function micStopping() { return !!mic?.stopping; }
 function canCaptureMic() {
-  return window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
+  return window.isSecureContext && typeof navigator.mediaDevices?.getUserMedia === "function" && !!window.AudioWorkletNode;
 }
 function recordUI(active) {
   $("talk").setAttribute("aria-pressed", String(active));
@@ -136,13 +159,19 @@ function recordUI(active) {
   $("cancel").hidden = !active;
   $("target").disabled = active;
 }
+function failCall(inCall, notice) {
+  inCall.problem = notice;
+  stopSound();
+  say("chat-note", notice);
+  send({ev:"call_end",call:inCall.id});
+}
 async function startMic(target, inCall = null) {
   if (mic || call && !inCall) return;
   if (!canCaptureMic()) {
     $("mic-help").hidden = false;
     if (inCall) {
-      send({ev:"call_end",call:inCall.id});
-      say("chat-note", "A microphone is required for voice calls.");
+      failCall(inCall, window.isSecureContext ? "Call ended: this browser can’t capture microphone audio." :
+        "Call ended: microphone access requires HTTPS or localhost.");
     } else send({ev:"rec_end",cancelled:true,target});
     return;
   }
@@ -154,7 +183,11 @@ async function startMic(target, inCall = null) {
   mic = rec;
   if (!inCall) recordUI(true);
   try {
-    if (!await audioReady() || !state.view?.virtual || mic !== rec || state.ws?.readyState !== WebSocket.OPEN) throw new Error();
+    const ready = unlockAudio();
+    // Autoplay policy can leave resume pending. Still ask for mic permission
+    // now so a failure can end the call instead of leaving silent endpoints.
+    if ((inCall ? !gain || audio.state === "closed" : !await ready) || !state.view?.virtual ||
+        mic !== rec || state.ws?.readyState !== WebSocket.OPEN) throw new Error();
     rec.stream = await navigator.mediaDevices.getUserMedia({
       audio:{channelCount:1, echoCancellation:true, noiseSuppression:!!inCall, autoGainControl:!!inCall},
     });
@@ -164,12 +197,14 @@ async function startMic(target, inCall = null) {
     if (mic !== rec) return;
     rec.source = audio.createMediaStreamSource(rec.stream);
     rec.node = new AudioWorkletNode(audio,"echo-mic",{
-      channelCount:1, channelCountMode:"explicit", processorOptions:{mode:inCall ? "call" : "note"},
+      channelCount:1, channelCountMode:"explicit", processorOptions:inCall ?
+        {mode:"call", prefix:inCall.prefix, muted:inCall.muted} : {mode:"note"},
     });
     rec.node.port.onmessage = event => {
       if (mic !== rec) return;
       if (inCall) {
-        if (event.data instanceof ArrayBuffer && !inCall.muted && state.ws?.readyState === WebSocket.OPEN &&
+        if (inCall.waiting && event.data === inCall.waiting) inCall.waiting = 0;
+        if (event.data instanceof ArrayBuffer && !inCall.muted && !inCall.waiting && state.ws?.readyState === WebSocket.OPEN &&
             state.ws.bufferedAmount < 6 * 1281) state.ws.send(event.data);
       } else if (event.data === "end" || event.data === "auto_end") {
         endMic(false, true, true);
@@ -188,8 +223,10 @@ async function startMic(target, inCall = null) {
     }
   } catch {
     if (mic === rec) {
-      endMic(true);
-      say("chat-note", "Could not open the microphone. Check browser permissions.");
+      endMic(true, !inCall);
+      const notice = "Could not open the microphone. Check browser permissions.";
+      if (inCall) failCall(inCall, "Call ended: " + notice);
+      else say("chat-note", notice);
     }
   }
 }
@@ -226,6 +263,7 @@ function endMic(cancelled, tell = true, flushed = false) {
 function stopCall() {
   if (mic?.call) endMic(true, false);
   call = null;
+  stopRing();
   stopSound();
 }
 
@@ -233,18 +271,32 @@ function handleCall(msg) {
   if (msg.state === "start") {
     if (call?.id === msg.call) return;
     endMic(true, false);
-    stopSound();
-    call = {id:msg.call, muted:!!msg.muted};
+    stopCall();
+    call = {id:msg.call, muted:!!msg.muted, prefix:msg.mic_prefix, muteSeq:0, waiting:0};
+    say("chat-note", "Voice call connected.");
     return startMic("", call);
   }
   if (call && call.id !== msg.call) return;
-  if (msg.state === "mute" && call) call.muted = !!msg.muted;
-  if (msg.state === "end") stopCall();
+  if (msg.state === "mute" && call && call.muted !== !!msg.muted) {
+    call.muted = !!msg.muted;
+    if (mic?.call === call && mic.node) {
+      const seq = ++call.muteSeq;
+      // Ignore already queued worklet PCM until it acknowledges the reset.
+      call.waiting = call.muted ? 0 : seq;
+      mic.node.port.postMessage({muted:call.muted, seq});
+    }
+  }
+  if (msg.state === "end") {
+    const notices = {"declined":"Call declined.", "no answer":"No answer.", "disconnected":"Peer disconnected.",
+      "audio unavailable":"Call ended: audio unavailable."};
+    say("chat-note", call?.problem || notices[msg.reason] || "Call ended.");
+    stopCall();
+  }
 }
 
 $("talk").onclick = () => startMic($("target").value);
 $("mic-send").onclick = () => endMic(false);
 $("cancel").onclick = () => endMic(true);
 
-export {audioReady, canCaptureMic, chime, endMic, handleCall, handleTTS, micStopping, onRecordingChanged, playPCM,
-  setVolume, startMic, stopCall, volume};
+export {canCaptureMic, endMic, handleCall, handleTTS, micStopping, onRecordingChanged, playChime, playPCM,
+  setVolume, startMic, stopCall, unlockAudio, volume};

@@ -647,6 +647,10 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 			h.mu.Unlock()
 			return nil, problem(409, "Device is not connected: "+id)
 		}
+		if args["exit"] != true && d.callState != callNone {
+			h.mu.Unlock()
+			return nil, problem(409, "Device is on a call: "+id)
+		}
 		if menu != nil && !d.canLaunchMenuGame(menu) {
 			h.mu.Unlock()
 			return nil, problem(409, "Games menu changed")

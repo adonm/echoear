@@ -1,5 +1,5 @@
 import {api} from "./api.js";
-import {audioReady} from "./audio.js";
+import {unlockAudio} from "./audio.js";
 import {$, node, say} from "./dom.js";
 import {renderCurrent} from "./live.js";
 import {state} from "./state.js";
@@ -147,7 +147,7 @@ $("prompt").onsubmit = async e => {
   e.preventDefault();
   const cat = state.view, current = state.app, input = $("text"), text = input.value.trim();
   if (!text || !cat?.id || $("send").disabled) return;
-  if (cat.virtual) audioReady();
+  if (cat.virtual) unlockAudio();
   cat.sending = true;
   renderCurrent();
   say("chat-note", "Sending…");

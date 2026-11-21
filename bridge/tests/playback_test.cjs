@@ -1,61 +1,6 @@
 const assert = require("node:assert/strict");
 const {test} = require("node:test");
-
-async function audioFixture(label) {
-  const sources = [], events = [], tracks = [], constraints = [], nodes = [];
-  const connect = function () { return this; };
-  const context = {
-    state: "running",
-    currentTime: 0,
-    resume() { this.state = "running"; },
-    audioWorklet: {addModule: async () => {}},
-    createMediaStreamSource: () => ({connect, disconnect() {}}),
-    createGain: () => ({gain:{value:0}, connect() {}}),
-    createBuffer: (_, count, rate) => ({duration: count / rate, getChannelData: () => new Float32Array(count)}),
-    createBufferSource() {
-      return {
-        connect() {},
-        disconnect() {},
-        start(at) { this.at = at; sources.push(this); },
-        stop() { this.stopped = true; },
-      };
-    },
-  };
-  const dom = new Map();
-  Object.assign(globalThis, {
-    AudioContext: class { constructor() { return context; } },
-    AudioWorkletNode: class {
-      constructor(_, __, options) { this.options = options; nodes.push(this); }
-      port = {close() { this.closed = true; }};
-      connect = connect;
-      disconnect() { this.disconnected = true; }
-    },
-    document: {
-      addEventListener() {},
-      getElementById(id) {
-        if (!dom.has(id)) dom.set(id, {addEventListener() {}, setAttribute() {}, showModal() {}});
-        return dom.get(id);
-      },
-    },
-    matchMedia: () => ({addEventListener() {}}),
-    WebSocket: {OPEN: 1},
-  });
-  Object.defineProperty(globalThis, "navigator", {configurable:true, value:{mediaDevices:{
-    async getUserMedia(options) {
-      constraints.push(options);
-      const track = {stop() { this.stopped = true; }};
-      tracks.push(track);
-      return {getTracks: () => [track]};
-    },
-  }}});
-  globalThis.window = {isSecureContext:true, AudioWorkletNode};
-  const audio = await import(`../web/audio.js?${label}`);
-  const {state} = await import("../web/state.js");
-  state.view = {virtual:true};
-  state.ws = {readyState:1, bufferedAmount:0, send:raw => events.push(typeof raw === "string" ? JSON.parse(raw) : raw)};
-  assert.equal(await audio.audioReady(), true);
-  return {audio, sources, events, tracks, constraints, nodes, context, state};
-}
+const {audioFixture} = require("./audio_fixture.cjs");
 
 test("schedules a 12-second reply gaplessly and acknowledges only after its final source ends", async () => {
   const {audio:{handleTTS, playPCM}, sources, events, context} = await audioFixture("tts");
@@ -84,7 +29,7 @@ test("schedules a 12-second reply gaplessly and acknowledges only after its fina
 
 test("call plays and captures together, drops stale audio, and mutes only the uplink", async () => {
   const {audio:{handleCall, playPCM}, sources, events, tracks, constraints, nodes, state} = await audioFixture("call");
-  const starting = handleCall({state:"start", call:17, muted:false});
+  const starting = handleCall({state:"start", call:17, muted:false, mic_prefix:4});
   const inPCM = new Uint8Array(1281), outPCM = new Uint8Array(1281);
   inPCM[0] = 2;
   outPCM[0] = 1;
@@ -92,7 +37,7 @@ test("call plays and captures together, drops stale audio, and mutes only the up
   await starting;
   assert.ok(!sources[0].stopped);
   assert.deepEqual(constraints, [{audio:{channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true}}]);
-  assert.equal(nodes[0].options.processorOptions.mode, "call");
+  assert.deepEqual(nodes[0].options.processorOptions, {mode:"call", prefix:4, muted:false});
   assert.deepEqual(events, []);
   for (let i = 0; i < 3; i++) playPCM(inPCM.buffer);
   assert.equal(sources.length, 4); // Playback continues with a live worklet.
@@ -106,11 +51,57 @@ test("call plays and captures together, drops stale audio, and mutes only the up
   assert.equal(sources.length, 5);
   assert.deepEqual(events, [outPCM.buffer]);
   handleCall({state:"mute",call:17,muted:false});
-  state.ws.bufferedAmount = 10000;
+  assert.deepEqual(nodes[0].port.messages, [{muted:true,seq:1}, {muted:false,seq:2}]);
+  nodes[0].port.onmessage({data:outPCM.buffer});
+  nodes[0].port.onmessage({data:1}); // A stale acknowledgment must not unblock the mic.
   nodes[0].port.onmessage({data:outPCM.buffer});
   assert.deepEqual(events, [outPCM.buffer]);
+  nodes[0].port.onmessage({data:2});
+  nodes[0].port.onmessage({data:outPCM.buffer});
+  state.ws.bufferedAmount = 10000;
+  nodes[0].port.onmessage({data:outPCM.buffer});
+  assert.deepEqual(events, [outPCM.buffer, outPCM.buffer]);
   handleCall({state:"end",call:17});
   assert.ok(tracks[0].stopped && nodes[0].port.closed && nodes[0].disconnected);
   assert.ok(sources.every(s => s.stopped));
-  assert.deepEqual(events, [outPCM.buffer]);
+  assert.deepEqual(events, [outPCM.buffer, outPCM.buffer]);
+});
+
+test("call requests resume while suspended and never schedules stale PCM", async () => {
+  const {audio:{handleCall, playPCM}, sources, context} = await audioFixture("resume");
+  await handleCall({state:"start", call:18});
+  const packet = new Uint8Array(1281);
+  packet[0] = 2;
+  playPCM(packet.buffer);
+  context.state = "suspended";
+  let resumed, count = 0;
+  context.resume = () => {
+    count++;
+    return new Promise(resolve => { resumed = resolve; });
+  };
+  for (let i = 0; i < 20; i++) playPCM(packet.buffer);
+  assert.equal(count, 1);
+  assert.equal(sources.length, 1);
+  assert.ok(sources[0].stopped);
+  context.currentTime = 1;
+  context.state = "running";
+  resumed();
+  playPCM(packet.buffer);
+  assert.equal(sources.length, 2);
+  assert.equal(sources[1].at, 1.035);
+  handleCall({state:"end", call:18});
+});
+
+test("ring uses two spaced tones and stops on answer", async () => {
+  const {audio:{handleCall, playChime}, tones} = await audioFixture("ring");
+  playChime("ring");
+  assert.equal(tones.length, 2);
+  assert.ok(tones[0].frequency.value < tones[1].frequency.value);
+  assert.ok(tones[0].end < tones[1].at);
+  const started = handleCall({state:"start", call:19});
+  assert.ok(tones.every(osc => osc.end === undefined));
+  playChime("ring");
+  assert.equal(tones.length, 2);
+  await started;
+  handleCall({state:"end", call:19});
 });

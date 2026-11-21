@@ -4,8 +4,10 @@ import {test} from "node:test";
 test("renders the selected live device after the dashboard modules load", async () => {
   function element(tag) {
     return {
-      tag, dataset:{}, style:{setProperty() {}}, attrs:{}, children:[],
-      addEventListener() {},
+      tag, dataset:{}, style:{setProperty() {}}, attrs:{}, children:[], listeners:{},
+      addEventListener(name, handler) { this.listeners[name] = handler; },
+      setPointerCapture() {},
+      getScreenCTM: () => ({inverse() {}}),
       setAttribute(name, value) { this.attrs[name] = value; },
       removeAttribute(name) { delete this.attrs[name]; },
       replaceChildren(...children) { this.children = children; },
@@ -25,6 +27,8 @@ test("renders the selected live device after the dashboard modules load", async 
     };
   }
   const els = new Map();
+  const activation = [];
+  let audio;
   Object.assign(globalThis, {
     document: {
       createElement: element,
@@ -39,6 +43,16 @@ test("renders the selected live device after the dashboard modules load", async 
     Option: class {},
     WebSocket: {OPEN:1},
     window: {isSecureContext:true, AudioWorkletNode:class {}},
+    DOMPoint: class {
+      constructor(x, y) { Object.assign(this, {x,y}); }
+      matrixTransform() { return this; }
+    },
+    AudioContext: class {
+      state = "suspended";
+      constructor() { audio = this; }
+      createGain() { return {gain:{}, connect() {}}; }
+      resume() { activation.push("resume"); this.state = "running"; }
+    },
   });
   Object.defineProperty(globalThis, "navigator", {configurable:true, value:{mediaDevices:{getUserMedia() {}}}});
   const {renderDevices} = await import("./devices.js");
@@ -56,7 +70,11 @@ test("renders the selected live device after the dashboard modules load", async 
   const sent = [];
   state.view = {id:"phone-1234", virtual:true, mode:"idle"};
   state.rev = 1;
-  state.ws = {readyState:1, send:raw => sent.push(JSON.parse(raw))};
+  state.ws = {readyState:1, send:raw => {
+    const event = JSON.parse(raw);
+    activation.push(event.ev);
+    sent.push(event);
+  }};
   renderDevices();
   const call = els.get("physical").children[0].children[1];
   assert.equal(call.hidden, false);
@@ -64,4 +82,13 @@ test("renders the selected live device after the dashboard modules load", async 
   assert.equal(call.attrs["aria-label"], "Call Cake");
   call.onclick();
   assert.deepEqual(sent, [{ev:"call", target:d.device_id}]);
+  assert.deepEqual(activation, ["resume", "call"]);
+
+  const stage = els.get("stage").listeners;
+  const gesture = {pointerType:"touch", button:0, pointerId:1, clientX:180, clientY:250};
+  state.view.mode = "calling";
+  audio.state = "suspended";
+  stage.pointerdown(gesture);
+  stage.pointerup(gesture);
+  assert.deepEqual(activation, ["resume", "call", "resume", "up", "tap"]);
 });

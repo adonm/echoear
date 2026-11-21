@@ -195,8 +195,9 @@ var mcpTools = func() []object {
 		tool("app", "Display SVG, launch/load/save/delete an app or drawing, exit to the cat, or shallow-patch one running JS app without restarting. One shared state renders separately for each player.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
-		tool("emit", "Send a spoken intercom and card, play a melody, or play a sound effect. Use an exact device ID or all.",
+		tool("emit", "Start a live two-way call, send a spoken intercom and card, play a melody, or play a sound effect. Use exact device IDs; calls cannot target all.",
 			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"),
+				"call":  schema(object{"from": text}, "from"),
 				"notes": notes, "sfx": enum(chimes...), "chime": enum(chimes...)}, "to")),
 	}
 }()
@@ -342,6 +343,22 @@ func (b *bridge) mcpEmit(ctx context.Context, args object) (object, error) {
 		return nil, problem(400, "Expected exact device ID or all")
 	}
 	out := object{"ok": true, "to": to}
+	if raw, ok := args["call"]; ok {
+		call, _ := raw.(object)
+		from := str(call["from"])
+		if len(args) != 2 || broadcast(to) || !deviceIDRE.MatchString(from) {
+			return nil, fieldError("call", "use only call.from and to with exact device IDs")
+		}
+		if b.ws == nil {
+			return nil, problem(503, "Device hub unavailable")
+		}
+		result, err := b.ws.mcpCall(from, to)
+		if err != nil {
+			return nil, err
+		}
+		out["call"] = result
+		return out, nil
+	}
 	var pcm []byte
 	var kind string
 	var audioField string

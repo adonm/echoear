@@ -22,6 +22,7 @@ type wsCaps struct {
 	Battery  *bool `json:"battery,omitempty"`
 	HeadPads *bool `json:"head_pads,omitempty"`
 	Call     *bool `json:"call,omitempty"`
+	CallPCM  *bool `json:"call_pcm,omitempty"`
 	Drag     *bool `json:"drag,omitempty"`
 }
 
@@ -29,6 +30,7 @@ type deviceCaps struct {
 	Battery  bool `json:"battery"`
 	HeadPads bool `json:"head_pads"`
 	Call     bool `json:"call"`
+	CallPCM  bool `json:"call_pcm,omitempty"`
 	Drag     bool `json:"drag"`
 }
 
@@ -44,6 +46,7 @@ func helloCaps(ev wsEvent, board string) deviceCaps {
 		Battery:  value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
 		HeadPads: value(ev.Caps.HeadPads, vocat),
 		Call:     value(ev.Caps.Call, false),
+		CallPCM:  value(ev.Caps.Call, false) && value(ev.Caps.CallPCM, false),
 		Drag:     value(ev.Caps.Drag, true),
 	}
 }
@@ -99,29 +102,32 @@ type wsDevice struct {
 	appView    svgScreen
 	appGen     uint64
 
-	scene       sceneView
-	view        *sceneView
-	pending     *sceneView
-	card        *sceneView
-	drawer      string
-	menuPage    int
-	homePage    int
-	menuData    *menuContent
-	statsAt     time.Time
-	rev         uint64
-	pose        catPose
-	moodAt      time.Time
-	last        time.Time
-	meter       time.Time
-	pet         time.Time
-	asleep      bool
-	callState   callState
-	callID      uint32
-	callPeer    string
-	callMuted   bool
-	callStarted time.Time
-	callSecond  time.Duration
-	callCancel  context.CancelFunc
+	scene    sceneView
+	view     *sceneView
+	pending  *sceneView
+	card     *sceneView
+	drawer   string
+	menuPage int
+	homePage int
+	menuData *menuContent
+	statsAt  time.Time
+	rev      uint64
+	pose     catPose
+	moodAt   time.Time
+	last     time.Time
+	meter    time.Time
+	pet      time.Time
+	asleep   bool
+
+	callState                   callState
+	callID                      uint32
+	callPeer                    string
+	callMuted                   bool
+	callOrigin                  bool
+	callStarted                 time.Time
+	callSecond                  time.Duration
+	callCancel                  context.CancelFunc
+	callFramesIn, callFramesOut uint64
 
 	recAt          time.Time
 	recOpen        bool
@@ -129,6 +135,7 @@ type wsDevice struct {
 	recStopping    bool
 	recStopTimer   *time.Timer
 	recIgnoreStart bool
+	recTail        bool // Legacy clients share the note and call PCM tag.
 	mic            []byte
 	turn           uint64
 	trace          *turnTrace
@@ -831,11 +838,13 @@ func (h *wsHub) animate(ctx context.Context) {
 			}
 			h.tickApps(now)
 			for _, d := range h.devices {
-				switch {
-				case d.callState != callNone:
+				if d.callState != callNone {
 					if d.callState == callActive && now.Sub(d.callStarted).Truncate(time.Second) > d.callSecond {
 						h.render(d, now, false)
 					}
+					continue
+				}
+				switch {
 				case !d.recAt.IsZero() && d.recStopTimer == nil && now.Sub(d.recAt) > 90*time.Second:
 					h.stopRecordingAtLimit(d, now)
 				case d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)):

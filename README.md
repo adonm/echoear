@@ -267,8 +267,10 @@ smaller. BOX-3 announces its native size; the bridge centers the square
 artwork and maps raw touch coordinates back into SVG space. Browsers receive
 `op: "svg"` with `device_id`; controls share the boards’ hit targets and also
 work with Tab, Enter, and Space.
-`0x01` mic upload and `0x02` playback carry 16 kHz signed 16-bit
-little-endian mono PCM. Voice capture and intercom use WebSocket. The bridge
+`0x01` note upload and `0x02` playback carry 16 kHz signed 16-bit
+little-endian mono PCM. Clients with `caps.call_pcm` use `0x04` for 40 ms call
+uploads when `call.start` sets `mic_prefix: 4`; legacy clients use `0x01`.
+Voice capture and intercom use WebSocket. The bridge
 pads voiced PCM sent to Hex with 150 ms of silence on each side. Kokoro starts
 synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 `0.9.0` removes the legacy `/speak` endpoint.

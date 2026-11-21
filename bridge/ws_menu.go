@@ -68,9 +68,15 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	native := c.role == "device"
 	if d.callState != callNone {
 		switch ev.Event {
-		case "status", "tap", "head", "call_end":
+		case "status", "tap", "head", "call", "call_end", "tts_ack":
+		case "rec_start":
+			if native && !d.caps.CallPCM {
+				d.recTail = true
+			}
+			return
 		case "rec_end":
-			d.recIgnoreStart = false
+			d.recIgnoreStart, d.recTail = false, false
+			h.clearRecording(d)
 			return
 		default:
 			return
@@ -110,6 +116,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 	case "rec_start":
 		if target, ok := recordTarget(ev.Target); ok && !d.recOpen && !d.recIgnoreStart {
+			d.recTail = false
 			if target == "" {
 				target = d.recTarget
 			}
@@ -120,7 +127,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			}
 		}
 	case "rec_end":
-		d.recIgnoreStart = false
+		d.recIgnoreStart, d.recTail = false, false
 		if !d.recAt.IsZero() {
 			h.endRecording(d, ev, now)
 		}
@@ -184,14 +191,6 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	} else if slices.ContainsFunc(d.svg.hits, func(hit hitBox) bool { return hit.id == ev.ID }) {
 		key = ev.ID
 	}
-	if d.displayApp != nil {
-		if d.app == d.displayApp {
-			if i := slices.Index(d.app.devices, d); i >= 0 {
-				h.updateApp(d.app, appEvent{kind: ev.Event, i: i, id: key, x: ev.X, y: ev.Y, now: now})
-			}
-		}
-		return
-	}
 	a := d.scene.actions[key]
 	if d.callState != callNone {
 		if d.scene.call != d.callID {
@@ -206,6 +205,14 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 			h.endCall(d, "hung up")
 		case "call-mute":
 			h.toggleCallMute(d)
+		}
+		return
+	}
+	if d.displayApp != nil {
+		if d.app == d.displayApp {
+			if i := slices.Index(d.app.devices, d); i >= 0 {
+				h.updateApp(d.app, appEvent{kind: ev.Event, i: i, id: key, x: ev.X, y: ev.Y, now: now})
+			}
 		}
 		return
 	}

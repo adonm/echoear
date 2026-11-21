@@ -1,4 +1,4 @@
-import {audioReady, canCaptureMic, chime, endMic, handleCall, handleTTS, micStopping, playPCM, setVolume, startMic, stopCall} from "./audio.js";
+import {canCaptureMic, endMic, handleCall, handleTTS, micStopping, playChime, playPCM, setVolume, startMic, stopCall, unlockAudio} from "./audio.js";
 import {loadHistory, receiveChat, resetTranscript} from "./chat.js";
 import {applyVolume, refreshDevices, renderCallTarget, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
 import {$, colors, isLive, nodes, say, screen, svgNS} from "./dom.js";
@@ -93,7 +93,7 @@ function canStartCall() {
 
 function startPeerCall(target) {
   if (!target || !canStartCall()) return;
-  audioReady();
+  unlockAudio();
   send({ev:"call",target});
 }
 
@@ -126,8 +126,9 @@ function connect(attempt = 0) {
     if (state.ws !== socket) return;
     loadTimers();
     loadSavedCats();
+    const micAvailable = canCaptureMic();
     send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",
-      caps:{call:true,drag:true}}
+      caps:{call:micAvailable,call_pcm:micAvailable,drag:true}}
       : {ev:"hello",role:"web"});
   };
   socket.onmessage = e => {
@@ -262,7 +263,7 @@ function command(msg) {
       if (!msg.device_id || msg.device_id === state.view.id) applyVolume(state.app, state.view, msg.level, msg.auto_volume);
       break;
     case "chime":
-      if (state.view.virtual) chime(msg.kind);
+      if (state.view.virtual) playChime(msg.kind);
       break;
     case "rec":
       if (state.view.virtual) {
@@ -274,15 +275,7 @@ function command(msg) {
       if (state.view.virtual) handleTTS(msg);
       break;
     case "call":
-      if (state.view.virtual) {
-        if (msg.state === "start") say("chat-note", "Voice call connected.");
-        handleCall(msg);
-        if (msg.state === "end") {
-          const text = {"declined":"Call declined.", "no answer":"No answer.", "disconnected":"Peer disconnected.",
-            "audio unavailable":"Call ended: audio unavailable. Check microphone permissions."};
-          say("chat-note", text[msg.reason] || "Call ended.");
-        }
-      }
+      if (state.view.virtual) handleCall(msg);
       break;
     case "error":
       say("chat-note", "The bridge couldn’t complete the live action.");
@@ -300,6 +293,7 @@ function hitBounds(control) { return control.dataset.echoearHit.split(" ").map(N
 
 screen.addEventListener("pointerdown", e => {
   if (e.button !== 0 || state.pointer != null || !state.rev) return;
+  if (state.view.virtual && e.pointerType === "mouse") unlockAudio();
   const {x, y} = xy(e);
   const target = screenHits.find(([, x1, y1, x2, y2]) => x >= x1 && x <= x2 && y >= y1 && y <= y2)?.[0];
   state.pointer = {id:e.pointerId, target, x:e.clientX, y:e.clientY, last:-Infinity, dragged:false};
@@ -317,7 +311,7 @@ screen.addEventListener("pointerup", e => {
   const dragged = state.pointer.dragged || Math.hypot(e.clientX - state.pointer.x, e.clientY - state.pointer.y) >= 4;
   const id = state.pointer.target;
   state.pointer = null;
-  if (state.view.virtual) audioReady();
+  if (state.view.virtual) unlockAudio();
   const point = xy(e);
   send({ev:"up",id,...point});
   if (!dragged) send({ev:"tap",...point});
@@ -330,7 +324,7 @@ screen.addEventListener("keydown", e => {
   if (!control || (e.key !== " " && e.key !== "Enter")) return;
   e.preventDefault();
   if (e.repeat) return;
-  if (state.view.virtual) audioReady();
+  if (state.view.virtual) unlockAudio();
   const [x1, y1, x2, y2] = hitBounds(control);
   send({ev:"tap",id:control.dataset.id,x:Math.round((x1+x2)/2),y:Math.round((y1+y2)/2)});
 });

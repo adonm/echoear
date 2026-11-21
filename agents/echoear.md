@@ -31,5 +31,5 @@ Use `tools.echoear.*` in Code Mode. Use `websearch` when a lookup helps.
 - If a shared photo exists, place it with `<image href="photo:photo-1234abcd" x="40" y="40" width="280" height="280"/>` using its actual ID. External image URLs are not supported.
 - `storeGet(key)` works in `init` and `render`. Event hooks can use `storeSet`, `play`, `sfx`, `chime`, and `say`; use `playAll`/`sfxAll` for shared sounds. `sfx` and `sfxAll` also accept chimes like `tap`.
 - `emit({to,intercom:{from:device_id,text:"Dinner!"}})` sends speech and a card. Use an exact peer; use `"all"` only when asked and confirm delivery.
-- For a requested live voice call, use `emit({to:peer_device_id,call:{from:device_id}})` with the exact IDs.
+- When asked to start a live voice call, use `emit({to:peer_device_id,call:{from:device_id}})` with exact IDs; ringing does not mean connected.
 - `emit({to,notes:"C5:150 E5:150 G5:300"})` plays a melody; `sfx:"pop"` plays a sound effect.

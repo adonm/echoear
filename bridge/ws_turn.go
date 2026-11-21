@@ -8,11 +8,12 @@ import (
 )
 
 const (
-	micPrefix    = 0x01
-	pcmPrefix    = 0x02
-	pcmPacket    = 4 << 10
-	maxAudioLead = 8 * time.Second
-	recStopWait  = 450 * time.Millisecond
+	micPrefix     = 0x01
+	pcmPrefix     = 0x02
+	callMicPrefix = 0x04
+	pcmPacket     = 4 << 10
+	maxAudioLead  = 8 * time.Second
+	recStopWait   = 450 * time.Millisecond
 )
 
 func recordTarget(s string) (string, bool) {
@@ -72,7 +73,7 @@ func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
 }
 
 func (h *wsHub) micChunk(c *wsClient, data []byte) {
-	if len(data) < 3 || data[0] != micPrefix || len(data)%2 != 1 {
+	if len(data) < 3 || len(data)%2 != 1 {
 		return
 	}
 	h.mu.Lock()
@@ -82,12 +83,14 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 		return
 	}
 	if d.callState != callNone {
-		if d.callState == callActive {
+		tagged := d.caps.CallPCM && data[0] == callMicPrefix
+		legacy := !d.caps.CallPCM && !d.recTail && data[0] == micPrefix
+		if d.callState == callActive && (tagged || legacy) {
 			h.relayCallPCM(d, data)
 		}
 		return
 	}
-	if !d.recOpen {
+	if data[0] != micPrefix || !d.recOpen {
 		return
 	}
 	room := (maxPCM - len(d.mic)) &^ 1
@@ -291,20 +294,15 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		h.finishTurn(d, id, nil, nil)
 		return
 	}
-	if target := callTarget(text); target != "" {
-		others, err := h.peerSnapshot(d.who.DeviceID)
-		if err == nil {
-			for _, p := range others {
-				if !strings.EqualFold(p.Character, target) && !strings.EqualFold(p.DeviceID, target) {
-					continue
-				}
-				h.mu.Lock()
-				if h.active(d) && d.turn == id && ctx.Err() == nil {
-					h.startCall(d, p.DeviceID)
-				}
-				h.mu.Unlock()
-				return
+	if target := parseCallCommand(text); target != "" {
+		others, _ := h.peerSnapshot(d.who.DeviceID)
+		if matches := targets(others, target); len(matches) == 1 {
+			h.mu.Lock()
+			if h.active(d) && d.turn == id && ctx.Err() == nil {
+				h.startCall(d, matches[0].DeviceID)
 			}
+			h.mu.Unlock()
+			return
 		}
 	}
 	others, direct, err := h.b.intercomIntent(d.who.DeviceID, text)
