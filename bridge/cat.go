@@ -121,15 +121,8 @@ func saveCatProfile(ctx context.Context, tx *sql.Tx, c catState, replace bool) e
 	return err
 }
 
-func (d *bridgeDB) migrateCats(ctx context.Context, voices deviceVoices) error {
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var migrated string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key='migrated_cats_v1'").Scan(&migrated)
-	if !errors.Is(err, sql.ErrNoRows) {
+func migrateCats(ctx context.Context, tx *sql.Tx, voices deviceVoices) error {
+	if done, err := legacyMigrationDone(ctx, tx, "migrated_cats_v1"); err != nil || done {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,character,theme,COALESCE(v.voice,prior.voice,'')
@@ -168,10 +161,7 @@ func (d *bridgeDB) migrateCats(ctx context.Context, voices deviceVoices) error {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO meta VALUES ('migrated_cats_v1','1')"); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 type catQuery interface {

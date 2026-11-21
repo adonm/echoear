@@ -40,7 +40,7 @@ func TestCatMigration(t *testing.T) {
 	if err := voiceStore(db).save(cats[2].id, fableVoice, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DELETE FROM meta WHERE key='migrated_cats_v1'`); err != nil {
+	if _, err := db.Exec(`DELETE FROM schema_version WHERE version >= 6`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -93,13 +93,10 @@ func TestFaceSVGMigratesOldCakeAndKeepsEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer legacy.Close()
-	for _, q := range schema {
+	for _, q := range schemaBaseline {
 		if _, err := legacy.Exec(strings.Replace(q, ", face_svg TEXT NOT NULL DEFAULT ''", "", 1)); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := (&bridgeDB{DB: legacy}).addV2Columns(t.Context()); err != nil {
-		t.Fatal(err)
 	}
 	const stuck = `<svg><path d="M95 142H129 M231 142H265"/></svg>`
 	for _, q := range []string{
@@ -127,9 +124,10 @@ func TestFaceSVGMigratesOldCakeAndKeepsEdits(t *testing.T) {
 	if _, err := db.Exec("UPDATE cats SET face_svg=?", custom); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.migrateFaceSVG(t.Context()); err != nil {
+	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	db = testDB(t, path, "")
 	var face string
 	if err := db.QueryRow("SELECT face_svg FROM cats").Scan(&face); err != nil || face != custom {
 		t.Fatalf("migration overwrote an edited face: %q (%v)", face, err)

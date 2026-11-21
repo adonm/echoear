@@ -14,50 +14,108 @@ import (
 	"time"
 )
 
-func (d *bridgeDB) addV2Columns(ctx context.Context) error {
-	return d.migrateColumns(ctx, "migrated_v2_columns",
-		`ALTER TABLE cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE saved_cats ADD COLUMN svg_extras TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE timers ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'`)
+const baselineVersion = 2
+
+func (d *bridgeDB) upgradeSchema(ctx context.Context, legacy, fallbackVoice string) error {
+	// Append versions; never insert into or renumber the sequence.
+	steps := []struct {
+		name string
+		run  func(context.Context, *sql.Tx) error
+	}{
+		{"create tables", createBaseline},
+		{"upgrade unversioned columns", upgradeLegacyColumns},
+		{"import JSON", func(ctx context.Context, tx *sql.Tx) error { return d.importLegacyJSON(ctx, tx, legacy) }},
+		{"seed face SVG", migrateFaceSVG},
+		{"backfill local messages", migrateLocalMessages},
+		{"seed cats", func(ctx context.Context, tx *sql.Tx) error {
+			return migrateCats(ctx, tx, deviceVoiceStore(d, fallbackVoice))
+		}},
+		{"seed device preferences", func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO device_prefs (device_id)
+				SELECT lower(device_id) FROM cats UNION SELECT lower(device_id) FROM devices UNION SELECT lower(id) FROM virtual_clients WHERE true
+				ON CONFLICT DO NOTHING`)
+			return err
+		}},
+	}
+	version, err := d.initSchema(ctx)
+	if err != nil {
+		return fmt.Errorf("initialize EchoEar schema: %w", err)
+	}
+	if version > len(steps) {
+		return fmt.Errorf("EchoEar schema version %d is newer than supported version %d", version, len(steps))
+	}
+	for i := version; i < len(steps); i++ {
+		if err := d.applySchemaStep(ctx, i+1, steps[i].run); err != nil {
+			return fmt.Errorf("EchoEar schema version %d (%s): %w", i+1, steps[i].name, err)
+		}
+	}
+	return nil
 }
 
-func (d *bridgeDB) addTimerAppColumn(ctx context.Context) error {
-	return d.migrateColumns(ctx, "migrated_timer_app",
-		`ALTER TABLE timers ADD COLUMN app_name TEXT NOT NULL DEFAULT ''`)
+func (d *bridgeDB) initSchema(ctx context.Context) (int, error) {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`); err != nil {
+		return 0, err
+	}
+	var version int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_version`).Scan(&version); err != nil {
+		return 0, err
+	}
+	if version == 0 {
+		var existing bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_schema
+			WHERE type='table' AND name<>'schema_version' AND name NOT GLOB 'sqlite_*')`).Scan(&existing); err != nil {
+			return 0, err
+		}
+		if !existing {
+			if err := createBaseline(ctx, tx); err != nil {
+				return 0, err
+			}
+			version = baselineVersion
+			if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version VALUES (?)`, version); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return version, tx.Commit()
 }
 
-func (d *bridgeDB) migrateColumns(ctx context.Context, marker string, statements ...string) error {
+func (d *bridgeDB) applySchemaStep(ctx context.Context, version int, run func(context.Context, *sql.Tx) error) error {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var done string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, marker).Scan(&done)
-	if !errors.Is(err, sql.ErrNoRows) {
+	if err := run(ctx, tx); err != nil {
 		return err
 	}
-	for _, q := range statements {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?,'1')`, marker); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version VALUES (?)`, version); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (d *bridgeDB) migrateFaceSVG(ctx context.Context) error {
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+func createBaseline(ctx context.Context, tx *sql.Tx) error {
+	for _, q := range schemaBaseline {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return err
+		}
 	}
-	defer tx.Rollback()
-	for _, table := range []struct{ name, key, configured string }{
-		{"cats", "device_id", "configured"}, {"saved_cats", "slug", "1"},
+	return nil
+}
+
+func upgradeLegacyColumns(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []struct{ table, name, def string }{
+		{"cats", "svg_extras", "''"}, {"cats", "face_svg", "''"},
+		{"saved_cats", "svg_extras", "''"}, {"saved_cats", "face_svg", "''"},
+		{"timers", "notes_json", "'[]'"}, {"timers", "app_name", "''"},
+		{"apps", "template", "''"}, {"apps", "data_json", "'{}'"},
 	} {
-		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table.name+`)`)
+		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+column.table+`)`)
 		if err != nil {
 			return err
 		}
@@ -69,17 +127,32 @@ func (d *bridgeDB) migrateFaceSVG(ctx context.Context) error {
 				rows.Close()
 				return err
 			}
-			found = found || name == "face_svg"
+			found = found || name == column.name
 		}
 		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			return err
 		}
 		if !found {
-			if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table.name+` ADD COLUMN face_svg TEXT NOT NULL DEFAULT ''`); err != nil {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE `+column.table+` ADD COLUMN `+column.name+` TEXT NOT NULL DEFAULT `+column.def); err != nil {
 				return err
 			}
 		}
-		rows, err = tx.QueryContext(ctx, `SELECT `+table.key+`,face_bg,mark_color,accent_color,`+table.configured+
+	}
+	_, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS messages_device_ts`)
+	return err
+}
+
+func legacyMigrationDone(ctx context.Context, tx *sql.Tx, marker string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM meta WHERE key=?)`, marker).Scan(&exists)
+	return exists, err
+}
+
+func migrateFaceSVG(ctx context.Context, tx *sql.Tx) error {
+	for _, table := range []struct{ name, key, configured string }{
+		{"cats", "device_id", "configured"}, {"saved_cats", "slug", "1"},
+	} {
+		rows, err := tx.QueryContext(ctx, `SELECT `+table.key+`,face_bg,mark_color,accent_color,`+table.configured+
 			` FROM `+table.name+` WHERE face_svg=''`)
 		if err != nil {
 			return err
@@ -109,10 +182,7 @@ func (d *bridgeDB) migrateFaceSVG(ctx context.Context) error {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES ('migrated_face_svg_v1','1') ON CONFLICT DO NOTHING`); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 func migrateMap[T any](ctx context.Context, tx *sql.Tx, dir string, s *store[T], valid func(string, T) bool) error {
@@ -153,21 +223,11 @@ func legacyRows(dir, name string, visit func(string, json.RawMessage) error) err
 	return nil
 }
 
-func (d *bridgeDB) migrate(ctx context.Context, legacy string) error {
+func (d *bridgeDB) importLegacyJSON(ctx context.Context, tx *sql.Tx, legacy string) error {
 	if legacy == "" {
 		return nil
 	}
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var migrated string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key='migrated_json_v1'").Scan(&migrated)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if done, err := legacyMigrationDone(ctx, tx, "migrated_json_v1"); err != nil || done {
 		return err
 	}
 	if err := migrateMap(ctx, tx, legacy, deviceStore(d), validLegacyPeer); err != nil {
@@ -220,10 +280,7 @@ func (d *bridgeDB) migrate(ctx context.Context, legacy string) error {
 	}); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO meta VALUES ('migrated_json_v1','1')"); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 type backfillMessage struct {
@@ -231,15 +288,8 @@ type backfillMessage struct {
 	entry chatEntry
 }
 
-func (d *bridgeDB) migrateLocalMessages(ctx context.Context) error {
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var done string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='migrated_messages_v2_local'`).Scan(&done)
-	if !errors.Is(err, sql.ErrNoRows) {
+func migrateLocalMessages(ctx context.Context, tx *sql.Tx) error {
+	if done, err := legacyMigrationDone(ctx, tx, "migrated_messages_v2_local"); err != nil || done {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT device_id,id,role,sender,text,source,scene_title,ts_ms FROM chat_events`)
@@ -261,10 +311,10 @@ func (d *bridgeDB) migrateLocalMessages(ctx context.Context) error {
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return err
 	}
-	return insertBackfill(ctx, tx, batch, "migrated_messages_v2_local")
+	return insertBackfill(ctx, tx, batch)
 }
 
-func insertBackfill(ctx context.Context, tx *sql.Tx, batch []backfillMessage, marker string) error {
+func insertBackfill(ctx context.Context, tx *sql.Tx, batch []backfillMessage) error {
 	for _, row := range batch {
 		if e, ok := canonicalMessage(row.entry); ok {
 			if _, err := tx.ExecContext(ctx, insertMessage, messageValues(row.id, e)...); err != nil {
@@ -272,10 +322,7 @@ func insertBackfill(ctx context.Context, tx *sql.Tx, batch []backfillMessage, ma
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?, '1') ON CONFLICT DO NOTHING`, marker); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (d *bridgeDB) historyDeviceIDs(ctx context.Context) ([]string, error) {
@@ -357,5 +404,11 @@ func (b *bridge) migrateSessionMessages(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	return insertBackfill(ctx, tx, batch, marker)
+	if err := insertBackfill(ctx, tx, batch); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?, '1') ON CONFLICT DO NOTHING`, marker); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

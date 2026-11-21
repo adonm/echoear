@@ -157,9 +157,6 @@ func TestTursoMigration(t *testing.T) {
 		"voices": 2, "chat_events": 2, "messages": 1, "memory": 0, "apps": 0, "timers": 0} {
 		assertRows(name, n)
 	}
-	if marker, err := db.getMeta(t.Context(), "migrated_app_templates"); err != nil || marker != "1" {
-		t.Fatalf("app template migration marker = %q: %v", marker, err)
-	}
 	for _, want := range []peer{cake, mint} {
 		if got, _, err := deviceStore(db).get(want.DeviceID); err != nil || got != want {
 			t.Fatalf("device %s did not migrate: %v", want.DeviceID, err)
@@ -196,9 +193,104 @@ func TestTursoMigration(t *testing.T) {
 	db = testDB(t, path, dir)
 	assertRows("sessions", 2)
 	assertRows("chat_events", 2)
-	var marker string
-	if err := db.QueryRow("SELECT value FROM meta WHERE key='migrated_json_v1'").Scan(&marker); err != nil || marker != "1" {
-		t.Fatal("migration marker missing", err)
+	var version int
+	if err := db.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil || version != 7 {
+		t.Fatal("current schema version missing", version, err)
+	}
+}
+
+func TestUpgradeDeployedSchemaFixture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "echoear.db")
+	raw, err := sql.Open("turso", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Unversioned production-era SQL shape, with synthetic rows only.
+	for _, q := range []string{
+		`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO meta VALUES ('migrated_json_v1','1'), ('migrated_face_svg_v1','1'),
+			('migrated_cats_v1','1'), ('migrated_messages_v2_local','1'), ('migrated_messages_v2','1')`,
+		`CREATE TABLE sessions (device_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+		`INSERT INTO sessions VALUES ('echoear-fixture','ses_fixture',42)`,
+		`CREATE TABLE apps (name TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, svg TEXT NOT NULL DEFAULT '',
+			code TEXT NOT NULL DEFAULT '', tick_ms INTEGER NOT NULL DEFAULT 0, max_ticks INTEGER NOT NULL DEFAULT 0,
+			author TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, template TEXT NOT NULL DEFAULT '', data_json TEXT NOT NULL DEFAULT '{}')`,
+		`INSERT INTO apps (name,title,kind,updated_at,template,data_json) VALUES ('fixture','Saved','template',42,'quiz','{"round":1}')`,
+		`CREATE TABLE messages (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, role TEXT NOT NULL,
+			sender TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, card_title TEXT NOT NULL DEFAULT '', ts_ms INTEGER NOT NULL)`,
+		`CREATE INDEX messages_device_ts ON messages (device_id,ts_ms)`,
+		`INSERT INTO messages VALUES ('msg_fixture','echoear-fixture','user','You','Keep me','typed','',42)`,
+	} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacy := t.TempDir()
+	if err := os.WriteFile(filepath.Join(legacy, "devices.json"), []byte(`invalid but already migrated`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		db := testDB(t, path, legacy)
+		for q, want := range map[string]string{
+			`SELECT session_id FROM sessions`:                                    "ses_fixture",
+			`SELECT data_json FROM apps`:                                         `{"round":1}`,
+			`SELECT text FROM messages`:                                          "Keep me",
+			`SELECT count(*) FROM sqlite_schema WHERE name='messages_device_ts'`: "0",
+			`SELECT count(*) FROM build_jobs`:                                    "0",
+			`SELECT count(*) FROM parent_usage`:                                  "0",
+		} {
+			var got string
+			if err := db.QueryRow(q).Scan(&got); err != nil || got != want {
+				t.Fatalf("%s: got %q, want %q: %v", q, got, want, err)
+			}
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSchemaResumesFailedStep(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "echoear.db")
+	const id = "echoear-fixture"
+	if err := writeMap(filepath.Join(dir, "devices.json"), map[string]peer{
+		id: {DeviceID: id, Character: "Cake", IP: "127.0.0.21", Port: 80, LastSeen: 42},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	voices := filepath.Join(dir, "voices.json")
+	if err := os.WriteFile(voices, []byte(`not JSON`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := openBridgeDB(t.Context(), path, dir, "", "", heartVoice); err == nil {
+		db.Close()
+		t.Fatal("invalid legacy JSON unexpectedly committed")
+	}
+	raw, err := sql.Open("turso", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var version, count int
+	if err := raw.QueryRow(`SELECT MAX(version), (SELECT count(*) FROM devices) FROM schema_version`).Scan(&version, &count); err != nil ||
+		version != baselineVersion || count != 0 {
+		t.Fatalf("failed import not rolled back: version %d, devices %d: %v", version, count, err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMap(voices, map[string]string{id: heartVoice}); err != nil {
+		t.Fatal(err)
+	}
+	db := testDB(t, path, dir)
+	if err := db.QueryRow(`SELECT MAX(version), (SELECT count(*) FROM cats) FROM schema_version`).Scan(&version, &count); err != nil ||
+		version != 7 || count != 1 {
+		t.Fatalf("import did not resume: version %d, cats %d: %v", version, count, err)
 	}
 }
 

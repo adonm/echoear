@@ -143,13 +143,11 @@ func TestTimerAppMigrationPreservesExistingTimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	for _, stmt := range schema {
+	for _, stmt := range schemaBaseline {
+		stmt = strings.Replace(stmt, ", app_name TEXT NOT NULL DEFAULT ''", "", 1)
 		if _, err := raw.Exec(stmt); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := (&bridgeDB{DB: raw}).addV2Columns(t.Context()); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`INSERT INTO timers (id,device_id,label,say,chime,created_at,fire_at,notes_json)
 		VALUES ('old','echoear-old','Keep me','','tap','2026-01-01T00:00:00Z','2026-01-01T01:00:00Z','["C5:80"]')`); err != nil {

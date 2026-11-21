@@ -15,15 +15,15 @@ import (
 	turso "turso.tech/database/tursogo"
 )
 
-var schema = []string{
+var schemaBaseline = []string{
 	`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, character TEXT NOT NULL, ip TEXT NOT NULL, port INTEGER NOT NULL, last_seen INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS sessions (device_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS virtual_clients (id TEXT PRIMARY KEY, character TEXT NOT NULL, theme TEXT NOT NULL, voice TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS voices (device_id TEXT PRIMARY KEY, voice TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS device_prefs (device_id TEXT PRIMARY KEY, auto_volume INTEGER NOT NULL DEFAULT 1, manual_volume INTEGER NOT NULL DEFAULT 55)`,
-	`CREATE TABLE IF NOT EXISTS cats (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, configured INTEGER NOT NULL DEFAULT 0, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, face_svg TEXT NOT NULL DEFAULT '')`,
-	`CREATE TABLE IF NOT EXISTS saved_cats (slug TEXT PRIMARY KEY, name TEXT NOT NULL, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', voice TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, face_svg TEXT NOT NULL DEFAULT '')`,
+	`CREATE TABLE IF NOT EXISTS cats (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, configured INTEGER NOT NULL DEFAULT 0, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, face_svg TEXT NOT NULL DEFAULT '', svg_extras TEXT NOT NULL DEFAULT '')`,
+	`CREATE TABLE IF NOT EXISTS saved_cats (slug TEXT PRIMARY KEY, name TEXT NOT NULL, face_bg TEXT NOT NULL, mark_color TEXT NOT NULL, accent_color TEXT NOT NULL, personality TEXT NOT NULL DEFAULT '', voice TEXT NOT NULL DEFAULT '', extras_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, face_svg TEXT NOT NULL DEFAULT '', svg_extras TEXT NOT NULL DEFAULT '')`,
 	`CREATE TABLE IF NOT EXISTS tunnels (device_id TEXT PRIMARY KEY, route_name TEXT NOT NULL, url TEXT NOT NULL, local_port INTEGER NOT NULL, scoped_token TEXT NOT NULL, profile TEXT NOT NULL, created_at TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS chat_events (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, role TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, scene_title TEXT NOT NULL DEFAULT '', tool_summary TEXT NOT NULL DEFAULT '', ts_ms INTEGER NOT NULL)`,
 	`CREATE INDEX IF NOT EXISTS chat_device_ts ON chat_events (device_id, ts_ms)`,
@@ -31,11 +31,10 @@ var schema = []string{
 	// Extend the old device/timestamp index with the cursor's tie-breaker so
 	// LIMIT can stop the ordered scan instead of sorting the whole transcript.
 	`CREATE INDEX IF NOT EXISTS messages_device_ts_id ON messages (device_id, ts_ms, id)`,
-	`DROP INDEX IF EXISTS messages_device_ts`,
 	`CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, mime TEXT NOT NULL, data BLOB NOT NULL, caption TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS memory (scope TEXT NOT NULL, key TEXT NOT NULL, value_json TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL, PRIMARY KEY (scope, key))`,
-	`CREATE TABLE IF NOT EXISTS apps (name TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, svg TEXT NOT NULL DEFAULT '', code TEXT NOT NULL DEFAULT '', tick_ms INTEGER NOT NULL DEFAULT 0, max_ticks INTEGER NOT NULL DEFAULT 0, author TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)`,
-	`CREATE TABLE IF NOT EXISTS timers (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, label TEXT NOT NULL, say TEXT NOT NULL, chime TEXT NOT NULL, wake_agent INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, fire_at TEXT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS apps (name TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, svg TEXT NOT NULL DEFAULT '', code TEXT NOT NULL DEFAULT '', tick_ms INTEGER NOT NULL DEFAULT 0, max_ticks INTEGER NOT NULL DEFAULT 0, author TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, template TEXT NOT NULL DEFAULT '', data_json TEXT NOT NULL DEFAULT '{}')`,
+	`CREATE TABLE IF NOT EXISTS timers (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, label TEXT NOT NULL, say TEXT NOT NULL, chime TEXT NOT NULL, wake_agent INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, fire_at TEXT NOT NULL, notes_json TEXT NOT NULL DEFAULT '[]', app_name TEXT NOT NULL DEFAULT '')`,
 	`CREATE TABLE IF NOT EXISTS build_jobs (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, state TEXT NOT NULL, spec TEXT NOT NULL,
 		created_at INTEGER NOT NULL, result TEXT NOT NULL DEFAULT '', announced INTEGER NOT NULL DEFAULT 0, cleanup INTEGER NOT NULL DEFAULT 0)`,
 	`CREATE INDEX IF NOT EXISTS build_jobs_state ON build_jobs (state, device_id)`,
@@ -211,38 +210,8 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoic
 	}()
 	// Serialize SQL writers and keep one connection alive for :memory:.
 	d.SetMaxOpenConns(1)
-	for _, query := range schema {
-		if _, err := d.ExecContext(ctx, query); err != nil {
-			return nil, fmt.Errorf("initialize EchoEar schema: %w", err)
-		}
-	}
-	if err := d.migrate(ctx, legacy); err != nil {
-		return nil, fmt.Errorf("migrate legacy EchoEar state: %w", err)
-	}
-	if err := d.addV2Columns(ctx); err != nil {
-		return nil, fmt.Errorf("migrate EchoEar v2 columns: %w", err)
-	}
-	if err := d.addTimerAppColumn(ctx); err != nil {
-		return nil, fmt.Errorf("migrate EchoEar timer apps: %w", err)
-	}
-	if err := d.migrateColumns(ctx, "migrated_app_templates",
-		`ALTER TABLE apps ADD COLUMN template TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE apps ADD COLUMN data_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
-		return nil, fmt.Errorf("migrate EchoEar app templates: %w", err)
-	}
-	if err := d.migrateFaceSVG(ctx); err != nil {
-		return nil, fmt.Errorf("migrate EchoEar face SVG: %w", err)
-	}
-	if err := d.migrateLocalMessages(ctx); err != nil {
-		return nil, fmt.Errorf("backfill EchoEar chat events: %w", err)
-	}
-	if err := d.migrateCats(ctx, deviceVoiceStore(d, fallbackVoice)); err != nil {
-		return nil, fmt.Errorf("migrate EchoEar cats: %w", err)
-	}
-	if _, err := d.ExecContext(ctx, `INSERT INTO device_prefs (device_id)
-		SELECT lower(device_id) FROM cats UNION SELECT lower(device_id) FROM devices UNION SELECT lower(id) FROM virtual_clients WHERE true
-		ON CONFLICT DO NOTHING`); err != nil {
-		return nil, fmt.Errorf("seed EchoEar device preferences: %w", err)
+	if err := d.upgradeSchema(ctx, legacy, fallbackVoice); err != nil {
+		return nil, err
 	}
 	return d, nil
 }
