@@ -19,6 +19,7 @@ const (
 	endpointLimit = 60 * time.Second
 	endpointIdle  = 7 * time.Second
 	vadTail       = 320 * time.Millisecond
+	sileroModel   = "silero_vad_v5.onnx"
 	sileroSHA256  = "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396"
 )
 
@@ -26,11 +27,11 @@ const (
 func checkEndpointModel(path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return errors.New("cannot read ECHOEAR_SILERO_VAD_MODEL")
+		return errors.New("cannot read Silero v5 model; run scripts/setup-host.sh")
 	}
 	sum := sha256.Sum256(raw)
 	if hex.EncodeToString(sum[:]) != sileroSHA256 {
-		return errors.New("ECHOEAR_SILERO_VAD_MODEL must be the pinned Silero v5 model")
+		return errors.New("Silero model does not match the pinned Silero v5 ONNX")
 	}
 	return nil
 }
@@ -84,54 +85,126 @@ const (
 type endpointPolicy struct {
 	voiced  bool
 	inVoice bool
+	first   time.Duration
 	last    time.Duration // Estimated acoustic end (Silero includes a tail).
 }
 
-func (p *endpointPolicy) step(at time.Duration, speech bool, partial string) endpointDecision {
+func (p *endpointPolicy) observe(at time.Duration, speech bool) {
+	p.inVoice = speech
 	if speech {
-		p.voiced, p.inVoice = true, true
+		if !p.voiced {
+			p.first = at
+		}
+		p.voiced = true
 		p.last = max(0, at-vadTail)
-	} else {
-		p.inVoice = false
 	}
+}
+
+func (p endpointPolicy) decision(at, silence time.Duration) endpointDecision {
 	if at >= endpointLimit || !p.voiced && at >= endpointIdle {
 		if p.voiced {
 			return endpointCommit
 		}
 		return endpointDiscard
 	}
-	if p.voiced && !p.inVoice && at-p.last >= endpointSilence(partial) {
+	if p.paused(at, silence) {
 		return endpointCommit
 	}
 	return endpointWait
 }
 
-func endpointSilence(text string) time.Duration {
-	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+func (p endpointPolicy) paused(at, silence time.Duration) bool {
+	return p.voiced && !p.inVoice && at-p.last >= silence
+}
+
+type endpointThresholds struct {
+	probe, quick, complete, uncertain, patient, storySpan time.Duration
+	minWords, storyWords                                  int
+}
+
+var tunedEndpoint = endpointThresholds{
+	probe: 600 * time.Millisecond, quick: 950 * time.Millisecond,
+	complete: 2100 * time.Millisecond, uncertain: 3300 * time.Millisecond, patient: 4500 * time.Millisecond,
+	storySpan: 8 * time.Second, minWords: 3, storyWords: 23,
+}
+
+func (c endpointThresholds) silence(p endpointPolicy, text string) time.Duration {
+	text = strings.TrimSpace(text)
+	body := strings.TrimRight(text, `"'’”)]`)
+	if p.last-p.first >= c.storySpan || strings.HasSuffix(body, "..") || strings.HasSuffix(body, "…") {
+		return c.patient
+	}
+	words := strings.FieldsFunc(strings.ReplaceAll(strings.ToLower(body), "’", "'"), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
 	})
-	const patient = 4500 * time.Millisecond
-	if len(words) < 3 {
-		return patient // No useful partial, or not enough context.
+	if len(words) < 2 || len(words) >= c.storyWords {
+		return c.patient
+	}
+	wordCount := len(words)
+	switch words[0] {
+	case "what's", "how's", "where's", "who's", "when's":
+		wordCount++ // The leading contraction includes the finite verb.
+	}
+	if wordCount < c.minWords {
+		return c.patient
+	}
+	normalized := strings.Join(words, " ")
+	for _, start := range []string{"once upon a time", "one day", "this is a story", "let me tell you", "here's a story",
+		"i have a story", "so there was", "there was", "there were", "and then", "yesterday", "last night",
+		"i found", "i saw", "i went", "i was", "if", "while", "because", "what if", "first", "the first"} {
+		if normalized == start || strings.HasPrefix(normalized, start+" ") {
+			return c.patient
+		}
 	}
 	switch words[len(words)-1] {
 	case "a", "an", "the", "and", "then", "or", "but", "so", "because", "when", "if",
-		"to", "of", "in", "on", "with", "for", "about", "that", "who", "which", "named", "called":
-		return patient
+		"to", "of", "in", "on", "with", "for", "about", "at", "from", "by", "into", "that",
+		"who", "which", "named", "called", "like", "uh", "um", "er", "erm", "ah", "well", "hmm":
+		return c.patient
 	}
-	// A syntactically possible request ("can you draw a dragon") is not
-	// necessarily finished. Fast-path only a narrow, fully specified command.
+	for _, tail := range []string{"you know", "i mean", "let's see", "let me think", "what was it", "sort of", "kind of"} {
+		if strings.HasSuffix(normalized, " "+tail) {
+			return c.patient
+		}
+	}
+	if words[0] == "when" {
+		switch words[1] {
+		case "is", "are", "was", "were", "will", "can", "do", "did", "does", "should":
+		default:
+			return c.patient // "When I was nine" is not a question.
+		}
+	}
+	if words[len(words)-2] == "and" || words[len(words)-2] == "or" {
+		return c.patient
+	}
+	switch {
+	case strings.HasSuffix(body, ".") || strings.HasSuffix(body, "?") || strings.HasSuffix(body, "!"):
+	case strings.HasSuffix(body, ",") || strings.HasSuffix(body, ":") || strings.HasSuffix(body, ";") ||
+		strings.HasSuffix(body, "-") || strings.HasSuffix(body, "—"):
+		return c.patient
+	default:
+		// Parakeet sometimes omits punctuation even on short finished turns.
+		// Wait longer than for a complete turn, without assuming a story.
+		return c.uncertain
+	}
+	// A possible sentence ("Can you draw a dragon?") may still take a
+	// modifier. Give requests and statements more room than explicit questions.
+	if strings.HasSuffix(body, "?") {
+		switch words[0] {
+		case "what", "why", "how", "where", "who", "which", "when", "what's", "how's", "where's", "who's", "when's":
+			return c.quick
+		}
+	}
 	switch words[len(words)-1] {
 	case "second", "seconds", "minute", "minutes", "hour", "hours":
-		text := strings.Join(words, " ")
 		for _, prefix := range []string{"could you ", "can you ", "please "} {
-			text = strings.TrimPrefix(text, prefix)
+			normalized = strings.TrimPrefix(normalized, prefix)
 		}
-		if len(words) >= 6 && (strings.HasPrefix(text, "start a timer for ") || strings.HasPrefix(text, "set a timer for ")) {
-			return 900 * time.Millisecond
+		if len(words) >= 6 && (strings.HasPrefix(normalized, "start a timer for ") || strings.HasPrefix(normalized, "set a timer for ")) {
+			return c.quick
 		}
 	}
-	return patient
+	return c.complete
 }
 
 // One capture worker owns this accumulator. Keep the original clip for the
@@ -142,20 +215,18 @@ type utterance struct {
 	policy endpointPolicy
 }
 
-func (u *utterance) add(pcm []byte, vad endpointVAD, partial string) endpointDecision {
+func (u *utterance) add(pcm []byte, vad endpointVAD) {
 	const limit = sampleRate * 2 * int(endpointLimit/time.Second)
 	u.pcm = append(u.pcm, pcm[:min(len(pcm), limit-len(u.pcm))]...)
-	decision := endpointWait
 	for vad != nil && u.scan+endpointBytes <= len(u.pcm) {
 		frame := u.pcm[u.scan : u.scan+endpointBytes]
 		u.scan += endpointBytes
-		// A later voiced frame in the same packet can revoke an endpoint.
-		decision = u.policy.step(time.Duration(u.scan/endpointBytes)*endpointFrame, vad.detect(frame), partial)
+		u.policy.observe(pcmDuration(u.scan), vad.detect(frame))
 	}
-	if len(u.pcm) == limit && (vad == nil || u.policy.voiced) {
-		return endpointCommit
-	}
-	return decision
+}
+
+func pcmDuration(n int) time.Duration {
+	return time.Duration(n/2) * time.Second / sampleRate
 }
 
 func (u *utterance) clip() []byte {

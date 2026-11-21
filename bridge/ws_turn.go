@@ -65,6 +65,9 @@ func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
 	if !c.requestStop() {
 		return
 	}
+	if c.endpoint != nil {
+		c.endpoint.commitAt = now
+	}
 	h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
 	if d.client.role == "web" && c.endpoint == nil {
 		return

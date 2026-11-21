@@ -33,8 +33,8 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    ```
 
    Setup builds the Go bridge with in-process Vulkan STT, installs the
-   SHA-256-pinned Parakeet Q8_0 GGUF and FP32 `kokoro-multi-lang-v1_0` pack,
-   and starts the bridge and a dedicated OpenCode service. On a multi-GPU
+    SHA-256-pinned Parakeet Q8_0 GGUF, Silero v5, and FP32 `kokoro-multi-lang-v1_0`
+    pack, and starts the bridge and a dedicated OpenCode service. On a multi-GPU
    host, use `vulkaninfo --summary` and pass `--gpu-index INDEX` for the
    intended device. The bridge runs Kokoro in-process via
    `sherpa-onnx-go` and checksum-verified libraries in `$ORIGIN/lib`.
@@ -45,10 +45,13 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    agent prompt and OTA files (the systemd unit sets it). Choose the models in
    the [dedicated OpenCode config](#echoear-models).
 
-   STT needs a Vulkan GPU, not Hex or an X display. EchoEar recognizes
-   whole clips in English without live partials or custom vocabulary.
-   Existing Hex installations are not changed by setup. See
-   [STT measurements and artifact pins](bridge/stt-speed.md).
+    STT needs a Vulkan GPU, not Hex or an X display. EchoEar recognizes
+    English without custom vocabulary. On firmware 0.9.5 and `/app`,
+    the bridge listens through thinking pauses and uses local transcription
+    to decide when to send a turn. Clients without the capability keep their
+    local VAD. You can still Send or Cancel while the mic is open. See
+    [endpoint policy and replay results](bridge/turn-taking.md) and
+    [STT measurements and artifact pins](bridge/stt-speed.md).
 
 2. Create the private firmware config once:
 
@@ -97,7 +100,7 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 
    Add `--live` to exercise the product with virtual browser cats and firmware
    clients for both board layouts. It builds a fresh loopback bridge with a
-   temporary database, real Parakeet Vulkan and Kokoro, synthetic photos, and a
+   temporary database, real Parakeet Vulkan, Silero and Kokoro, synthetic photos, and a
    deterministic model stub. It does not connect to the installed bridge, use
    model quota, or test wake word. Allow at least two minutes for the actual
    idle timeout. Set `ECHOEAR_PARAKEET_NATIVE` to the `native/` prefix from

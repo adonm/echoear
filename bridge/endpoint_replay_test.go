@@ -1,21 +1,102 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 )
 
-// Run explicitly: this generates synthetic speech and decodes locally on Vulkan.
-// Fixtures and transcripts are held in memory only; no live mic is involved.
+type replayClause struct {
+	gap  int
+	text string
+}
+
+type replayFixture struct {
+	name, kind string
+	voice      int
+	clauses    []replayClause
+}
+
+var endpointFixtures = []replayFixture{
+	{"timer", "short", 2, []replayClause{{0, "Start a timer for ninety seconds."}}},
+	{"joke-name", "short", 3, []replayClause{{0, "Tell me a joke about Saoirse."}}},
+	{"knock-knock", "short", 18, []replayClause{{0, "Tell me a knock knock joke!"}}},
+	{"dragon-color", "short", 2, []replayClause{{0, "Make my dragon purple, please."}}},
+	{"count", "short", 3, []replayClause{{0, "Count backwards from ten."}}},
+	{"cat", "short", 18, []replayClause{{0, "Pretend to be a cat."}}},
+	{"two-words", "short", 2, []replayClause{{0, "What's eight?"}}},
+	{"moon", "short", 3, []replayClause{{0, "Why is the moon following us?"}}},
+	{"whales", "short", 18, []replayClause{{0, "Do whales sleep underwater?"}}},
+	{"dino", "short", 2, []replayClause{{0, "How big was a baby dinosaur?"}}},
+	{"rainbow", "short", 3, []replayClause{{0, "Where does the rainbow end?"}}},
+	{"calculator", "short", 18, []replayClause{{0, "What is seventeen plus thirty-two?"}}},
+	{"snack", "short", 2, []replayClause{{0, "Can a dog eat popcorn?"}}},
+	{"game", "short", 3, []replayClause{{0, "Let's play twenty questions!"}}},
+	{"jupiter", "short", 18, []replayClause{{0, "Why does Jupiter have stripes?"}}},
+	{"voice", "short", 2, []replayClause{{0, "Can you talk like a pirate?"}}},
+	{"school", "short", 3, []replayClause{{0, "Where is the nearest school?"}}},
+	{"frog-07", "pause", 2, []replayClause{{0, "Once upon a time there was a little frog, and then"}, {700, "it made a house under a purple mushroom."}}},
+	{"frog-17", "pause", 2, []replayClause{{0, "Once upon a time there was a little frog, and then"}, {1700, "it made a house under a purple mushroom."}}},
+	{"frog-32", "pause", 2, []replayClause{{0, "Once upon a time there was a little frog, and then"}, {3200, "it made a house under a purple mushroom."}}},
+	{"frog-40", "pause", 2, []replayClause{{0, "Once upon a time there was a little frog, and then"}, {4000, "it made a house under a purple mushroom."}}},
+	{"timer-pause", "pause", 3, []replayClause{{0, "Could you set a timer for"}, {2600, "seventeen minutes?"}}},
+	{"joke-pause", "pause", 18, []replayClause{{0, "Tell me a joke about"}, {3600, "Siobhan and thirty-two spiders."}}},
+	{"dragon-wings", "pause", 2, []replayClause{{0, "Can you draw a dragon"}, {1700, "with blue wings and little stars?"}}},
+	{"article", "pause", 3, []replayClause{{0, "Tell me about the"}, {2800, "biggest volcano ever."}}},
+	{"hesitation", "pause", 18, []replayClause{{0, "Can you make me a song, um"}, {3100, "about a fish who wears shoes?"}}},
+	{"conditional", "pause", 2, []replayClause{{0, "If I had a million dollars"}, {2900, "could I buy the moon?"}}},
+	{"sequential", "pause", 3, []replayClause{{0, "First I want a castle"}, {3900, "and then I want a moat with crocodiles."}}},
+	{"list", "pause", 18, []replayClause{{0, "I want apples, grapes, and"}, {2200, "strawberries and"}, {1850, "chocolate sprinkles too!"}}},
+	{"list-bare", "pause", 2, []replayClause{{0, "Red, orange, yellow"}, {1850, "green, blue, and purple."}}},
+	{"name-recall", "pause", 3, []replayClause{{0, "That dinosaur is called"}, {3200, "Micropachycephalosaurus."}}},
+	{"number-correction", "pause", 18, []replayClause{{0, "Set a timer for, um"}, {1400, "forty seconds! No, thirty."}}},
+	{"filler-uh", "filler", 2, []replayClause{{0, "Tell me the dragon joke, uh."}}},
+	{"filler-think", "filler", 3, []replayClause{{0, "Can we play a game, let me think."}}},
+	{"filler-um", "filler", 18, []replayClause{{0, "Show me a giraffe, um."}}},
+	{"purple-frog", "story", 2, []replayClause{
+		{0, "Once upon a time there was a tiny frog who lived in a boot."},
+		{3200, "His best friend had a purple umbrella."},
+		{4000, "They used it like a boat when the creek got really big, and then"},
+		{1500, "they met a turtle named Olivia who knew the way home."},
+		{2400, "The frog gave her ninety stickers to say thank you. The end."},
+	}},
+	{"giant-bee", "story", 3, []replayClause{
+		{0, "One day I saw a bee that was bigger than my hand."},
+		{3870, "It was so sparkly I thought it might be a magic bee."},
+		{1960, "It landed on my little brother's ice cream."},
+		{3450, "He liked it because he thought the bee was a sprinkle."},
+	}},
+	{"space-dog", "story", 18, []replayClause{
+		{0, "Let me tell you about my dog Rocket, who went in a spaceship."},
+		{1450, "He had seven bags of treats but there was a hole in the door."},
+		{4000, "So the treats all flew out and made a ring around Saturn."},
+		{2450, "He was mad until a purple space cat shared her crackers."},
+	}},
+	{"backyard", "story", 2, []replayClause{
+		{0, "Yesterday my cousin and I took a red shovel and a green bucket to the back corner of our yard because we wanted to dig for buried treasure."},
+		{3800, "We found a very wobbly spoon and a marble and then"},
+		{2850, "he said there was a noise under the rocks."},
+		{4000, "It was a little lizard. We put the rocks back and left it alone."},
+	}},
+	{"telling-cat", "story", 3, []replayClause{
+		{0, "This is a story about a cat named Nori."},
+		{4000, "Nori could only jump nine inches, but she wanted to jump to the moon."},
+		{1000, "The other cats made a trampoline out of an old blanket, and"},
+		{3500, "Nori bounced high enough to catch a falling star."},
+	}},
+}
+
+type replaySpan struct{ start, end int }
+
+const replayBytesPerMS = sampleRate / 1000 * 2
+
+// Run explicitly: all audio is synthesized and kept in memory.
 func TestEndpointReplay(t *testing.T) {
 	path := os.Getenv("ECHOEAR_REPLAY_SILERO")
 	if path == "" {
@@ -23,10 +104,6 @@ func TestEndpointReplay(t *testing.T) {
 	}
 	if err := checkEndpointModel(path); err != nil {
 		t.Fatal(err)
-	}
-	kokoro := os.Getenv("ECHOEAR_REPLAY_KOKORO")
-	if kokoro == "" {
-		t.Fatal("set ECHOEAR_REPLAY_KOKORO to the local Kokoro model directory")
 	}
 	model := os.Getenv("ECHOEAR_BAKEOFF_MODEL")
 	if err := checkParakeetModel(model); err != nil {
@@ -37,8 +114,10 @@ func TestEndpointReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(parakeet.close)
-	clip := parakeet.transcribe
-	speculative := os.Getenv("ECHOEAR_REPLAY_SPECULATIVE") == "1"
+	if _, err := parakeet.transcribe(t.Context(), make([]byte, sampleRate*2)); err != nil {
+		t.Fatal(err)
+	}
+	kokoro := os.Getenv("ECHOEAR_REPLAY_KOKORO")
 	tts := sherpa.NewOfflineTts(&sherpa.OfflineTtsConfig{
 		Model: sherpa.OfflineTtsModelConfig{Provider: "cpu", NumThreads: 2, Kokoro: sherpa.OfflineTtsKokoroModelConfig{
 			Model: filepath.Join(kokoro, "model.onnx"), Voices: filepath.Join(kokoro, "voices.bin"),
@@ -46,245 +125,169 @@ func TestEndpointReplay(t *testing.T) {
 		}}, MaxNumSentences: 1,
 	})
 	if tts == nil {
-		t.Fatal("Kokoro unavailable")
+		t.Fatal("set ECHOEAR_REPLAY_KOKORO to the local Kokoro model directory")
 	}
 	defer sherpa.DeleteOfflineTts(tts)
-	speak := func(text string) []byte {
-		a := tts.Generate(text, 2, 1)
-		if a == nil || a.SampleRate != 24000 {
-			t.Fatal("fixture synthesis failed")
-		}
-		var pcm []byte
-		for k := 0; k+2 < len(a.Samples); k += 3 {
-			pcm = le.AppendUint16(pcm, uint16(int16(a.Samples[k]*32767)))
-			pcm = le.AppendUint16(pcm, uint16(int16((a.Samples[k+1]+a.Samples[k+2])*16383)))
-		}
-		// Strip Kokoro's variable silent tail before adding the scripted gaps.
-		const tick = endpointBytes / 2
-		seemsVoiced := func(p []byte) bool {
-			var energy int64
-			for i := 0; i < len(p); i += 2 {
-				x := int64(int16(le.Uint16(p[i:])))
-				energy += x * x
-			}
-			return energy > int64(len(p)/2)*240*240
-		}
-		start, end := 0, 0
-		for i := 0; i+tick <= len(pcm); i += tick {
-			if seemsVoiced(pcm[i : i+tick]) {
-				if end == 0 {
-					start = max(0, i-3*tick)
-				}
-				end = i + tick
-			}
-		}
-		if end == 0 {
-			t.Fatal("empty fixture")
-		}
-		return pcm[start:end]
-	}
-	silence := func(ms int) []byte { return make([]byte, sampleRate/1000*2*ms) }
-	type marker struct {
-		kind      string
-		spellings []string
-	}
-	type fixture struct {
-		before, after string
-		gap           int
-		targets       []marker
-	}
-	frogLead := "Once upon a time there was a little frog, and then"
-	frogTail := "it made a house under a purple mushroom."
-	fixtures := []fixture{
-		{"Start a timer for ninety seconds.", "", 0, []marker{{"number", []string{"ninety", "90"}}}},
-		{"Tell me a joke about Saoirse.", "", 0, []marker{{"name", []string{"saoirse"}}}},
-		{frogLead, frogTail, 700, nil}, {frogLead, frogTail, 1700, nil},
-		{frogLead, frogTail, 3200, nil}, {frogLead, frogTail, 4000, nil},
-		{"Could you set a timer for", "seventeen minutes?", 2600, []marker{{"number", []string{"seventeen", "17"}}}},
-		{"Tell me a joke about", "Siobhan and thirty-two spiders.", 3600, []marker{{"name", []string{"siobhan"}}, {"number", []string{"thirty two", "32"}}}},
-		{"Can you draw a dragon", "with blue wings and little stars?", 1700, nil},
-	}
 	type score struct {
-		early, missed    int
-		delay, finalized []int
+		early, missed, probes int
+		total, short          []int
 	}
-	type accuracy struct{ errors, count, failures int }
-	accuracyByPath := map[string]map[string]*accuracy{}
-	recordText := func(path string, markers []marker, text string, err error) {
-		if accuracyByPath[path] == nil {
-			accuracyByPath[path] = map[string]*accuracy{"name": {}, "number": {}}
+	quickOnly := tunedEndpoint
+	quickOnly.complete = quickOnly.quick
+	methods := []struct {
+		name       string
+		legacy     bool
+		board      bool
+		thresholds *endpointThresholds
+	}{
+		{name: "board-rms", legacy: true, board: true},
+		{name: "browser-rms", legacy: true},
+		{name: "before/silero-no-text"},
+		{name: "comparison/quick-all-complete", thresholds: &quickOnly},
+		{name: "after/tuned", thresholds: &tunedEndpoint},
+	}
+	scores := make([]score, len(methods))
+	for _, f := range endpointFixtures {
+		pcm := make([]byte, 250*replayBytesPerMS)
+		var spans []replaySpan
+		for _, part := range f.clauses {
+			pcm = append(pcm, make([]byte, part.gap*replayBytesPerMS)...)
+			start := len(pcm) / replayBytesPerMS
+			pcm = append(pcm, replaySpeak(t, tts, part.text, f.voice)...)
+			spans = append(spans, replaySpan{start, len(pcm) / replayBytesPerMS})
 		}
-		tokens := " " + strings.Join(replayWords(text), " ") + " "
-		for _, m := range markers {
-			s := accuracyByPath[path][m.kind]
-			if err != nil {
-				s.failures++
-			} else {
-				s.count++
-				if !slices.ContainsFunc(m.spellings, func(term string) bool { return strings.Contains(tokens, " "+term+" ") }) {
-					s.errors++
+		trueEnd := spans[len(spans)-1].end
+		pcm = append(pcm, make([]byte, 6000*replayBytesPerMS)...)
+		for i, m := range methods {
+			s := &scores[i]
+			stop := func(clip []byte) int {
+				if m.legacy {
+					return replayLegacy(clip, m.board)
+				}
+				at, probes := replaySilero(t, clip, path, m.thresholds, parakeet)
+				s.probes += probes
+				return at
+			}
+			at := stop(pcm)
+			switch {
+			case at < 0:
+				s.missed++
+			case at < trueEnd:
+				s.early++
+				t.Logf("%s %s premature by %d ms", m.name, f.name, trueEnd-at)
+			default:
+				delay := at - trueEnd
+				s.total = append(s.total, delay)
+				if f.kind == "short" {
+					s.short = append(s.short, delay)
 				}
 			}
-		}
-	}
-	scores := map[string]*score{}
-	record := func(label string, at, end int) {
-		if scores[label] == nil {
-			scores[label] = new(score)
-		}
-		s := scores[label]
-		switch {
-		case at < 0:
-			s.missed++
-		case at < end:
-			s.early++
-		default:
-			s.delay = append(s.delay, at-end)
-		}
-	}
-	recordFinal := func(label string, at, end int, start time.Time, err error) {
-		if err == nil && at >= end {
-			s := scores[label]
-			s.finalized = append(s.finalized, at-end+int(time.Since(start).Milliseconds()))
-		}
-	}
-	var fixtureID, failed int
-	for _, f := range fixtures {
-		fixtureID++
-		pcm := append(silence(250), speak(f.before)...)
-		split := len(pcm) / (sampleRate / 1000 * 2)
-		if f.after != "" {
-			pcm = append(pcm, silence(f.gap)...)
-			pcm = append(pcm, speak(f.after)...)
-		}
-		trueEnd := len(pcm) / (sampleRate / 1000 * 2)
-		pcm = append(pcm, silence(5200)...)
-		vad := newSileroVAD(path)
-		if vad == nil {
-			t.Fatal("Silero unavailable")
-		}
-		var silero utterance
-		plainAt, hintAt := -1, -1
-		ctx, stop := context.WithTimeout(t.Context(), 25*time.Second)
-		var shaped endpointPolicy
-		var probes [2]replayPauseProbe
-		pauseMS := [...]int{500, 700}
-		labels := [...]string{"silero-speculative-500", "silero-speculative-700"}
-		for i := endpointBytes; i <= len(pcm); i += endpointBytes {
-			at := i / (sampleRate / 1000 * 2)
-			if plainAt < 0 && silero.add(pcm[i-endpointBytes:i], vad, "") == endpointCommit {
-				plainAt = at
-			} else if plainAt >= 0 {
-				_ = silero.add(pcm[i-endpointBytes:i], vad, "")
-			}
-			// Compare against an optimistic text-hint timing upper bound.
-			hint := f.before
-			if at >= trueEnd && trueEnd > split {
-				hint += " " + f.after
-			}
-			if hintAt < 0 && shaped.step(time.Duration(at)*time.Millisecond, silero.policy.inVoice, hint) == endpointCommit {
-				hintAt = at
-			}
-			if speculative {
-				for j := range probes {
-					probe := &probes[j]
-					if probe.commitAt != 0 {
-						continue
+			if f.kind == "story" {
+				fragments := 0
+				// Re-arm before the next remaining clause, as if the speaker tapped
+				// Talk again immediately. This is a score, not production behavior.
+				for at >= 0 {
+					fragments++
+					if at >= trueEnd {
+						break
 					}
-					policy := silero.policy
-					if policy.inVoice {
-						*probe = replayPauseProbe{}
-					} else if policy.voiced && probe.readyAt == 0 && at-int(policy.last.Milliseconds()) >= pauseMS[j] {
-						start := time.Now()
-						probe.text, probe.err = clip(ctx, pcm[:i])
-						probe.readyAt = at + int((time.Since(start) + time.Millisecond - 1).Milliseconds())
-					}
-					var text string
-					if probe.err == nil && at >= probe.readyAt {
-						text = probe.text
-					}
-					if policy.step(time.Duration(at)*time.Millisecond, policy.inVoice, text) == endpointCommit {
-						probe.commitAt = at
-						if text == "" {
-							start := time.Now()
-							probe.text, probe.err = clip(ctx, pcm[:i])
-							probe.readyAt = at + int(time.Since(start).Milliseconds())
-						}
+					k := slices.IndexFunc(spans, func(span replaySpan) bool { return span.end > at })
+					start := max(at, spans[k].start)
+					clip := append(make([]byte, 250*replayBytesPerMS), pcm[start*replayBytesPerMS:]...)
+					next := stop(clip)
+					if next <= 250 {
+						at = -1
+					} else {
+						at = start + next - 250
 					}
 				}
+				t.Logf("%s story=%s fragments=%d", m.name, f.name, fragments)
 			}
 		}
-		vad.close()
-		browserAt, boardAt := replayLegacy(pcm, false), replayLegacy(pcm, true)
-		record("browser-rms", browserAt, trueEnd)
-		record("board-rms", boardAt, trueEnd)
-		record("silero-no-text", plainAt, trueEnd)
-		if speculative {
-			for j, probe := range probes {
-				at := probe.commitAt
-				if at == 0 {
-					at = -1
-				}
-				record(labels[j], at, trueEnd)
-				if at >= trueEnd && probe.err == nil {
-					scores[labels[j]].finalized = append(scores[labels[j]].finalized, max(at, probe.readyAt)-trueEnd)
-				}
-				recordText(labels[j], f.targets, probe.text, probe.err)
+	}
+	for i, s := range scores {
+		t.Logf("%s premature=%d/%d missed=%d end_to_commit_ms=(%s) short_ms=(%s) probes=%d",
+			methods[i].name, s.early, len(endpointFixtures), s.missed, replayPercentiles(s.total), replayPercentiles(s.short), s.probes)
+	}
+	if s := scores[len(scores)-1]; s.early != 0 || s.missed != 0 {
+		t.Errorf("tuned policy did not capture all fixtures: %d cutoffs, %d missed", s.early, s.missed)
+	}
+}
+
+func replaySpeak(t *testing.T, tts *sherpa.OfflineTts, text string, voice int) []byte {
+	t.Helper()
+	a := tts.Generate(text, voice, 1)
+	if a == nil || a.SampleRate != 24000 {
+		t.Fatal("fixture synthesis failed")
+	}
+	var pcm []byte
+	for k := 0; k+2 < len(a.Samples); k += 3 {
+		pcm = le.AppendUint16(pcm, uint16(int16(a.Samples[k]*32767)))
+		pcm = le.AppendUint16(pcm, uint16(int16((a.Samples[k+1]+a.Samples[k+2])*16383)))
+	}
+	// Trim variable silent edges at 10 ms resolution, with 30 ms lead-in.
+	const tick = endpointBytes / 2
+	start, end := 0, 0
+	for i := 0; i+tick <= len(pcm); i += tick {
+		var energy int64
+		for j := i; j < i+tick; j += 2 {
+			x := int64(int16(le.Uint16(pcm[j:])))
+			energy += x * x
+		}
+		if energy > tick/2*240*240 {
+			if end == 0 {
+				start = max(0, i-3*tick)
 			}
-			t.Logf("fixture=%d speculative_commit_ms=%d/%d", fixtureID, probes[0].commitAt, probes[1].commitAt)
+			end = i + tick
 		}
-		record("silero-oracle-text (not live)", hintAt, trueEnd)
-		end := len(pcm)
-		if plainAt >= 0 {
-			end = min(end, plainAt*32)
-		}
-		startFinal := time.Now()
-		text, err := clip(ctx, pcm[:end])
-		recordFinal("silero-no-text", plainAt, trueEnd, startFinal, err)
-		recordText("silero + whole clip", f.targets, text, err)
-		for _, tc := range []struct {
-			path string
-			stop int
-		}{{"board-rms", boardAt}, {"browser-rms", browserAt}} {
-			if tc.stop >= 0 {
+	}
+	if end == 0 {
+		t.Fatal("empty fixture")
+	}
+	return pcm[start:end]
+}
+
+func replaySilero(t *testing.T, pcm []byte, path string, cfg *endpointThresholds, stt *parakeetSTT) (int, int) {
+	t.Helper()
+	vad := newSileroVAD(path)
+	if vad == nil {
+		t.Fatal("Silero unavailable")
+	}
+	defer vad.close()
+	var p endpointPolicy
+	var readyAt time.Duration
+	var text string
+	var probes int
+	for i := endpointBytes; i <= len(pcm); i += endpointBytes {
+		at := time.Duration(i/endpointBytes) * endpointFrame
+		p.observe(at, vad.detect(pcm[i-endpointBytes:i]))
+		wait := tunedEndpoint.patient // The previous production policy had no partials.
+		if cfg != nil {
+			switch {
+			case p.inVoice:
+				readyAt, text = 0, ""
+			case readyAt == 0 && p.paused(at, cfg.probe):
 				start := time.Now()
-				got, sttErr := clip(ctx, pcm[:min(len(pcm), tc.stop*32)])
-				recordFinal(tc.path, tc.stop, trueEnd, start, sttErr)
-				recordText(tc.path+" + clip", f.targets, got, sttErr)
+				var err error
+				text, err = stt.transcribe(t.Context(), pcm[:i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				readyAt = at + time.Since(start)
+				probes++
+			}
+			if readyAt != 0 && at >= readyAt {
+				wait = cfg.silence(p, text)
 			}
 		}
-		stop()
-		if err != nil {
-			failed++
+		switch p.decision(at, wait) {
+		case endpointCommit:
+			return int(at.Milliseconds()), probes
+		case endpointDiscard:
+			return -1, probes
 		}
-		t.Logf("fixture=%d gap_ms=%d true_end_ms=%d board=%d browser=%d silero=%d hinted=%d STT_ok=%t",
-			fixtureID, f.gap, trueEnd, boardAt, browserAt, plainAt, hintAt, err == nil)
 	}
-	for method, s := range scores {
-		t.Logf("%s premature=%d/%d missed=%d end_to_endpoint_ms=%s end_to_final_ms=%s", method, s.early, len(fixtures), s.missed,
-			replayPercentiles(s.delay), replayPercentiles(s.finalized))
-	}
-	for path, acc := range accuracyByPath {
-		n, q := acc["name"], acc["number"]
-		t.Logf("%s name_errors=%d/%d number_errors=%d/%d unscored_markers=%d", path, n.errors, n.count, q.errors, q.count, n.failures+q.failures)
-	}
-	if failed != 0 {
-		t.Errorf("Silero path STT failures: %d", failed)
-	}
-}
-
-// A decode runs once per pause. Its result becomes visible on the replay's
-// audio clock after the measured wall duration; a resumed voice invalidates it.
-type replayPauseProbe struct {
-	text              string
-	err               error
-	readyAt, commitAt int
-}
-
-func replayWords(s string) []string {
-	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	})
+	return -1, probes
 }
 
 func replayPercentiles(v []int) string {
