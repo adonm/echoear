@@ -16,7 +16,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "gfx.h"
-#include "media.h"
 #include "telemetry.h"
 #include "touch_gesture.h"
 #include "wifi.h"
@@ -153,10 +152,7 @@ static void touch_task(void *arg)
         bool pressed = count && p.x < FRAME_WIDTH && p.y < FRAME_HEIGHT;
         touch_event_t event = touch_gesture_update(&gesture, pressed, p.x, p.y, now_ms());
         switch (event.kind) {
-        case TOUCH_PRESS:
-            display_wake();
-            if (!media_call_active()) media_interrupt();
-            break;
+        case TOUCH_PRESS: display_wake(); break;
         case TOUCH_TAP: ws_client_pointer("tap", event.x, event.y); break;
         case TOUCH_DRAG: ws_client_pointer("drag", event.x, event.y); break;
         case TOUCH_UP: ws_client_pointer("up", event.x, event.y); break;
