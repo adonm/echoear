@@ -48,6 +48,13 @@ func run() error {
 	data := env("XDG_DATA_HOME", filepath.Join(home, ".local/share"))
 	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
 	local := filepath.Join(data, "echoear")
+	var endpointConfig *endpointSettings
+	if path := os.Getenv("ECHOEAR_SILERO_VAD_MODEL"); path != "" {
+		if err := checkEndpointModel(path); err != nil {
+			return err
+		}
+		endpointConfig = &endpointSettings{newVAD: func() endpointVAD { return newSileroVAD(path) }, streams: make(chan struct{}, 1)}
+	}
 	ocURL, ocPassword := os.Getenv("ECHOEAR_OPENCODE_URL"), os.Getenv("ECHOEAR_OPENCODE_PASSWORD")
 	ocAPI, err := openCodeUpstream(pooledClient(), state, ocURL, ocPassword)
 	if err != nil {
@@ -120,7 +127,7 @@ func run() error {
 		return openKokoro(modelDir, min(kokoroThreads, runtime.GOMAXPROCS(0)))
 	})
 	b := &bridge{root: root, token: token, db: db, peers: peers{deviceStore(db)},
-		hex: hex, oc: oc, pairPort: pairPort, worker: worker,
+		hex: hex, endpoint: endpointConfig, oc: oc, pairPort: pairPort, worker: worker,
 		agentPath: filepath.Join(project, "agents/echoear.md"),
 		voices:    deviceVoiceStore(db, fallbackVoice),
 		virtual:   virtualStore(db), history: &chatHistory{db},

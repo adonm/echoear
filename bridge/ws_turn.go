@@ -23,6 +23,12 @@ func recordTarget(s string) (string, bool) {
 }
 
 func (h *wsHub) clearRecording(d *wsDevice) {
+	if c := d.capture; c != nil {
+		d.capture = nil
+		c.deadline.Stop()
+		c.cancel()
+		close(c.listening)
+	}
 	if d.recStopTimer != nil {
 		d.recStopTimer.Stop()
 		d.recStopTimer = nil
@@ -32,14 +38,28 @@ func (h *wsHub) clearRecording(d *wsDevice) {
 }
 
 func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, request bool) {
+	bridgeEndpoint := request && target == "" && h.b.endpoint != nil && d.caps.BridgeEndpoint
+	if bridgeEndpoint && d.queuedVoice != nil {
+		// Recording remains explicitly initiated; no automatic reopening.
+		return
+	}
 	h.wake(d, now)
-	h.cancelTurn(d, "recording")
+	if !bridgeEndpoint {
+		h.cancelTurn(d, "recording")
+	}
 	d.drawer, d.card, d.pending, d.view = "", nil, nil, nil
-	h.stopPlayback(d, true)
+	if !bridgeEndpoint || d.ttsStarted || d.awaitAck {
+		h.stopPlayback(d, true)
+	}
 	d.recAt, d.recOpen, d.recTarget, d.mic = now, !request, target, nil
 	d.recStopping, d.recIgnoreStart = false, false
 	if request {
-		h.push(d, object{"op": "rec", "action": "start", "target": target}, false)
+		start := object{"op": "rec", "action": "start", "target": target}
+		if bridgeEndpoint {
+			h.startEndpoint(d)
+			start["endpoint"] = "bridge"
+		}
+		h.push(d, start, false)
 	}
 	h.render(d, now, false)
 }
@@ -56,7 +76,7 @@ func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
 	}
 	h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
 	d.recStopping = true
-	if d.client.role == "web" {
+	if d.client.role == "web" && d.capture == nil {
 		return
 	}
 	// Keep accepting DMA packets until the board's rec_end. The timer is
@@ -94,6 +114,20 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 	if data[0] != micPrefix || !d.recOpen {
 		return
 	}
+	if c := d.capture; c != nil {
+		// Bound bytes as well as entries. The limit leaves headroom over DMA and
+		// worklet frames while preventing oversized frames from filling the queue.
+		if len(data)-1 > 2*pcmPacket {
+			h.recordingControl(d, time.Now(), true)
+			return
+		}
+		select {
+		case c.packets <- micPacket{data[1:], time.Now()}:
+		default:
+			h.recordingControl(d, time.Now(), true)
+		}
+		return
+	}
 	room := (maxPCM - len(d.mic)) &^ 1
 	n := min(len(data)-1, room)
 	d.mic = append(d.mic, data[1:1+n]...)
@@ -108,6 +142,10 @@ func (h *wsHub) stopRecordingAtLimit(d *wsDevice, now time.Time) {
 }
 
 func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
+	if d.capture != nil && !ev.Cancelled {
+		h.finishEndpoint(d, now)
+		return
+	}
 	pcm, target := d.mic, d.recTarget
 	if requested, ok := recordTarget(ev.Target); ok && requested != "" {
 		target = requested
@@ -140,6 +178,10 @@ func (h *wsHub) cancelTurn(d *wsDevice, reason string) {
 }
 
 func (h *wsHub) cancelLocalTurn(d *wsDevice) {
+	if c := d.queuedVoice; c != nil {
+		d.queuedVoice = nil
+		c.cancel()
+	}
 	d.turn++
 	d.trace = nil
 	d.busy = false
@@ -217,6 +259,12 @@ func (h *wsHub) finishTurn(d *wsDevice, id uint64, view *sceneView, audio *Audio
 	if d.stopAudio == nil && d.cancel != nil {
 		d.cancel()
 		d.cancel = nil
+	}
+	if d.queuedVoice != nil {
+		d.trace = nil
+		if h.maybeStartVoice(d, now) {
+			return
+		}
 	}
 	h.render(d, now, false)
 	d.trace = nil
@@ -436,6 +484,7 @@ func (h *wsHub) playTraced(d *wsDevice, stream *AudioStream, trace *turnTrace, t
 			d.cancel()
 			d.cancel = nil
 		}
+		h.maybeStartVoice(d, time.Now())
 	}()
 	return ctx
 }
@@ -459,6 +508,16 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 		if i == 0 {
 			stream.traceFirst(trace, ttsStart)
 			h.mu.Lock()
+			for h.active(d) && d.audio == id && ctx.Err() == nil && d.capture != nil {
+				listening := d.capture.listening
+				h.mu.Unlock()
+				select {
+				case <-listening:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				h.mu.Lock()
+			}
 			if !h.active(d) || d.audio != id || ctx.Err() != nil {
 				h.mu.Unlock()
 				return context.Canceled
@@ -524,11 +583,15 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 
 func (d *wsDevice) measureAmbient(pcm []byte) {
 	if rms, ok := ambientRMS(pcm); ok {
-		if d.hasAmbient {
-			d.ambientEMA += 0.45 * (rms - d.ambientEMA)
-		} else {
-			d.ambientEMA, d.hasAmbient = rms, true
-		}
+		d.updateAmbient(rms)
+	}
+}
+
+func (d *wsDevice) updateAmbient(rms float64) {
+	if d.hasAmbient {
+		d.ambientEMA += 0.45 * (rms - d.ambientEMA)
+	} else {
+		d.ambientEMA, d.hasAmbient = rms, true
 	}
 }
 
@@ -562,7 +625,9 @@ func (h *wsHub) playbackDone(d *wsDevice, now time.Time) {
 		d.view, d.pending = d.pending, nil
 	}
 	d.last = now
-	h.render(d, now, false)
+	if !h.maybeStartVoice(d, now) {
+		h.render(d, now, false)
+	}
 }
 
 type wsReceipt struct {

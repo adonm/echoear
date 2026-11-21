@@ -25,6 +25,7 @@ type bridge struct {
 	agentPath string
 	peers     peers
 	hex       hexClient
+	endpoint  *endpointSettings
 	oc        *openCode
 	pairPort  int
 	worker    *synthWorker

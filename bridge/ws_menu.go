@@ -126,6 +126,12 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 				h.startRecording(d, target, now, false)
 			}
 		}
+	case "rec_request": // A virtual web cat uses the same bridge-owned handshake as a board.
+		if c.role == "web" && c.device == d && d.caps.BridgeEndpoint && h.b.endpoint != nil && d.recAt.IsZero() {
+			if target, ok := recordTarget(ev.Target); ok && target == "" {
+				h.startRecording(d, target, now, true)
+			}
+		}
 	case "rec_end":
 		d.recIgnoreStart, d.recTail = false, false
 		if !d.recAt.IsZero() {
@@ -264,6 +270,10 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		}
 	case "rec-cancel", "rec-send":
 		h.recordingControl(d, now, a.kind == "rec-cancel")
+	case "rec-continue":
+		if d.busy && d.recAt.IsZero() && d.caps.BridgeEndpoint && h.b.endpoint != nil {
+			h.startRecording(d, "", now, true)
+		}
 	case "stop":
 		h.tapStop(d, now)
 	case "cat":

@@ -53,14 +53,15 @@ func (s *sceneView) button(id, name string, a sceneAction, x, y, w, h int, art s
 }
 
 type catPose struct {
-	mood     string
-	blink    bool
-	dot      int
-	stopTaps int
-	battery  int
-	charge   bool
-	volume   int
-	meter    bool
+	mood        string
+	blink       bool
+	dot         int
+	stopTaps    int
+	canContinue bool
+	battery     int
+	charge      bool
+	volume      int
+	meter       bool
 }
 
 func catChrome(cat catState, pose catPose) sceneView {
@@ -123,6 +124,9 @@ func catChrome(cat catState, pose catPose) sceneView {
 				radius, color = 5, "#F59E0B"
 			}
 			s.art += svgCircle(124+12*i, 50, radius, color)
+		}
+		if pose.canContinue {
+			s.control(bounds{120, 244, 120, 42}, actionTile("rec-continue", "Say more", "", answerPalette))
 		}
 		s.stopControl(pose.stopTaps)
 	case "speaking":
