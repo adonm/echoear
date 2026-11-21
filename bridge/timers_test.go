@@ -228,7 +228,7 @@ func TestTimerRestartPrunesAndFiresOnce(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	m.fire(ids[0])
+	m.fire(ids[0], nil)
 	if events, err := b.history.list(t.Context(), device); err != nil || len(events) != 1 {
 		t.Fatal("fired again", events, err)
 	}
@@ -253,12 +253,12 @@ func TestTimerClaimRetriesAfterDatabaseError(t *testing.T) {
 	if _, err := b.db.Exec("ALTER TABLE timers RENAME TO paused_timers"); err != nil {
 		t.Fatal(err)
 	}
-	b.timers.fire(timer.ID)
+	b.timers.fire(timer.ID, nil)
 	if _, err := b.db.Exec("ALTER TABLE paused_timers RENAME TO timers"); err != nil {
 		t.Fatal(err)
 	}
 	board.until(t, hasWS("chime", `"kind":"intercom"`))
-	b.timers.fire(timer.ID)
+	b.timers.fire(timer.ID, nil)
 	left, err := b.timers.list(t.Context(), id)
 	if err != nil || len(left) != 0 {
 		t.Fatalf("retry did not consume timer: %v (%v)", left, err)
@@ -308,7 +308,7 @@ func TestTimerWakeAgentGuard(t *testing.T) {
 	timer := patchTimerTest(t, base, args, false)
 	// Invoke the real callback now rather than waiting 30 seconds.
 	finished := make(chan struct{})
-	go func() { defer close(finished); b.timers.fire(str(timer["id"])) }()
+	go func() { defer close(finished); b.timers.fire(str(timer["id"]), nil) }()
 	select {
 	case got := <-prompt:
 		if got != "[Cake (echoear-timer) · hardware · timer]\nTimer fired: Timer" {

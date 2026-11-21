@@ -39,7 +39,7 @@ type timerManager struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	mu      sync.Mutex
-	handles map[string]*time.Timer
+	handles map[string]*timerHandle
 	wg      sync.WaitGroup
 	closed  bool
 	// HTTP MCP calls do not carry a trusted OpenCode session ID. Reject
@@ -47,11 +47,13 @@ type timerManager struct {
 	fromTimerTurn map[string]int
 }
 
+type timerHandle struct{ timer *time.Timer }
+
 const timerColumns = "id,device_id,label,say,chime,wake_agent,created_at,fire_at,notes_json,app_name"
 
 func newTimerManager(b *bridge) *timerManager {
 	ctx, cancel := context.WithCancel(b.root)
-	return &timerManager{b: b, ctx: ctx, cancel: cancel, handles: make(map[string]*time.Timer), fromTimerTurn: make(map[string]int)}
+	return &timerManager{b: b, ctx: ctx, cancel: cancel, handles: make(map[string]*timerHandle), fromTimerTurn: make(map[string]int)}
 }
 
 func scanTimer(r rowScanner) (savedTimer, error) {
@@ -101,7 +103,8 @@ func (t savedTimer) state(now time.Time) object {
 		notes = []string{}
 	}
 	return object{"id": t.ID, "device_id": t.DeviceID, "label": t.Label, "say": t.Say, "notes": notes,
-		"app": t.AppName, "wake_agent": t.WakeAgent, "fire_at": t.FireAt, "remaining_s": (remaining + time.Second - 1) / time.Second}
+		"app": t.AppName, "wake_agent": t.WakeAgent, "created_at": t.CreatedAt, "chime": t.Chime,
+		"fire_at": t.FireAt, "remaining_s": (remaining + time.Second - 1) / time.Second}
 }
 
 func (b *bridge) timerState(ctx context.Context, id string, now time.Time) ([]object, error) {
@@ -149,10 +152,14 @@ func (m *timerManager) restore(now time.Time) error {
 }
 
 func parseTimer(args object, now time.Time) (savedTimer, error) {
-	t := savedTimer{DeviceID: str(args["device_id"]), CreatedAt: now.UTC(), Label: "Timer", Chime: "celebrate"}
+	t := savedTimer{ID: randomHex(12), DeviceID: str(args["device_id"]), CreatedAt: now.UTC(), Label: "Timer", Chime: "celebrate"}
+	return editTimer(t, args, now, false)
+}
+
+func editTimer(t savedTimer, args object, now time.Time, update bool) (savedTimer, error) {
 	seconds, err := mcpUint(args, "in_seconds")
 	at, atSet := args["at"]
-	if err != nil || atSet == (seconds != nil) {
+	if err != nil || atSet && seconds != nil || !update && !atSet && seconds == nil {
 		return t, problem(400, "Provide exactly one of in_seconds or at")
 	}
 	if seconds != nil {
@@ -160,7 +167,7 @@ func parseTimer(args object, now time.Time) (savedTimer, error) {
 			return t, problem(400, "in_seconds must be 1–86400")
 		}
 		t.FireAt = now.Add(time.Duration(*seconds) * time.Second).UTC()
-	} else {
+	} else if atSet {
 		t.FireAt, err = time.Parse(time.RFC3339, str(at))
 		delay := t.FireAt.Sub(now)
 		if err != nil || delay <= 0 || delay > 24*time.Hour {
@@ -173,16 +180,26 @@ func parseTimer(args object, now time.Time) (savedTimer, error) {
 			return t, problem(400, "Expected boolean wake_agent")
 		}
 	}
-	if t.WakeAgent && (seconds == nil || *seconds < 30) {
+	if t.WakeAgent && (atSet || seconds != nil && *seconds < 30 ||
+		seconds == nil && args["wake_agent"] == true && t.FireAt.Sub(now) < 30*time.Second) {
 		return t, problem(400, "wake_agent requires in_seconds of at least 30")
 	}
-	if label := shortText(args["label"], 60, true); label != "" {
-		t.Label = label
+	if raw, set := args["label"]; set {
+		if t.Label = shortText(raw, 60, true); t.Label == "" {
+			t.Label = "Timer"
+		}
 	}
-	if _, present := args["say"]; present {
-		t.Say, err = spokenText(str(args["say"]))
-		if err != nil {
-			return t, err
+	if raw, present := args["say"]; present {
+		s, ok := raw.(string)
+		if !ok {
+			return t, fieldError("timer.say", "expected a string")
+		}
+		t.Say = ""
+		if s != "" || !update {
+			t.Say, err = spokenText(s)
+			if err != nil {
+				return t, err
+			}
 		}
 	}
 	if _, present := args["chime"]; present {
@@ -191,18 +208,78 @@ func parseTimer(args object, now time.Time) (savedTimer, error) {
 			return t, problem(400, "Unknown chime kind")
 		}
 	}
-	t.ID = randomHex(12)
 	if raw, present := args["notes"]; present {
-		t.Notes, _, err = melodyInput(raw, "timer.notes")
-		if err != nil {
-			return t, err
+		if a, ok := raw.([]any); update && ok && len(a) == 0 {
+			t.Notes = nil
+		} else {
+			t.Notes, _, err = melodyInput(raw, "timer.notes")
+			if err != nil {
+				return t, err
+			}
 		}
 	}
 	if raw, present := args["app"]; present {
-		t.AppName = str(raw)
-		if !slugRE.MatchString(t.AppName) {
+		var ok bool
+		t.AppName, ok = raw.(string)
+		if !ok || (!update || t.AppName != "") && !slugRE.MatchString(t.AppName) {
 			return t, fieldError("timer.app", "expected a saved app name")
 		}
+	}
+	return t, nil
+}
+
+func (m *timerManager) update(ctx context.Context, id, device string, args object, now time.Time) (savedTimer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var t savedTimer
+	if m.closed {
+		return t, problem(503, "Timers unavailable")
+	}
+	// A library rename can also change app_name; read and update atomically.
+	tx, err := m.b.db.BeginTx(ctx, nil)
+	unavailable := problem(502, "Cannot update timer")
+	if err != nil {
+		return t, unavailable
+	}
+	defer tx.Rollback()
+	t, err = scanTimer(tx.QueryRowContext(ctx, "SELECT "+timerColumns+" FROM timers WHERE id=?", id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return t, problem(404, "Timer not found")
+	}
+	if err != nil {
+		return t, unavailable
+	}
+	if device != t.DeviceID {
+		return t, problem(403, "Device out of scope")
+	}
+	before := t.FireAt
+	t, err = editTimer(t, args, now, true)
+	if err != nil {
+		return t, err
+	}
+	if t.WakeAgent && m.fromTimerTurn[strings.ToLower(t.DeviceID)] != 0 {
+		return t, problem(409, "Cannot schedule a wake-agent timer during a timer-triggered turn")
+	}
+	if t.AppName != "" {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM apps WHERE name=?)", t.AppName).Scan(&exists); err != nil {
+			return t, unavailable
+		}
+		if !exists {
+			return t, problem(404, "App not found")
+		}
+	}
+	notes, _ := json.Marshal(t.Notes)
+	if _, err := tx.ExecContext(ctx, `UPDATE timers SET label=?,say=?,chime=?,wake_agent=?,fire_at=?,notes_json=?,app_name=? WHERE id=?`,
+		t.Label, t.Say, t.Chime, t.WakeAgent, t.FireAt.Format(time.RFC3339Nano), string(notes), t.AppName, id); err != nil {
+		return t, unavailable
+	}
+	if err := tx.Commit(); err != nil {
+		return t, unavailable
+	}
+	if !before.Equal(t.FireAt) || m.handles[id] == nil {
+		m.stopLocked(id)
+		m.armLocked(id, time.Until(t.FireAt))
 	}
 	return t, nil
 }
@@ -243,15 +320,17 @@ func (m *timerManager) set(ctx context.Context, t savedTimer) error {
 
 func (m *timerManager) armLocked(id string, delay time.Duration) {
 	m.wg.Add(1)
-	m.handles[id] = time.AfterFunc(delay, func() {
+	handle := &timerHandle{}
+	m.handles[id] = handle
+	handle.timer = time.AfterFunc(delay, func() {
 		defer m.wg.Done()
-		m.fire(id)
+		m.fire(id, handle)
 	})
 }
 
 func (m *timerManager) stopLocked(id string) {
 	if handle := m.handles[id]; handle != nil {
-		if handle.Stop() {
+		if handle.timer.Stop() {
 			m.wg.Done()
 		}
 		delete(m.handles, id)
@@ -269,10 +348,10 @@ func (m *timerManager) close() {
 	m.wg.Wait()
 }
 
-func (m *timerManager) claim(id string) (savedTimer, bool) {
+func (m *timerManager) claim(id string, expected *timerHandle) (savedTimer, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.closed || m.handles[id] == nil {
+	if handle := m.handles[id]; m.closed || handle == nil || expected != nil && expected != handle {
 		return savedTimer{}, false
 	}
 	t, err := scanTimer(m.b.db.QueryRowContext(m.ctx, "DELETE FROM timers WHERE id=? RETURNING "+timerColumns, id))
@@ -295,8 +374,8 @@ func (m *timerManager) claim(id string) (savedTimer, bool) {
 	return t, true
 }
 
-func (m *timerManager) fire(id string) {
-	t, ok := m.claim(id)
+func (m *timerManager) fire(id string, expected *timerHandle) {
+	t, ok := m.claim(id, expected)
 	if !ok {
 		return
 	}
@@ -490,6 +569,23 @@ func (b *bridge) patchTimer(ctx context.Context, id string, args object) (object
 		}
 		b.timerUpdate(id)
 		return object{"device_id": id, "id": timerID, "all": all, "cancelled": true}, nil
+	case "update":
+		timerID := str(args["id"])
+		_, hasAll := args["all"]
+		fields := len(args) - 2
+		if _, present := args["device_id"]; present {
+			fields--
+		}
+		if !timerIDRE.MatchString(timerID) || hasAll || fields < 1 {
+			return nil, fieldError("timer", "update requires id and at least one field to change")
+		}
+		now := time.Now()
+		t, err := m.update(ctx, timerID, id, args, now)
+		if err != nil {
+			return nil, err
+		}
+		b.timerUpdate(id)
+		return t.state(now), nil
 	}
 	return nil, problem(400, "Unknown timer operation")
 }

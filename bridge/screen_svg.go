@@ -420,6 +420,16 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 }
 
 func defaultFaceSVG(faceBG, markColor, accentColor string, configured bool) string {
+	return defaultFaceArtwork(faceBG, markColor, accentColor, configured, true)
+}
+
+func defaultFaceArtwork(faceBG, markColor, accentColor string, configured, tagged bool) string {
+	part := func(name, art string) string {
+		if !tagged {
+			return art
+		}
+		return `<g data-part="` + name + `">` + art + `</g>`
+	}
 	mark := `<circle cx="167" cy="79" r="3"/><circle cx="180" cy="79" r="3"/><circle cx="193" cy="79" r="3"/>`
 	if configured {
 		mark = `<rect x="147" y="66" width="14" height="24" rx="7"/>
@@ -427,55 +437,58 @@ func defaultFaceSVG(faceBG, markColor, accentColor string, configured bool) stri
     <rect x="199" y="66" width="14" height="24" rx="7"/>`
 	}
 	const smile = `<path d="M144 198 Q160 225 180 201 Q200 225 216 198" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>`
+	thinkEyes := `<rect x="95" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
+    <circle cx="107" cy="134" r="5" fill="#FFFAEE"/>`
+	const wink = `<path d="M231 144H265" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>`
+	const thinkMouth = `<path d="M168 205L192 200" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>`
+	think := part("eyes", thinkEyes+wink) + part("mouth", thinkMouth)
+	if !tagged {
+		think = thinkEyes + `<path d="M231 144H265 M168 205L192 200" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>`
+	}
+	forehead := fmt.Sprintf(`<g fill="%s">%s</g>`, html.EscapeString(markColor), mark)
+	cheeks := fmt.Sprintf(`<g fill="%s" opacity="0.48"><ellipse cx="103" cy="211" rx="14" ry="8"/><ellipse cx="257" cy="211" rx="14" ry="8"/></g>`,
+		html.EscapeString(accentColor))
 	return fmt.Sprintf(svgStart+`
   <rect width="360" height="360" fill="%s"/>
-  <g fill="%s">
-    %s
-  </g>
-  <path d="M38 177L87 188 M41 212L87 199 M273 188L322 177 M273 199L319 212" fill="none" stroke="#1A1926" stroke-width="6" stroke-linecap="round"/>
-  <g fill="%s" opacity="0.48">
-    <ellipse cx="103" cy="211" rx="14" ry="8"/>
-    <ellipse cx="257" cy="211" rx="14" ry="8"/>
-  </g>
-  <rect x="165" y="163" width="30" height="17" rx="8" fill="#1A1926"/>
+  %s%s%s%s
   <g data-pose="idle">
-    <rect x="95" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
-    <rect x="231" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
-    <circle cx="107" cy="134" r="5" fill="#FFFAEE"/>
-    <circle cx="243" cy="134" r="5" fill="#FFFAEE"/>
-    %s
+    %s%s
   </g>
   <g data-pose="blink">
-    <path d="M95 142H129 M231 142H265" fill="none" stroke="#1A1926" stroke-width="8" stroke-linecap="round"/>
-    %s
+    %s%s
   </g>
   <g data-pose="talk">
-    <path d="M93 149Q112 119 131 149 M229 149Q248 119 267 149" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>
-    <rect x="143" y="190" width="74" height="39" rx="19" fill="#1A1926"/>
-    <ellipse cx="180" cy="220" rx="15" ry="5" fill="#F47E92"/>
+    %s%s
   </g>
   <g data-pose="listen">
-    <ellipse cx="112" cy="142" rx="20" ry="22" fill="#1A1926"/>
-    <ellipse cx="248" cy="142" rx="20" ry="22" fill="#1A1926"/>
-    <circle cx="107" cy="133" r="5" fill="#FFFAEE"/>
-    <circle cx="243" cy="133" r="5" fill="#FFFAEE"/>
-    <circle cx="180" cy="205" r="12" fill="#1A1926"/>
+    %s%s
   </g>
   <g data-pose="think">
-    <rect x="95" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
-    <circle cx="107" cy="134" r="5" fill="#FFFAEE"/>
-    <path d="M231 144H265 M168 205L192 200" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>
+    %s
     <g fill="#1A1926">
       <circle cx="163" cy="252" r="4"/><circle cx="180" cy="245" r="4"/><circle cx="197" cy="252" r="4"/>
     </g>
   </g>
   <g data-pose="sleep">
-    <path d="M92 139Q112 166 132 139 M228 139Q248 166 268 139" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>
-    %s
+    %s%s
     <text x="215" y="113" fill="#1A1926" font-weight="bold" font-size="16">z</text>
     <text x="233" y="100" fill="#1A1926" font-weight="bold" font-size="24">Z</text>
   </g>
-</svg>`, html.EscapeString(faceBG), html.EscapeString(markColor), mark, html.EscapeString(accentColor), smile, smile, smile)
+</svg>`, html.EscapeString(faceBG), part("forehead", forehead),
+		part("whiskers", `<path d="M38 177L87 188 M41 212L87 199 M273 188L322 177 M273 199L319 212" fill="none" stroke="#1A1926" stroke-width="6" stroke-linecap="round"/>`),
+		part("cheeks", cheeks), part("nose", `<rect x="165" y="163" width="30" height="17" rx="8" fill="#1A1926"/>`),
+		part("eyes", `<rect x="95" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
+    <rect x="231" y="123" width="34" height="38" rx="17" fill="#1A1926"/>
+    <circle cx="107" cy="134" r="5" fill="#FFFAEE"/>
+    <circle cx="243" cy="134" r="5" fill="#FFFAEE"/>`), part("mouth", smile),
+		part("eyes", `<path d="M95 142H129 M231 142H265" fill="none" stroke="#1A1926" stroke-width="8" stroke-linecap="round"/>`), part("mouth", smile),
+		part("eyes", `<path d="M93 149Q112 119 131 149 M229 149Q248 119 267 149" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>`),
+		part("mouth", `<rect x="143" y="190" width="74" height="39" rx="19" fill="#1A1926"/><ellipse cx="180" cy="220" rx="15" ry="5" fill="#F47E92"/>`),
+		part("eyes", `<ellipse cx="112" cy="142" rx="20" ry="22" fill="#1A1926"/><ellipse cx="248" cy="142" rx="20" ry="22" fill="#1A1926"/>
+    <circle cx="107" cy="133" r="5" fill="#FFFAEE"/><circle cx="243" cy="133" r="5" fill="#FFFAEE"/>`),
+		part("mouth", `<circle cx="180" cy="205" r="12" fill="#1A1926"/>`), think,
+		part("eyes", `<path d="M92 139Q112 166 132 139 M228 139Q248 166 268 139" fill="none" stroke="#1A1926" stroke-width="7" stroke-linecap="round"/>`),
+		part("mouth", smile))
 }
 
 func parseFaceSVG(raw string) (*svgNode, error) {
