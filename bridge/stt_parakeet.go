@@ -65,7 +65,7 @@ func (b *bridge) probeSTT(r *http.Request) (object, error) {
 	return object{"transcript": text, "stt_ms": time.Since(start).Milliseconds(), "clip_ms": len(pcm) * 1000 / (2 * sampleRate)}, nil
 }
 
-// Match the EchoEar WAV padding, then Hex's 1.5 s minimum and 400 ms
+// Match Lark's WAV padding, then Hex's 1.5 s minimum and 400 ms
 // trailing silence for Unified EN. Already-16 kHz mono audio is not resampled.
 func parakeetSamples(pcm []byte) []float32 {
 	const pad = sampleRate * 150 / 1000

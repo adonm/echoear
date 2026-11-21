@@ -1,5 +1,5 @@
 ---
-description: Proposes one scoped EchoEar app revision or face edit
+description: Proposes one scoped Lark app revision or face edit
 mode: primary
 permissions:
   - action: "*"

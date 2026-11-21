@@ -1,0 +1,41 @@
+Lark
+
+Lark's source code is licensed under the Apache License, Version 2.0
+(see LICENSE). Third-party software and model weights keep their own terms.
+
+Browser:
+* Oat 1.1.0 — MIT, Copyright (c) 2026 Kailash Nadh.
+  https://unpkg.com/@knadh/oat@1.1.0/LICENSE
+* HTMX 4.0.2 — Zero-Clause BSD (0BSD).
+  https://unpkg.com/htmx.org@4.0.2/LICENSE
+
+Speech:
+* sherpa-onnx and its Go bindings — Apache-2.0; ONNX Runtime — MIT.
+  https://github.com/k2-fsa/sherpa-onnx
+  https://github.com/microsoft/onnxruntime
+* eSpeak NG — GPLv3. The sherpa-onnx-go v1.13.8 native libraries bundle
+  eSpeak NG; the Kokoro package also includes eSpeak NG data. These
+  components are not covered by Lark's Apache-2.0 license. Redistributors
+  must follow the applicable GPL terms for the bundled components.
+  https://github.com/espeak-ng/espeak-ng
+* Kokoro model weights — Apache-2.0. This does not cover accompanying
+  third-party phonemizer data.
+  https://huggingface.co/hexgrad/Kokoro-82M
+* transcribe.cpp, GGML, and Silero VAD — MIT.
+  https://github.com/anomalyco/transcribe.cpp
+  https://github.com/ggml-org/ggml
+  https://github.com/snakers4/silero-vad
+* Parakeet Unified EN 0.6B Q8_0 GGUF — the quantizer's pinned model
+  card labels the conversion CC BY 4.0; NVIDIA lists the NVIDIA Open
+  Model License Agreement for the base model. Consult both before
+  redistributing the weights.
+  https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/tree/7e948f21b7bdbac698d3318db9d350f1096f3b6c
+  https://huggingface.co/nvidia/parakeet-unified-en-0.6b
+
+Optional components:
+* Ente CLI — AGPLv3; the photo integration invokes the separately installed,
+  unmodified executable.
+  https://github.com/ente-io/ente
+* espressif/esp-sr 2.4.0 — ESPRESSIF MIT License, restricted to Espressif
+  products. The round-board firmware uses it for optional WakeNet support.
+  https://components.espressif.com/components/espressif/esp-sr/versions/2.4.0/license

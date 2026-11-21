@@ -1,8 +1,8 @@
 # Local STT bake-off
 
-**EchoEar runs in-process Parakeet Vulkan for push-to-talk and whole-clip captions.**
+**Lark runs in-process Parakeet Vulkan for push-to-talk and whole-clip captions.**
 It uses the same engine and weights as Hex 3.4.0, ran headless on the RX 6600,
-and was within 1.5× of Hex's fast whole-clip median. EchoEar no longer
+and was within 1.5× of Hex's fast whole-clip median. Lark no longer
 uses the Hex service, HTTP API, streaming, or settings. The measurements below
 retain Hex as a historical baseline. Capable clients now use
 [Silero endpointing with speculative local decoding](turn-taking.md).
@@ -15,7 +15,7 @@ retain Hex as a historical baseline. Capable clients now use
 | Precision and engine | `transcribe.cpp` 0.4.1 fork at `bcb639faa4c74a2300ba19e30360cb2355b1663a`, ggml/Vulkan encoder + one CPU decoder thread; GGUF Q8_0 (225 Q8_0, 688 F32, 48 F16 tensors) | Same source revision, compiler options for the backend/shader subset and GGUF; one decoder thread | FP32 or ONNX dynamic int8, which is not ggml's block quantization; CPU only |
 | Head and search | Full attention for whole clips; greedy RNN-T (no beam or LM), up to 10 symbols/encoder frame; not TDT/CTC | Same | Full attention offline and greedy RNN-T, likewise up to 10 symbols/frame; different runtime, numerics and frontend |
 | Streaming | Buffered `(left, chunk, right) = (5.60, 1.04, 1.04)` s; ≥2.08 s initial window, carries RNN-T state; native finalize adds 1.04 s of right context, and Hex feeds 0.4 s model padding | No live stream; full attention on the available clip | Buffered presets `240/560/1120 ms` specify **chunk + right**, not chunk: `(5.60,.08,.16)`, `(5.60,.16,.40)`, `(5.60,.56,.56)` s. Not Hex's largest preset. |
-| PCM and VAD | Mono 16 kHz input, s16 `/32768`; no resample for bridge PCM. Whole-clip: EchoEar adds 150 ms at each end of voiced PCM; Hex pads to ≥1.5 s and appends another 400 ms. No VAD or segmentation before decoding the measured whole clips; keyboard dictation and meetings are separate paths. | Same PCM scaling and padding; no added VAD in STT | Same source PCM, without bridge/Hex clip padding in the CPU runs. No programmatic VAD used. |
+| PCM and VAD | Mono 16 kHz input, s16 `/32768`; no resample for bridge PCM. Whole-clip: Lark adds 150 ms at each end of voiced PCM; Hex pads to ≥1.5 s and appends another 400 ms. No VAD or segmentation before decoding the measured whole clips; keyboard dictation and meetings are separate paths. | Same PCM scaling and padding; no added VAD in STT | Same source PCM, without bridge/Hex clip padding in the CPU runs. No programmatic VAD used. |
 | Features | 128-bin Slaney log mel, 512 FFT, 25 ms Hann / 10 ms hop, pre-emphasis 0.97, 0–8 kHz, constant STFT pad, per-feature normalization. GGUF metadata stores `dither=1e-5`, but the runtime does not pass it to `MelConfig` (no added noise). | Same code and metadata | NeMo metadata selects 128 bins and per-feature normalization (over each window in streaming); 25/10 ms, 0.97 pre-emphasis, no dither. Kaldi-native/librosa feature implementation is not identical. |
 | Text | English-only model; no runtime language hint; model outputs casing/punctuation. Raw API, no LLM formatting. Hex trims whitespace, keeps the repetition guard's partial result, and strips known trailing subtitle credits. Host vocabulary biasing is off. | Same tested raw output path and filter, no Hex settings import | Model-native English casing/punctuation, no Hex filters or vocabulary rescoring. Accuracy equivalence not established. |
 

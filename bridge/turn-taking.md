@@ -1,6 +1,6 @@
 # Bridge endpointing
 
-EchoEar keeps the mic open through thinking pauses and uses local transcription
+Lark keeps the mic open through thinking pauses and uses local transcription
 to decide when to send. **Send** ends recording now; **Cancel** discards it.
 Clients without bridge endpoint support keep their own VAD.
 
@@ -79,7 +79,7 @@ and completed successfully:
   followed. Admission did not guard against a tool already starting.
 
 The API did not establish safe merge/replace behavior at the audio/tool
-boundary. EchoEar keeps the gated follow-up; it does not send `steer` or
+boundary. Lark keeps the gated follow-up; it does not send `steer` or
 auto-replay a prompt after publishing audio or running tools. No production
 session received a probe.
 
@@ -117,7 +117,7 @@ decodes across the 40 fixtures (one per detected pause ≥600 ms).
 | Telling cat | 3 / 3 | 1 | 1 |
 
 Re-arm starts before the next remaining clause and is only for counting
-fragments; EchoEar never automatically reopens the mic.
+fragments; Lark never automatically reopens the mic.
 
 Run with the `stage` prefix from the [STT build](stt-speed.md#build-and-reproduction):
 

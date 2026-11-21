@@ -528,3 +528,8 @@ Devices and browsers need TCP **8765** to the bridge; direct OTA uses TCP
 **80** to the device. Use Avahi (`avahi-resolve -n echoear-XXXX.local`) for
 mDNS or the device IP if the container cannot resolve `.local`. HTTP and WS
 are unencrypted; use a trusted LAN and keep configs and firmware images private.
+
+## License
+
+Lark's source code is [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for
+third-party software and model licenses.

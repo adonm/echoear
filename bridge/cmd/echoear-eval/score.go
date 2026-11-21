@@ -1,4 +1,4 @@
-// echoear-eval scores EchoEar's private OpenCode histories without printing text.
+// echoear-eval scores Lark's private OpenCode histories without printing text.
 package main
 
 import (
