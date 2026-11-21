@@ -274,11 +274,45 @@ func TestCatToolAndLiveFace(t *testing.T) {
 	}
 }
 
+func TestVirtualCharacterFollowsCatName(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.virtual = virtualStore(b.db)
+	})
+	v := testObject(t, testRequest(t, "POST", base+"/api/virtual-clients", "unit", object{"character": "Starter"}, 201))
+	id := str(v["id"])
+	path := base + "/api/devices/" + id + "/cat"
+	assertNames := func(want string) {
+		t.Helper()
+		var character, name string
+		if err := b.db.QueryRow(`SELECT v.character,c.name FROM virtual_clients v
+			JOIN cats c ON c.device_id=v.id WHERE v.id=?`, id).Scan(&character, &name); err != nil {
+			t.Fatal(err)
+		}
+		if character != want || name != want {
+			t.Fatalf("virtual character = %q, cat name = %q; want both %q", character, name, want)
+		}
+	}
+	assertNames("Starter")
+	testRequest(t, "POST", path, "unit", object{"name": "Milo"}, 200)
+	assertNames("Milo")
+	testRequest(t, "POST", path, "unit", object{"name": "Cleo"}, 200)
+	assertNames("Cleo")
+	entry := newChat("user", "You", "Hi", "typed")
+	b.history.add(id, entry)
+	testRequest(t, "POST", path, "unit", object{"slug": "milo"}, 200)
+	assertNames("Milo")
+	if got, err := b.history.list(t.Context(), id); err != nil || len(got) != 1 || got[0].ID != entry.ID {
+		t.Fatal("assignment changed the device's history", err)
+	}
+	toolTest(t, base, "patch", object{"device_id": id, "cat": object{"op": "reset_blank"}}, false)
+	assertNames("New Cat")
+}
+
 func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.virtual = virtualStore(b.db)
 		b.voices = deviceVoiceStore(b.db, heartVoice)
-		b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
+		b.oc = testOpenCodeOnDB(t, b.root, dir, b.db, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_reset/interrupt" {
 				fmt.Fprint(w, `{"data":{"interrupted":false}}`)
 				return
@@ -302,6 +336,9 @@ func TestCatResetArchivesAndClearsScene(t *testing.T) {
 	}
 	if sid, err := b.oc.get(id); err != nil || sid != "" {
 		t.Fatal("reset did not clear active session mapping", sid, err)
+	}
+	if v, ok := b.virtualByID(id); !ok || v.Character != "New Cat" {
+		t.Fatal("reset did not update virtual client character", v.Character)
 	}
 	profiles := apiObjects(t, base+"/api/cats", "cats")
 	if len(profiles) != 1 || profiles[0].(object)["name"] != "Keepsake" || profiles[0].(object)["face_bg"] != "#7BE3C6" || profiles[0].(object)["voice"] != fableVoice {

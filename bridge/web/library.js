@@ -132,7 +132,7 @@ async function loadSavedCats() {
           const result = await api(current, `/api/devices/${encodeURIComponent(selected.id)}/cat`,
             {method:"POST", body:{slug:profile.slug}});
           if (state.app === current) updateCat({...result, character:result.cat.name, voice:result.cat.voice});
-          if (state.view === selected) say("saved-cat-note", `Loaded ${profile.name}.`);
+          if (state.view === selected) say("saved-cat-note", `Assigned ${profile.name}. Chat history kept.`);
         } catch {
           if (state.view === selected) say("saved-cat-note", "Could not load that cat.");
         }

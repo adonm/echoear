@@ -15,6 +15,11 @@ import (
 
 func testOpenCode(t *testing.T, ctx context.Context, dir string, handle http.HandlerFunc) *openCode {
 	t.Helper()
+	return testOpenCodeOnDB(t, ctx, dir, testDB(t, ":memory:", ""), handle)
+}
+
+func testOpenCodeOnDB(t *testing.T, ctx context.Context, dir string, db *bridgeDB, handle http.HandlerFunc) *openCode {
+	t.Helper()
 	api := httptest.NewServer(handle)
 	t.Cleanup(api.Close)
 	config := filepath.Join(dir, "oc-api.json")
@@ -22,7 +27,7 @@ func testOpenCode(t *testing.T, ctx context.Context, dir string, handle http.Han
 		t.Fatal(err)
 	}
 	return newOpenCode(ctx, upstream{"OpenCode", api.Client(), &fileCache[endpoint]{path: config, read: openCodeEndpoint}},
-		testDB(t, ":memory:", ""), dir, ocSettings{})
+		db, dir, ocSettings{})
 }
 
 func expectValue[T comparable](t *testing.T, result <-chan T, want T) {
@@ -383,7 +388,7 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 			interrupts := make(chan string, 4)
 			release := make(chan struct{})
 			b, base := wsHarness(t, func(b *bridge, dir string) {
-				b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
+				b.oc = testOpenCodeOnDB(t, b.root, dir, b.db, func(w http.ResponseWriter, r *http.Request) {
 					if r.Method != http.MethodPost || r.URL.Path != "/api/session/"+sid+"/interrupt" {
 						w.WriteHeader(404)
 						return

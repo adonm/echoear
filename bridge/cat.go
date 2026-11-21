@@ -102,7 +102,10 @@ func writeCat(ctx context.Context, tx *sql.Tx, id string, c catState) error {
 		mark_color=excluded.mark_color,accent_color=excluded.accent_color,personality=excluded.personality,
 		face_svg=excluded.face_svg,updated_at=max(cats.updated_at+1,excluded.updated_at)`,
 		id, c.Name, c.Configured, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, c.FaceSVG, time.Now().UnixMilli())
-	return err
+	if err != nil {
+		return err
+	}
+	return syncVirtualCharacter(ctx, tx, id, c.Name)
 }
 
 func saveCatProfile(ctx context.Context, tx *sql.Tx, c catState, replace bool) error {
@@ -349,7 +352,7 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 		if !b.voices.allowed(next.Voice) {
 			next.Voice = current.Voice
 		}
-	case "reset_blank":
+	case "reset_blank", "new_session":
 		if current.Configured {
 			if err := archive(current); err != nil {
 				return catState{}, false, unavailable
@@ -363,6 +366,11 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 	}
 	if err := writeCatVoice(ctx, tx, id, next.Voice); err != nil {
 		return catState{}, false, unavailable
+	}
+	if op == "new_session" {
+		if err := resetCatSession(ctx, tx, who.DeviceID, args["archive_history"] == true); err != nil {
+			return catState{}, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return catState{}, false, unavailable

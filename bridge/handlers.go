@@ -563,6 +563,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		if id, ok := deviceSettingID(path, "volume"); ok {
 			return b.volumeAPI(r, id)
 		}
+		if id, ok := deviceSettingID(path, "reset"); ok {
+			return b.resetDevice(r, id)
+		}
 		if path == "/api/tts" {
 			obj, err := jsonBody(r)
 			if err != nil {

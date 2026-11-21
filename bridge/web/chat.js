@@ -66,6 +66,21 @@ function resetTranscript() {
   transcriptStatus();
 }
 
+function cancelHistoryLoad(cat) {
+  cat.loading?.abort();
+  cat.loading = cat.liveDuringLoad = null;
+  cat.olderLoading = false;
+}
+
+function reloadArchivedHistory() {
+  const cat = state.view;
+  cancelHistoryLoad(cat);
+  cat.cursor = cat.latestPageID = null;
+  cat.olderError = cat.historyError = false;
+  resetTranscript();
+  loadHistory();
+}
+
 function receiveChat(entry) {
   if (!entry?.id) return;
   state.view.liveDuringLoad?.set(entry.id, entry);
@@ -88,13 +103,14 @@ async function loadHistory({replace = true, older = false} = {}) {
     const query = older ? `?${new URLSearchParams(cat.cursor)}` : "";
     const page = await api(current, `/api/devices/${encodeURIComponent(cat.id)}/messages${query}`, {signal:loading.signal});
     if (state.view !== cat || cat.loading !== loading) return;
-    // A reconnect can miss more than one page. If there is no overlap,
-    // start over from the new page so "Load older" can walk the entire gap.
-    const gap = !older && !!cat.latestPageID && page.has_more &&
+    // A reconnect may have missed more than a page or a history archive.
+    // If the last known message is gone, rebuild from the new page.
+    const gap = !older && !!cat.latestPageID &&
       !page.messages.some(entry => entry.id === cat.latestPageID);
+    const replacePage = !older && (replace || gap);
     updateTranscript(() => {
-      if (!older && (replace || gap)) chat.clear();
-      if (older || replace || gap || cat.cursor === undefined) cat.cursor = page.has_more ? page.next_cursor : null;
+      if (replacePage) chat.clear();
+      if (older || replacePage || cat.cursor === undefined) cat.cursor = page.has_more ? page.next_cursor : null;
       if (!older) cat.latestPageID = page.messages.at(-1)?.id;
       for (const entry of page.messages) if (!live.has(entry.id)) chat.upsert(entry);
       for (const entry of live.values()) chat.upsert(entry);
@@ -119,19 +135,18 @@ $("load-older").onclick = () => loadHistory({older:true});
 $("reset").onclick = async () => {
   const cat = state.view, current = state.app;
   if (!current || current.scope || !cat?.id) return;
-  cat.loading?.abort();
-  cat.loading = cat.liveDuringLoad = null;
-  cat.olderLoading = false;
+  if (!confirm("Start a fresh cat and chat session on this device? The previous chat will be archived, not deleted.")) return;
+  cancelHistoryLoad(cat);
   cat.resetting = true;
   renderCurrent();
   transcriptStatus();
   say("chat-note", "Starting a new chat…");
   try {
-    await api(current, "/api/reset", {method:"POST", body:{device_id:cat.id}});
+    await api(current, `/api/devices/${encodeURIComponent(cat.id)}/reset`, {method:"POST", body:{archive_history:true}});
     if (state.view !== cat) return;
     cat.resetting = false;
-    say("chat-note", "New chat started.");
-    loadHistory();
+    say("chat-note", "New chat started. Previous chat archived.");
+    reloadArchivedHistory();
   } catch {
     if (state.view === cat) say("chat-note", "Could not start a new chat.");
   } finally {
@@ -192,4 +207,4 @@ $("photo-file").onchange = async e => {
   }
 };
 
-export {loadHistory, receiveChat, resetTranscript};
+export {loadHistory, receiveChat, reloadArchivedHistory, resetTranscript};

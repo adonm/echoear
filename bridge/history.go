@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"slices"
@@ -253,7 +255,7 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return object{"ok": true}, b.startNewCatSession(ctx, who)
+		return object{"ok": true}, b.startNewCatSession(ctx, who, false)
 	}
 	text := strings.TrimSpace(str(obj["text"]))
 	if text == "" || len(text) > 4096 {
@@ -331,7 +333,55 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 	return result, nil
 }
 
-func (b *bridge) startNewCatSession(ctx context.Context, who peer) error {
+func (b *bridge) resetDevice(r *http.Request, id string) (any, error) {
+	var archiveHistory bool
+	if r.ContentLength != 0 {
+		args, err := jsonBody(r)
+		if err != nil {
+			return nil, err
+		}
+		archiveHistory, err = catBool(args, "archive_history", false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if b.oc == nil {
+		return nil, problem(503, "Chat unavailable")
+	}
+	who, err := b.lookupDevice(id)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
+	defer cancel()
+	return object{"ok": true}, b.startNewCatSession(ctx, who, archiveHistory)
+}
+
+func resetCatSession(ctx context.Context, tx *sql.Tx, id string, archiveHistory bool) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE device_id=?`, id); err != nil {
+		return problem(502, "Cannot save sessions")
+	}
+	if !archiveHistory {
+		return nil
+	}
+	key := strings.ToLower(id)
+	// Keep consecutive resets in distinct archives, including within one millisecond.
+	for ts := time.Now().UnixMilli(); ; ts++ {
+		archive := fmt.Sprintf("archive-%s-%d", key, ts)
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM messages WHERE device_id=?)`, archive).Scan(&exists); err != nil {
+			return problem(502, "Cannot archive chat history")
+		}
+		if !exists {
+			if _, err := tx.ExecContext(ctx, `UPDATE messages SET device_id=? WHERE device_id=?`, archive, key); err != nil {
+				return problem(502, "Cannot archive chat history")
+			}
+			return nil
+		}
+	}
+}
+
+func (b *bridge) startNewCatSession(ctx context.Context, who peer, archiveHistory bool) error {
 	run := b.oc.prepareMappingChange(who.DeviceID)
 	if b.ws != nil {
 		b.ws.stopCatTurns(who.DeviceID)
@@ -339,11 +389,8 @@ func (b *bridge) startNewCatSession(ctx context.Context, who peer) error {
 	return run(ctx, func() error {
 		b.catMu.Lock()
 		defer b.catMu.Unlock()
-		cat, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), "reset_blank", nil)
+		cat, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), "new_session", object{"archive_history": archiveHistory})
 		if err != nil {
-			return err
-		}
-		if err := b.oc.save(who.DeviceID, ""); err != nil {
 			return err
 		}
 		if b.ws != nil {
@@ -353,7 +400,20 @@ func (b *bridge) startNewCatSession(ctx context.Context, who peer) error {
 				b.ws.stopCatTurn(d)
 			}
 			b.ws.catChanged(who.DeviceID, cat, profilesChanged)
+			if archiveHistory {
+				b.ws.historyArchived(who.DeviceID)
+			}
 		}
 		return nil
 	})
+}
+
+func (h *wsHub) historyArchived(id string) {
+	key := strings.ToLower(id)
+	f := textFrame(object{"op": "history_archived", "device_id": id})
+	for c := range h.clients {
+		if c.role == "web" && (c.scope == nil || c.scope.ID == key) {
+			c.enqueue(f)
+		}
+	}
 }

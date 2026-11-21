@@ -127,8 +127,49 @@ test("renders the selected live device after the dashboard modules load", async 
       assert.equal(bubbles()[0], before);
       assert.deepEqual(bubbles().map(node => node.dataset.entry), ["old", "missed", "live"]);
       assert.equal(bubbles().at(-1).children.at(-1).textContent, "After reconnect");
+      globalThis.fetch = async () => mockFetch([]);
+      await loadHistory({replace:false});
+      assert.deepEqual(bubbles(), [], "reconnect after an archive clears the old chat");
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test("New Chat confirms the archive and clears history and pagination", async () => {
+    const {loadHistory} = await import("./chat.js");
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    let accepted = false;
+    globalThis.confirm = message => {
+      assert.match(message, /fresh cat and chat session/i);
+      assert.match(message, /archived, not deleted/i);
+      return accepted;
+    };
+    globalThis.fetch = async (path, options) => {
+      requests.push([path, options]);
+      if (options.method === "POST") return Response.json({ok:true});
+      return Response.json(requests.length === 1 ? {
+        messages:[{id:"last", role:"cat", text:"Before reset", timestamp:"2026-11-21T10:30:00Z"}],
+        has_more:true, next_cursor:{before_ts:1795257000000, before_id:"last"},
+      } : {messages:[], has_more:false});
+    };
+    try {
+      state.view = {id:d.device_id, device:d};
+      await loadHistory();
+      assert.equal(els.get("load-older").hidden, false);
+      await els.get("reset").onclick();
+      assert.equal(requests.length, 1, "cancel leaves history alone");
+      accepted = true;
+      await els.get("reset").onclick();
+      assert.equal(requests[1][0], `/api/devices/${d.device_id}/reset`);
+      assert.equal(requests[1][1].method, "POST");
+      assert.deepEqual(JSON.parse(requests[1][1].body), {archive_history:true});
+      assert.equal(requests[2][0], `/api/devices/${d.device_id}/messages`);
+      assert.equal(els.get("load-older").hidden, true);
+      assert.deepEqual(els.get("messages").children, []);
+    } finally {
+      globalThis.fetch = originalFetch;
+      delete globalThis.confirm;
     }
   });
 });

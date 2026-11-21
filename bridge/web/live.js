@@ -1,5 +1,5 @@
 import {audioBusy, canCaptureMic, endMic, handleCall, handleTTS, micStopping, playChime, playPCM, setVolume, startMic, stopCall, unlockAudio} from "./audio.js";
-import {loadHistory, receiveChat, resetTranscript} from "./chat.js";
+import {loadHistory, receiveChat, reloadArchivedHistory, resetTranscript} from "./chat.js";
 import {applyVolume, refreshDevices, renderCallTarget, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
 import {$, colors, isLive, nodes, say, screen, svgNS} from "./dom.js";
 import {busyMode, idleWatch} from "./idle.js";
@@ -260,6 +260,9 @@ function command(msg) {
       break;
     case "cat_reassigned":
       if (msg.device_id === state.view.id) loadHistory();
+      break;
+    case "history_archived":
+      if (msg.device_id === state.view.id) reloadArchivedHistory();
       break;
     case "peers": {
       if (state.app.scope) {

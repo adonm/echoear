@@ -8,9 +8,93 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestDeviceResetHistory(t *testing.T) {
+	b, base := wsHarness(t, func(b *bridge, dir string) {
+		b.virtual = virtualStore(b.db)
+		b.oc = testOpenCodeOnDB(t, b.root, dir, b.db, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_reset/interrupt" {
+				fmt.Fprint(w, `{"data":{"interrupted":false}}`)
+				return
+			}
+			w.WriteHeader(404)
+		})
+	})
+	v := testObject(t, testRequest(t, "POST", base+"/api/virtual-clients", "unit", object{"character": "Milo"}, 201))
+	id := str(v["id"])
+	path := base + "/api/devices/" + id
+	watcher := testConnectWS(t, base, "unit", true)
+	watcher.json(t, object{"ev": "hello", "role": "web"})
+	watcher.until(t, hasWS("peers", ""))
+	const other = "echoear-other"
+	for _, e := range []chatEntry{newChat("user", "You", "Hi", "typed"), newChat("cat", "Milo", "Hello", "typed")} {
+		b.history.add(id, e)
+		b.history.add(other, newChat(e.Role, e.Sender, "Other chat", e.Source))
+	}
+	read := func(key string) []chatEntry {
+		t.Helper()
+		got, err := b.history.list(t.Context(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	assertHistory := func(key string, want []chatEntry) {
+		t.Helper()
+		if got := read(key); !slices.Equal(got, want) {
+			t.Fatalf("history for %s: got %v, want %v", key, got, want)
+		}
+	}
+	original, untouched := read(id), read(other)
+	if len(original) != 2 || len(untouched) != 2 {
+		t.Fatal("fixture history not stored")
+	}
+	for _, tc := range []struct {
+		body any
+		code int
+		sid  string
+	}{
+		{object{"archive_history": "true"}, 400, "ses_reset"},
+		{nil, 200, ""},
+		{object{}, 200, ""},
+		{object{"archive_history": false}, 200, ""},
+		{object{"archive_history": true}, 200, ""},
+	} {
+		if err := b.oc.save(id, "ses_reset"); err != nil {
+			t.Fatal(err)
+		}
+		testRequest(t, "POST", path+"/reset", "unit", tc.body, tc.code)
+		if sid, err := b.oc.get(id); err != nil || sid != tc.sid {
+			t.Fatalf("reset %v: session = %q, %v; want %q", tc.body, sid, err, tc.sid)
+		}
+		if body, ok := tc.body.(object); !ok || body["archive_history"] != true {
+			assertHistory(id, original)
+		}
+		assertHistory(other, untouched)
+	}
+	watcher.until(t, hasWS("history_archived", id))
+	if got := apiObjects(t, path+"/messages", "messages"); len(got) != 0 {
+		t.Fatal("reset device still exposes archived history")
+	}
+	var archive string
+	if err := b.db.QueryRow(`SELECT device_id FROM messages WHERE id=?`, original[0].ID).Scan(&archive); err != nil {
+		t.Fatal(err)
+	}
+	stamp, ok := strings.CutPrefix(archive, "archive-"+id+"-")
+	if _, err := strconv.ParseInt(stamp, 10, 64); !ok || err != nil {
+		t.Fatalf("archive key = %q; want timestamped key for %s", archive, id)
+	}
+	assertHistory(archive, original)
+	b.history.add(id, newChat("user", "You", "Fresh chat", "typed"))
+	if got := read(id); len(got) != 1 {
+		t.Fatalf("new chat has %d messages, want 1", len(got))
+	}
+	assertHistory(archive, original)
+}
 
 func TestHistoryCursorPagination(t *testing.T) {
 	b, base := wsHarness(t, nil)

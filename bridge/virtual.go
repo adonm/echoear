@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"maps"
 	"net/http"
 	"regexp"
@@ -10,6 +12,14 @@ import (
 )
 
 var virtualID = regexp.MustCompile(`^virt-[0-9a-f]{8}$`)
+
+func syncVirtualCharacter(ctx context.Context, tx *sql.Tx, id, name string) error {
+	if !virtualID.MatchString(id) {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE virtual_clients SET character=? WHERE id=? AND character<>?`, name, id, name)
+	return err
+}
 
 type virtualClient struct {
 	ID        string    `json:"id"`
