@@ -230,7 +230,7 @@ func (n *svgNode) asGroup() *svgNode {
 
 var (
 	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text image")
-	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor aria-label data-id data-hit data-pose data-part")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering aria-label data-id data-hit data-pose data-part")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
 	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
@@ -336,6 +336,8 @@ func cleanSVGAttr(k, v string) (string, bool) {
 		return shortText(v, 128, false), v != ""
 	case "data-pose":
 		return v, true
+	case "shape-rendering":
+		return v, v == "crispEdges"
 	case "fill", "stroke", "stop-color":
 		if k != "stop-color" && strings.EqualFold(v, "transparent") {
 			return "none", true
@@ -376,6 +378,12 @@ func cleanSVGAttr(k, v string) (string, bool) {
 			return "", false
 		}
 	default:
+		// Canonical integer sprite geometry needs no regex or substring scan.
+		if len(v) <= 5 && (k == "x" || k == "y" || k == "width" || k == "height") {
+			if n, err := strconv.Atoi(v); err == nil {
+				return v, n >= -4096 && n <= 4096
+			}
+		}
 		if !svgScalar.MatchString(v) {
 			return "", false
 		}
@@ -820,22 +828,27 @@ func (s preparedScene) raster(w, h int, x, y float64, side int, fill imagecolor.
 	}()
 	img = image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(img, img.Bounds(), image.NewUniform(fill), image.Point{}, draw.Src)
-	scan := screenScanner{rasterx.NewScannerGV(w, h, img, img.Bounds()), img}
+	var dasher *rasterx.Dasher
 	drawSVG := func(svg string) error {
 		icon, err := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.StrictErrorMode)
 		if err != nil {
 			return fmt.Errorf("SVG: %w", err)
 		}
 		icon.SetTarget(x, y, float64(side), float64(side))
-		icon.Draw(rasterx.NewDasher(w, h, scan), 1)
+		if dasher == nil {
+			scan := screenScanner{rasterx.NewScannerGV(w, h, img, img.Bounds()), img}
+			dasher = rasterx.NewDasher(w, h, scan)
+		}
+		icon.Draw(dasher, 1)
 		return nil
 	}
-	if !strings.Contains(s.svg, "<image ") {
-		err = drawSVG(s.svg)
-	} else {
-		scale := float64(side) / screenSize
-		err = rasterPhotos(s.root, img, rasterx.Identity.Translate(x, y).Scale(scale, scale), lookup, drawSVG)
+	photo := strings.Contains(s.svg, "<image ")
+	if !photo && strings.Contains(s.svg, "Gradient") && !canSplitPaintServers(s.root) {
+		// Nonstandard/nested paint servers need the original document order.
+		return img, drawSVG(s.svg)
 	}
+	scale := float64(side) / screenSize
+	err = rasterLayers(s, img, rasterx.Identity.Translate(x, y).Scale(scale, scale), photo, lookup, drawSVG)
 	return img, err
 }
 
@@ -867,9 +880,133 @@ func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) ([]ui
 
 type photoLookup func(string) (image.Image, error)
 
-// oksvg draws vector paths only. Flush consecutive vector layers on either
-// side of a bitmap, preserving groups, transforms and painter order.
-func rasterPhotos(root *svgNode, dst *image.RGBA, target rasterx.Matrix2D, lookup photoLookup, drawSVG func(string) error) error {
+func directStyle(n *svgNode) bool {
+	for k, v := range n.attr {
+		switch k {
+		case "x", "y", "width", "height", "viewBox", "xmlns", "transform", "shape-rendering",
+			"aria-label", "data-id", "data-hit", "data-echoear-hit", "data-pose", "data-part":
+		case "fill":
+			if strings.HasPrefix(v, "url(") {
+				return false
+			}
+			if v != "none" && !strings.HasPrefix(v, "#") {
+				if c, err := oksvg.ParseSVGColor(v); err != nil || c == nil {
+					return false
+				}
+			}
+		case "stroke":
+			if v != "none" {
+				return false
+			}
+		case "opacity", "fill-opacity":
+			if v != "1" {
+				return false
+			}
+		case "stroke-width", "rx", "ry":
+			if v != "0" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func canSplitPaintServers(root *svgNode) bool {
+	// Only hoist top-level defs preceded by simple rectangles with no
+	// paint-server references. Let oksvg resolve other cases in place.
+	var nested func(*svgNode) bool
+	nested = func(n *svgNode) bool {
+		return n.tag == "defs" || n.tag == "linearGradient" || n.tag == "radialGradient" ||
+			slices.ContainsFunc(n.children, nested)
+	}
+	precededByVector := false
+	for _, n := range root.children {
+		if n.tag == "defs" {
+			if precededByVector {
+				return false
+			}
+		} else {
+			if nested(n) {
+				return false
+			}
+			precededByVector = precededByVector || n.tag != "rect" || len(n.children) != 0 || !directStyle(n)
+		}
+	}
+	return true
+}
+
+func directRect(n *svgNode, m rasterx.Matrix2D, crisp bool) (image.Rectangle, imagecolor.RGBA, bool) {
+	if m.B != 0 || m.C != 0 || len(n.children) != 0 {
+		return image.Rectangle{}, imagecolor.RGBA{}, false
+	}
+	fill := n.attr["fill"]
+	var c imagecolor.RGBA
+	if len(fill) == 7 && fill[0] == '#' {
+		rgb, err := strconv.ParseUint(fill[1:], 16, 24)
+		if err != nil {
+			return image.Rectangle{}, c, false
+		}
+		c = imagecolor.RGBA{uint8(rgb >> 16), uint8(rgb >> 8), uint8(rgb), 255}
+	} else {
+		paint, err := oksvg.ParseSVGColor(fill)
+		if err != nil || paint == nil {
+			return image.Rectangle{}, c, false
+		}
+		r, g, b, a := paint.RGBA()
+		if a != 0xffff {
+			return image.Rectangle{}, c, false
+		}
+		c = imagecolor.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 255}
+	}
+	var xywh [4]float64
+	for i, name := range [...]string{"x", "y", "width", "height"} {
+		raw := n.attr[name]
+		if strings.HasSuffix(raw, "%") {
+			return image.Rectangle{}, imagecolor.RGBA{}, false
+		}
+		xywh[i] = svgNum(raw)
+	}
+	x, y, w, h := xywh[0], xywh[1], xywh[2], xywh[3]
+	if w <= 0 || h <= 0 {
+		return image.Rectangle{}, imagecolor.RGBA{}, false
+	}
+	x1, y1 := m.Transform(x, y)
+	x2, y2 := m.Transform(x+w, y+h)
+	if !crisp {
+		for _, v := range [...]float64{x1, y1, x2, y2} {
+			if math.Abs(v-math.Round(v)) > 1e-9 {
+				return image.Rectangle{}, c, false
+			}
+		}
+	}
+	// Opt-in pixel sprites snap both sides to the same shared grid at
+	// fractional display scales. Legacy SVG retains its antialiasing.
+	return image.Rect(int(math.Round(x1)), int(math.Round(y1)), int(math.Round(x2)), int(math.Round(y2))), c, true
+}
+
+func fillRect(dst *image.RGBA, r image.Rectangle, c imagecolor.RGBA) {
+	r = r.Intersect(dst.Bounds())
+	if r.Empty() {
+		return
+	}
+	offset, bytes := dst.PixOffset(r.Min.X, r.Min.Y), r.Dx()*4
+	row := dst.Pix[offset : offset+bytes]
+	for i := 0; i < bytes; i += 4 {
+		p := row[i : i+4]
+		p[0], p[1], p[2], p[3] = c.R, c.G, c.B, 255
+	}
+	for y := r.Min.Y + 1; y < r.Max.Y; y++ {
+		offset += dst.Stride
+		copy(dst.Pix[offset:offset+bytes], row)
+	}
+}
+
+// Flush each consecutive vector run before painting a bitmap or simple
+// rectangle directly. Recreate the run's ancestors so it inherits SVG styles.
+func rasterLayers(s preparedScene, dst *image.RGBA, target rasterx.Matrix2D, photo bool, lookup photoLookup, drawSVG func(string) error) error {
+	root := s.root
 	var defs []*svgNode
 	var collectDefs func(*svgNode)
 	collectDefs = func(n *svgNode) {
@@ -881,9 +1018,12 @@ func rasterPhotos(root *svgNode, dst *image.RGBA, target rasterx.Matrix2D, looku
 			}
 		}
 	}
-	collectDefs(root)
+	if photo || strings.Contains(s.svg, "<defs") {
+		collectDefs(root)
+	}
 	layer := &svgNode{tag: root.tag, attr: root.attr, children: slices.Clone(defs)}
 	groups := map[*svgNode]*svgNode{root: layer}
+	split, drewVector := photo, false
 	flush := func() error {
 		if len(layer.children) == len(defs) {
 			return nil
@@ -892,21 +1032,26 @@ func rasterPhotos(root *svgNode, dst *image.RGBA, target rasterx.Matrix2D, looku
 		layer.children = layer.children[:len(defs)]
 		clear(groups)
 		groups[root] = layer
+		drewVector = true
 		return err
 	}
 	images := make(map[string]image.Image)
-	var walk func(*svgNode, []*svgNode, rasterx.Matrix2D, float64) error
-	walk = func(n *svgNode, parents []*svgNode, m rasterx.Matrix2D, opacity float64) error {
-		local, _ := svgMatrix(n.attr["transform"])
-		m = m.Mult(local)
+	var walk func(*svgNode, []*svgNode, rasterx.Matrix2D, float64, bool, bool) error
+	walk = func(n *svgNode, parents []*svgNode, m rasterx.Matrix2D, opacity float64, simple, crisp bool) error {
+		if raw := n.attr["transform"]; raw != "" {
+			local, _ := svgMatrix(raw)
+			m = m.Mult(local)
+		}
 		if s := n.attr["opacity"]; s != "" {
 			opacity *= min(1, max(0, svgNum(s)))
 		}
+		crisp = crisp || n.attr["shape-rendering"] == "crispEdges"
 		switch n.tag {
 		case "defs":
 		case "svg", "g":
+			simple = simple && directStyle(n)
 			for _, child := range n.children {
-				if err := walk(child, append(parents, n), m, opacity); err != nil {
+				if err := walk(child, append(parents, n), m, opacity, simple, crisp); err != nil {
 					return err
 				}
 			}
@@ -947,6 +1092,16 @@ func rasterPhotos(root *svgNode, dst *image.RGBA, target rasterx.Matrix2D, looku
 				xdraw.BiLinear.Transform(dst, f64.Aff3{m.A, m.C, m.E, m.B, m.D, m.F}, src, b, draw.Over, opts)
 			}
 		default:
+			if n.tag == "rect" && simple && directStyle(n) {
+				if r, c, ok := directRect(n, m, crisp); ok {
+					if err := flush(); err != nil {
+						return err
+					}
+					split = true
+					fillRect(dst, r, c)
+					return nil
+				}
+			}
 			parent := layer
 			for _, ancestor := range parents {
 				group := groups[ancestor]
@@ -961,8 +1116,14 @@ func rasterPhotos(root *svgNode, dst *image.RGBA, target rasterx.Matrix2D, looku
 		}
 		return nil
 	}
-	if err := walk(root, nil, target, 1); err != nil {
+	if err := walk(root, nil, target, 1, true, false); err != nil {
 		return err
+	}
+	if !split {
+		return drawSVG(s.svg)
+	}
+	if len(layer.children) == len(defs) && len(defs) > 0 && !drewVector {
+		return drawSVG(svgString(layer))
 	}
 	return flush()
 }

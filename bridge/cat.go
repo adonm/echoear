@@ -57,7 +57,7 @@ func legacyCat(name, theme string) catState {
 	c.Name, c.Configured = name, true
 	p := legacyCatColors[deviceTheme(theme)]
 	c.FaceBG, c.MarkColor, c.AccentColor = p[0], p[1], p[2]
-	c.FaceSVG = c.defaultFace()
+	c.FaceSVG = defaultFaceArtwork(c.FaceBG, c.MarkColor, c.AccentColor, c.Configured, true)
 	return c
 }
 
@@ -262,8 +262,10 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 				legacy = before.legacyDefaultFace(root)
 			}
 		}
-		if c.FaceSVG == "" || c.FaceSVG == before.defaultFace() || legacy {
+		if c.FaceSVG == "" || c.FaceSVG == before.defaultFace() {
 			c.FaceSVG = c.defaultFace()
+		} else if legacy || c.FaceSVG == defaultFaceArtwork(before.FaceBG, before.MarkColor, before.AccentColor, before.Configured, true) {
+			c.FaceSVG = defaultFaceArtwork(c.FaceBG, c.MarkColor, c.AccentColor, c.Configured, true)
 		} else if oldPalette != newPalette {
 			c.FaceSVG, err = recolorFaceSVG(c.FaceSVG, oldPalette, newPalette)
 		}

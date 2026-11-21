@@ -51,7 +51,7 @@ func TestCatMigration(t *testing.T) {
 	for _, c := range cats {
 		got, err := b.catTool(t.Context(), object{"op": "get", "device_id": c.id})
 		want := catState{catLook: catLook{Name: c.name, Configured: true, FaceBG: c.bg, MarkColor: c.mark, AccentColor: c.accent}, Voice: c.voice}
-		want.FaceSVG = want.defaultFace()
+		want.FaceSVG = defaultFaceArtwork(want.FaceBG, want.MarkColor, want.AccentColor, want.Configured, true)
 		if err != nil || !reflect.DeepEqual(got["cat"], want) {
 			t.Fatalf("active %s: got %+v, want %+v: %v", c.name, got, want, err)
 		}

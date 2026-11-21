@@ -438,8 +438,27 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 	return s
 }
 
-func defaultFaceSVG(faceBG, markColor, accentColor string, configured bool) string {
-	return defaultFaceArtwork(faceBG, markColor, accentColor, configured, true)
+var starterCatArt = func() string {
+	sprite := defaultStarterCatSprite
+	sprite.bg = "#F3F4F6"
+	art, err := compileCompanionSprite(sprite)
+	if err != nil {
+		panic(err)
+	}
+	return art
+}()
+
+func defaultFaceSVG(faceBG, markColor, accentColor string, _ bool) string {
+	if faceBG == "#F3F4F6" && markColor == "#CBD5E1" && accentColor == "#60A5FA" {
+		return starterCatArt
+	}
+	if markColor == "#CBD5E1" {
+		markColor = larkPalette["o"]
+	}
+	if accentColor == "#60A5FA" {
+		accentColor = larkPalette["c"]
+	}
+	return strings.NewReplacer("#F3F4F6", faceBG, larkPalette["o"], markColor, larkPalette["c"], accentColor).Replace(starterCatArt)
 }
 
 func defaultFaceArtwork(faceBG, markColor, accentColor string, configured, tagged bool) string {

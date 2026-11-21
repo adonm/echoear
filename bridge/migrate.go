@@ -170,7 +170,7 @@ func migrateFaceSVG(ctx context.Context, tx *sql.Tx) error {
 				rows.Close()
 				return err
 			}
-			seeds = append(seeds, seed{key, defaultFaceSVG(bg, mark, accent, configured != 0)})
+			seeds = append(seeds, seed{key, defaultFaceArtwork(bg, mark, accent, configured != 0, true)})
 		}
 		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			return err
