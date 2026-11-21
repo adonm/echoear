@@ -199,6 +199,8 @@ var mcpTools = func() []object {
 				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": voice}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
 					"personality": text, "voice": voice, "face_svg": object{"type": "string", "maxLength": 16384, "description": "Complete SVG face with idle, blink, talk, listen, think and sleep pose layers"},
+					"face_edits": array(schema(object{"part": enum(faceParts...), "pose": enum(faceEditPoses...),
+						"svg": object{"type": "string", "maxLength": 16384, "description": "Replacement SVG fragment. Omit pose for all matching parts."}}, "part", "svg")),
 					"slug": object{"type": "string", "description": "Saved cat slug for load/delete_saved"}, "configured": flag,
 					"save_profile": object{"type": "boolean", "description": "Save an updated cat as a reusable profile"}}),
 				"memory": object{"anyOf": []object{memory, array(memory)}},

@@ -242,7 +242,7 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 				return c, false, problem(400, "Unsupported voice")
 			}
 			c.Voice = str(val)
-		case "face_svg":
+		case "face_svg", "face_edits":
 			editLook = true
 		case "configured", "save_profile", "device_id", "op":
 		default:
@@ -255,13 +255,27 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 	}
 	oldPalette := [...]string{before.FaceBG, before.MarkColor, before.AccentColor}
 	newPalette := [...]string{c.FaceBG, c.MarkColor, c.AccentColor}
+	edits, editParts := args["face_edits"]
 	if raw, set := args["face_svg"]; set {
+		if editParts {
+			return c, false, fieldError("cat", "use face_svg or face_edits, not both")
+		}
 		c.FaceSVG, err = sanitizeFaceSVG(str(raw))
-	} else if oldPalette != newPalette || c.Configured != before.Configured {
-		if c.FaceSVG == "" || c.FaceSVG == before.defaultFace() {
+	} else if editParts || oldPalette != newPalette || c.Configured != before.Configured {
+		var legacy bool
+		untagged := !strings.Contains(c.FaceSVG, "data-part=")
+		if untagged && c.FaceSVG != "" {
+			if root, parseErr := parseFaceSVG(c.FaceSVG); parseErr == nil {
+				legacy = before.legacyDefaultFace(root)
+			}
+		}
+		if c.FaceSVG == "" || c.FaceSVG == before.defaultFace() || legacy {
 			c.FaceSVG = c.defaultFace()
 		} else if oldPalette != newPalette {
 			c.FaceSVG, err = recolorFaceSVG(c.FaceSVG, oldPalette, newPalette)
+		}
+		if err == nil && editParts {
+			c.FaceSVG, err = editFaceParts(c.FaceSVG, edits)
 		}
 	}
 	return c, save, err
@@ -388,6 +402,9 @@ func (b *bridge) patchCat(ctx context.Context, id string, args object) (any, err
 	op, supplied := c["op"]
 	if !supplied {
 		op = "update"
+	}
+	if _, edits := c["face_edits"]; edits && op != "update" {
+		return nil, fieldError("cat.face_edits", "requires cat update")
 	}
 	switch op {
 	case "load", "delete_saved":

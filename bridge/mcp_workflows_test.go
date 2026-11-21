@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,4 +70,49 @@ func TestMCPHistoryCursorAndPhotoMetadata(t *testing.T) {
 	}
 	toolTest(t, base, "state", object{"device_id": id, "include": []string{"messages"},
 		"messages_cursor": object{"before_ts": now.UnixMilli()}}, true)
+}
+
+func TestMCPFacePartEditsAndFullSVGFallback(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const id = "echoear-face-parts"
+	c := legacyCat("Cake", "cake")
+	c.FaceSVG = defaultFaceArtwork(c.FaceBG, c.MarkColor, c.AccentColor, c.Configured, false)
+	tx, err := b.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err = writeCat(t.Context(), tx, id, c); err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	board := testConnectWS(t, base, "unit", false)
+	board.helloV2(t, id, "Cake")
+	patch := func(edit object, fail bool) object {
+		return toolTest(t, base, "patch", object{"device_id": id, "cat": edit}, fail)
+	}
+	replaced := []object{{"part": "eyes", "pose": "talk", "svg": `<circle cx="112" cy="141" r="11" fill="#ABCDEF"/>`}}
+	out := patch(object{"face_edits": replaced}, false)
+	raw := str(out["cat"].(object)["face_svg"])
+	layer := func(pose string) string {
+		t.Helper()
+		root, err := parseFaceSVG(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return svgString(faceLayer(root, pose))
+	}
+	talk, idle := layer("talk"), layer("idle")
+	if !strings.Contains(talk, "#ABCDEF") || strings.Contains(talk, "M93 149") || !strings.Contains(talk, "F47E92") ||
+		strings.Contains(idle, "#ABCDEF") || !strings.Contains(idle, `x="95"`) || !strings.Contains(raw, `data-part="forehead"`) {
+		t.Fatalf("face edit was not confined to talking eyes: idle=%s talk=%s", idle, talk)
+	}
+	patch(object{"face_edits": []object{{"part": "nose", "svg": "", "typo": true}}}, true)
+	patch(object{"face_svg": `<svg><rect width="360" height="360" fill="#224466"/></svg>`}, false)
+	errOut := patch(object{"face_edits": replaced}, true)
+	if !strings.Contains(str(errOut["error"]), "complete face_svg") {
+		t.Fatal(errOut)
+	}
 }
