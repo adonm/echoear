@@ -24,9 +24,12 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
-const portraitEndpoint = "https://opencode.ai/inference/google/v1beta/models/gemini-nano-banana-2.1:generateContent"
+const portraitModelID = "gemini-nano-banana-2.1"
+const portraitEndpoint = "https://opencode.ai/inference/google/v1beta/models/" + portraitModelID + ":generateContent"
+const openCodeImagePath = "/api/experimental/generate/image"
 const portraitSheetSide = 1024
 const portraitMaxBytes = 8 << 20
+const portraitTimeout = 65 * time.Second
 
 var portraitPoses = [...]string{"idle", "blink", "talk", "think"}
 var portraitIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -70,17 +73,65 @@ Cozy hand-painted gouache meets soft storybook vector: crisp hue-shifted cocoa, 
 	return prompt + "\nCharacter art direction: " + spec.Prompt
 }
 
-func consolePortraitGenerator(key string) portraitGenerator {
-	if key == "" {
-		return nil
+func configuredPortraitGenerator(oc upstream, dedicated bool, key string) portraitGenerator {
+	if key != "" {
+		client := &http.Client{
+			Timeout:       portraitTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+		return func(ctx context.Context, prompt string, source []byte) ([]byte, error) {
+			return requestPortrait(ctx, client, portraitEndpoint, key, prompt, source)
+		}
 	}
-	client := &http.Client{
-		Timeout:       65 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	if dedicated {
+		return func(ctx context.Context, prompt string, source []byte) ([]byte, error) {
+			return requestOpenCodePortrait(ctx, oc, prompt, source)
+		}
 	}
-	return func(ctx context.Context, prompt string, source []byte) ([]byte, error) {
-		return requestPortrait(ctx, client, portraitEndpoint, key, prompt, source)
+	return nil
+}
+
+type openCodeImage struct {
+	MIME string `json:"mime"`
+	Data []byte `json:"data"`
+}
+
+func requestOpenCodePortrait(ctx context.Context, oc upstream, prompt string, source []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, portraitTimeout)
+	defer cancel()
+	input := object{"model": ocModel{Provider: "opencode", ID: portraitModelID}, "prompt": prompt,
+		"n": 1, "aspect": "1:1", "resolution": "1K"}
+	if len(source) > 0 {
+		input["images"] = []openCodeImage{{MIME: "image/png", Data: source}}
 	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, oc.invalid()
+	}
+	res, err := oc.request(ctx, http.MethodPost, openCodeImagePath, jsonType, jsonType, int64(len(body)),
+		func() io.Reader { return bytes.NewReader(body) })
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	const limit = 2 * portraitMaxBytes
+	raw, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	var output struct {
+		Data struct{ Images []openCodeImage }
+	}
+	if err != nil || len(raw) > limit || json.Unmarshal(raw, &output) != nil {
+		return nil, oc.invalid()
+	}
+	for _, img := range output.Data.Images {
+		if isPortraitImage(img.MIME, img.Data) {
+			return img.Data, nil
+		}
+	}
+	return nil, problem(502, "OpenCode response did not contain a portrait sheet")
+}
+
+func isPortraitImage(mime string, data []byte) bool {
+	return (mime == "image/png" || mime == "image/jpeg") && len(data) > 0 && len(data) <= portraitMaxBytes
 }
 
 func requestPortrait(ctx context.Context, client *http.Client, endpoint, key, prompt string, source []byte) ([]byte, error) {
@@ -126,8 +177,7 @@ func requestPortrait(ctx context.Context, client *http.Client, endpoint, key, pr
 	}
 	for _, candidate := range output.Candidates {
 		for _, p := range candidate.Content.Parts {
-			if p.Inline != nil && (p.Inline.MIME == "image/png" || p.Inline.MIME == "image/jpeg") &&
-				len(p.Inline.Data) > 0 && len(p.Inline.Data) <= portraitMaxBytes {
+			if p.Inline != nil && isPortraitImage(p.Inline.MIME, p.Inline.Data) {
 				return p.Inline.Data, nil
 			}
 		}
@@ -283,7 +333,7 @@ func writePortraitPNG(dir, name string, img image.Image) error {
 
 func (p *portraitStore) create(ctx context.Context, spec portraitSpec, currentID string) (string, error) {
 	if p == nil || p.generate == nil {
-		return "", problem(503, "Portrait generation unavailable; configure OPENCODE_API_KEY or use cat.companion")
+		return "", problem(503, "Portrait generation unavailable; configure a dedicated OpenCode service or OPENCODE_API_KEY, or use cat.companion")
 	}
 	var source []byte
 	if spec.Edit {

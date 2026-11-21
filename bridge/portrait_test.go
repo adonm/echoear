@@ -108,6 +108,66 @@ func TestPortraitConsoleContract(t *testing.T) {
 	}
 }
 
+func TestPortraitOpenCodeContract(t *testing.T) {
+	source := []byte("reference fixture")
+	sheet := portraitFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model      ocModel
+			Prompt     string
+			Aspect     string
+			Resolution string
+			N          int
+			Images     []openCodeImage
+		}
+		user, password, authenticated := r.BasicAuth()
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			http.Error(w, "bad fixture request", 400)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != openCodeImagePath || r.URL.RawQuery != "" ||
+			!authenticated || user != "opencode" || password != "fixture-only" ||
+			req.Model != (ocModel{Provider: "opencode", ID: "gemini-nano-banana-2.1"}) ||
+			req.Aspect != "1:1" || req.Resolution != "1K" || req.N != 1 {
+			t.Error("invalid OpenCode image request")
+		}
+		switch req.Prompt {
+		case "draw an owl":
+			if req.Images != nil {
+				t.Error("create sent edit references")
+			}
+		case "add a scarf":
+			if len(req.Images) != 1 || req.Images[0].MIME != "image/png" || !bytes.Equal(req.Images[0].Data, source) {
+				t.Error("edit missed its reference sheet")
+			}
+		default:
+			t.Error("unexpected prompt")
+		}
+		_ = json.NewEncoder(w).Encode(object{"data": object{"images": []object{
+			{"type": "image", "mime": "image/png", "data": sheet},
+		}}})
+	}))
+	defer server.Close()
+	oc, err := openCodeUpstream(server.Client(), "", server.URL, "fixture-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuredPortraitGenerator(oc, false, "") != nil {
+		t.Fatal("shared-service discovery alone should not enable billed portraits")
+	}
+	generate := configuredPortraitGenerator(oc, true, "")
+	for _, tc := range []struct {
+		prompt string
+		input  []byte
+	}{{"draw an owl", nil}, {"add a scarf", source}} {
+		got, err := generate(t.Context(), tc.prompt, tc.input)
+		if err != nil || !bytes.Equal(got, sheet) {
+			t.Fatalf("%q: invalid OpenCode image response: %v", tc.prompt, err)
+		}
+	}
+}
+
 func TestPortraitPatchScopeAndNativeFrames(t *testing.T) {
 	sheet := portraitFixture(t)
 	dir := t.TempDir()

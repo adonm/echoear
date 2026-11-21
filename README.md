@@ -438,13 +438,16 @@ midnight. Set `eyes`, `markings` or a palette object with `base` and hex tints
 to customize. Vector faces support `face_edits`; `face_svg` and pixel `sprite`
 patches still work. Existing saved artwork is unchanged.
 
-For bespoke art use `cat.portrait: {prompt, bg?, edit?}` instead. With a raw
-Console `OPENCODE_API_KEY` in the bridge environment, this sends a billed request
-to Nano Banana 2.1. `edit:true` sends the current sheet back as reference.
+For bespoke art use `cat.portrait: {prompt, bg?, edit?}` instead. The dedicated
+OpenCode service sends a billed request to `opencode/gemini-nano-banana-2.1`
+using its OpenCode Console connection. OAuth needs no separate key, and this
+request creates no OpenCode session. If `OPENCODE_API_KEY` is set in the bridge
+environment, the bridge calls Console directly instead. `edit:true` sends the
+current sheet back as reference.
 The bridge aligns four poses from one sheet and uses them for the six face
 states. Only SVG references go into the database; private PNGs under the
-local `portraits/` directory do not sync to Turso. Without a key, use the
-instant vector companion.
+local `portraits/` directory do not sync to Turso. For local, no-cost art, use
+the instant vector companion.
 The canonical `messages` table drives browser history. The v2 migration
 backfills it from legacy bridge chat events and OpenCode session history.
 New rows contain user text, final companion replies, intercom, and display cards,
