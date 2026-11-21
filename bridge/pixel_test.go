@@ -61,41 +61,11 @@ func TestDenseSpriteRaster(t *testing.T) {
 			}
 		}
 	}
-	face, err := compileCompanionSprite(companionSprite{Rows: denseSpriteRows(64)})
-	if err != nil {
-		t.Fatalf("64×64 companion: %v", err)
-	}
-	if _, err := sanitizeFaceSVG(face); err != nil {
-		t.Fatalf("64×64 persisted companion: %v", err)
-	}
 	for _, d := range []string{"", "M1 2C0 0 3 3 4 4Z", "M1 2h2v1h-1Z", "M63 2h2v1h-2Z", "M1 2h2v1h-2Zm1 0h1v1h-1Z"} {
 		if _, ok := parsePixelRuns(d); ok {
 			t.Errorf("noncanonical or overlapping path %q qualified", d)
 		}
 	}
-}
-
-func TestFullSizeSpriteCompactArtwork(t *testing.T) {
-	spec := companionSprite{Palette: defaultStarterCatSprite.Palette}
-	for _, line := range defaultStarterCatSprite.Rows {
-		row := make([]byte, 64)
-		for x := range row {
-			row[x] = line[x/2]
-		}
-		spec.Rows = append(spec.Rows, string(row), string(row))
-	}
-	art, err := compileSprite(spec.Rows, spec.Palette, 36, 36, 4)
-	if err != nil || len(art) >= 16<<10 || !strings.Contains(art, `data-pixel-runs="1"`) {
-		t.Fatalf("64×64 sprite: %d SVG bytes, %v", len(art), err)
-	}
-	face, err := compileCompanionSprite(spec)
-	if err != nil || len(face) >= 16<<10 {
-		t.Fatalf("64×64 face: %d SVG bytes, %v", len(face), err)
-	}
-	if _, err := sanitizeFaceSVG(face); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("64×64 full-row artwork: %d bytes (fragment), %d bytes (animated face)", len(art), len(face))
 }
 
 func TestSpriteRuns(t *testing.T) {
@@ -105,18 +75,15 @@ func TestSpriteRuns(t *testing.T) {
 		!strings.Contains(art, `shape-rendering="crispEdges"`) {
 		t.Fatalf("%s: %v", art, err)
 	}
-	for _, spec := range []companionSprite{
-		{Rows: []string{"pp"}},
-		{Rows: []string{"pp", "p"}},
-		{Rows: []string{"pp", "p?"}},
-		{Rows: []string{"pp", "pp"}, Palette: map[string]string{"p": "red"}},
-		{Rows: []string{"pp", "pp"}, Blink: map[string]string{"01": "kk"}},
-		{Rows: []string{"pp", "pp"}, Talk: map[string]string{"0": "k"}},
-		{Rows: []string{strings.Repeat("k", 65), strings.Repeat("k", 65)}},
+	for _, rows := range [][]string{
+		{"pp"}, {"pp", "p"}, {"pp", "p?"}, {strings.Repeat("k", 65), strings.Repeat("k", 65)},
 	} {
-		if _, err := compileCompanionSprite(spec); err == nil {
-			t.Errorf("accepted malformed sprite %+v", spec)
+		if _, err := compileSprite(rows, nil, 0, 0, 3); err == nil {
+			t.Errorf("accepted malformed sprite %+v", rows)
 		}
+	}
+	if _, err := compileSprite([]string{"pp", "pp"}, map[string]string{"p": "red"}, 0, 0, 3); err == nil {
+		t.Error("accepted malformed palette")
 	}
 }
 

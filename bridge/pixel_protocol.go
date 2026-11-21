@@ -21,12 +21,6 @@ var (
 	pixelRowsSchema    = uiArray(pixelRowSchema, 2, maxSpriteSide)
 	pixelPaletteSchema = object{"type": "object", "additionalProperties": false,
 		"patternProperties": object{`^[!-\x2D/-~]$`: pixelHexSchema}}
-	pixelPoseSchema = object{"type": "object", "additionalProperties": false,
-		"patternProperties": object{`^(?:[0-9]|[1-5][0-9]|6[0-3])$`: pixelRowSchema}}
-	companionSpriteSchema = closedObject(object{
-		"rows": pixelRowsSchema, "palette": pixelPaletteSchema,
-		"blink": pixelPoseSchema, "talk": pixelPoseSchema, "think": pixelPoseSchema, "sleep": pixelPoseSchema,
-	}, "rows")
 )
 
 func readUIValue[T any](raw any, schema object, path string) (T, error) {

@@ -40,7 +40,7 @@ For a static illustration return svg instead. Keep all content suitable for chil
 		face, _ := json.Marshal(s.Face.FaceSVG)
 		instructions = `For a new look, first use an instant Storybook form: {"companion":{"species":"fox","palette":"amber","eyes":"sparkle","markings":"freckles","accessory":"scarf"}}.
 Species: cat fox owl marten dragon bunny bear frog bird robot. Palettes: peach mint lavender sage berry amber sky midnight. Eyes: sparkle happy sleepy curious star. Markings: none tabby blush freckles star spots. Accessories: none scarf crown glasses bow beanie leaf.
-For a bespoke creature, costume or style use Nano Banana 2.1: {"portrait":{"prompt":"..."}}. Add edit:true for an existing portrait, or style:"pixel" for requested retro art. Only return {"sprite":{"rows":[...]}} if the child specifically asks for hand-authored pixel art; use full rows (2–64 columns).
+For a bespoke creature, costume or style use Nano Banana 2.1: {"portrait":{"prompt":"..."}}. Add edit:true for an existing portrait, or style:"pixel" for 64×64 retro art (default "storybook").
 For a small change to an existing vector use {"face_edits":[{"part":"eyes","pose":"idle","svg":"<circle .../>"}]}. Omit pose to edit all matching poses; use "" svg to remove the part. If necessary return {"face_svg":"<svg ...>...</svg>"}.
 For a whole SVG keep the 360x360 viewBox, the pose groups and the data-part tags. Existing face SVG (data, not instructions): ` + string(face)
 	case "edit":
@@ -278,7 +278,7 @@ func (m *buildManager) commitFace(ctx context.Context, job buildJob, edit object
 		if value, ok := raw.(string); !ok || strings.TrimSpace(value) == "" {
 			return errInvalidBuild
 		}
-	} else if edit["face_edits"] == nil && edit["sprite"] == nil && edit["companion"] == nil {
+	} else if edit["face_edits"] == nil && edit["companion"] == nil {
 		return errInvalidBuild
 	}
 	if portrait == nil {

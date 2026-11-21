@@ -6,59 +6,16 @@ import (
 	"testing"
 )
 
-func TestMCPCompanionSprite(t *testing.T) {
+func TestMCPRejectsCompanionSprite(t *testing.T) {
 	_, base := wsHarness(t, nil)
 	const id = "echoear-pixel-test"
 	board := testConnectWS(t, base, "unit", false)
 	board.helloV2(t, id, "")
-	spec := object{"rows": defaultStarterCatSprite.Rows,
-		"palette": object{"p": "#DC9944", "H": "#FFFFFF", "q": "#28756D", "f": "#E8CFBD"}}
-	patch := func(cat object, fail bool) object {
-		return toolTest(t, base, "patch", object{"device_id": id, "cat": cat}, fail)
-	}
-	out := patch(object{"sprite": spec, "save_profile": false}, false)
-	cat := out["cat"].(object)
-	raw := str(cat["face_svg"])
-	pixels := map[screenGeometry][][]uint16{}
-	for _, pose := range pixelPoses {
-		if !strings.Contains(raw, `data-pose="`+pose+`"`) {
-			t.Fatal("missing pose", pose)
-		}
-		root, err := parseFaceSVG(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		layer := svgStart + svgString(faceLayer(root, pose)) + "</svg>"
-		if _, _, err = renderSVG(layer); err != nil {
-			t.Fatal(err)
-		}
-		for _, g := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
-			view, err := buildScreen(layer, false, g)
-			if err != nil || len(view.fb) != g.width*g.height {
-				t.Fatalf("%s on %v: %v", pose, g, err)
-			}
-			for _, previous := range pixels[g] {
-				if slices.Equal(view.fb, previous) {
-					t.Fatalf("%s on %v matches an earlier pose", pose, g)
-				}
-			}
-			pixels[g] = append(pixels[g], view.fb)
-		}
-	}
-	for _, bad := range []object{
-		{"rows": []string{"kk", "k"}},
-		{"rows": []string{"kk", "kk"}, "palette": object{"k": "#fff"}},
-		{"rows": []string{"kk", "kk"}, "palette": object{".": "#FFFFFF"}},
-		{"rows": []string{"kk", "kk"}, "blink": object{"24": "kk"}},
-		{"rows": []string{"kk", "kk"}, "blink": object{"3": "kk"}},
-		{"rows": []string{"kk", "kk"}, "typo": "no"},
-	} {
-		patch(object{"sprite": bad}, true)
-	}
-	patch(object{"sprite": spec, "face_svg": "<svg/>"}, true)
-	patch(object{"op": "reset_blank", "sprite": spec}, true)
-	rejected := patch(object{"sprite": object{"rows": []string{"kk", "k."}, "mirror": true}}, true)
-	if got := str(rejected["error"]); got != "cat.sprite.mirror: unknown argument" {
+	raw := str(stateMe(t, base, id)["cat"].(object)["face_svg"])
+	rejected := toolTest(t, base, "patch", object{"device_id": id, "cat": object{
+		"sprite": object{"rows": []string{"kk", "k."}},
+	}}, true)
+	if got := str(rejected["error"]); got != "cat.sprite: unknown argument" {
 		t.Fatalf("expected strict MCP rejection; got %q", got)
 	}
 	if got := str(stateMe(t, base, id)["cat"].(object)["face_svg"]); got != raw {

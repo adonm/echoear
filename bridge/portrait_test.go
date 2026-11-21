@@ -66,7 +66,7 @@ func TestPortraitAlignsTranslatedSilhouettes(t *testing.T) {
 			painted = b
 		}
 		center := b.Min.Add(b.Max)
-		if b != painted || center.X < 359 || center.X > 361 || center.Y < 359 || center.Y > 361 {
+		if b != painted || center.X < 359 || center.X > 361 || center.Y < 323 || center.Y > 325 {
 			t.Fatalf("%s drifted: got %v, idle %v", portraitPoses[i], b, painted)
 		}
 		if i != 0 && bytes.Equal(im.Pix, poses[0].Pix) {
@@ -78,6 +78,39 @@ func TestPortraitAlignsTranslatedSilhouettes(t *testing.T) {
 	}
 	if _, err := slicePortrait(image.NewRGBA(image.Rect(0, 0, 1024, 1024)), p); err == nil {
 		t.Fatal("accepted an empty sheet")
+	}
+}
+
+func TestPortraitSilhouettesClearMenuAndBezel(t *testing.T) {
+	bg, _ := directPaint("#FFF2E7")
+	for _, shape := range []image.Rectangle{image.Rect(100, 50, 410, 460), image.Rect(22, 106, 490, 406)} {
+		sheet := image.NewRGBA(image.Rect(0, 0, 1024, 1024))
+		draw.Draw(sheet, sheet.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
+		for i := range portraitPoses {
+			offset := image.Pt(i%2*512+i*3, i/2*512-i*4)
+			draw.Draw(sheet, shape.Add(offset), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
+		}
+		poses, err := slicePortrait(sheet, bg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		menu := image.Rect(120, 292, 240, 340)
+		for i, pose := range poses {
+			b := portraitBounds(pose, pose.Bounds(), bg)
+			if b.Empty() || b.Overlaps(menu) || b.Min.Y < 42 || b.Max.Y > 284 {
+				t.Fatalf("%s: portrait %v outside safe vertical framing", portraitPoses[i], b)
+			}
+			if scaleX, scaleY := float64(b.Dx())/float64(shape.Dx()), float64(b.Dy())/float64(shape.Dy()); math.Abs(scaleX-scaleY) > 0.01 {
+				t.Fatalf("%s: portrait %v distorted from %v", portraitPoses[i], b, shape)
+			}
+			for _, x := range []int{b.Min.X, b.Max.X} {
+				for _, y := range []int{b.Min.Y, b.Max.Y} {
+					if (x-180)*(x-180)+(y-180)*(y-180) >= 174*174 {
+						t.Fatalf("%s: portrait %v would be clipped by the bezel", portraitPoses[i], b)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -154,7 +187,7 @@ func TestPixelPortraitGridAndAlignment(t *testing.T) {
 		} else if b != bounds || bytes.Equal(idle, rgba.Pix) {
 			t.Fatalf("%s: silhouette shifted or expression lost", pose)
 		}
-		if n == 0 || math.Abs(float64(sx)/float64(n)-179.5) > 1 || math.Abs(float64(sy)/float64(n)-179.5) > 1 {
+		if n == 0 || math.Abs(float64(sx)/float64(n)-179.5) > 1 || math.Abs(float64(sy)/float64(n)-161.5) > 2 {
 			t.Fatalf("%s: silhouette centroid drifted", pose)
 		}
 	}

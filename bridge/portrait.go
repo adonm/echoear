@@ -33,6 +33,7 @@ const portraitPixelStyle = "pixel"
 const portraitStorybookStyle = "storybook"
 const portraitMaxBytes = 8 << 20
 const portraitTimeout = 65 * time.Second
+const portraitCenterY = 162
 
 var portraitPoses = [...]string{"idle", "blink", "talk", "think"}
 var portraitIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -314,8 +315,12 @@ func slicePortrait(sheet image.Image, bg imagecolor.RGBA) ([4]*image.RGBA, error
 		}
 		b = b.Inset(-3).Intersect(cell)
 		crops[i] = b
-		// All four poses use one scale. Cap the diagonal for a round display.
-		scale = min(scale, 318/math.Hypot(float64(b.Dx()), float64(b.Dy())), 247/float64(b.Dy()))
+		// Fit the lower crop corners in the bezel, reserving space for raster
+		// rounding and pixel blocks. Cap the height at y=42..282 above Menu.
+		w, h := float64(b.Dx()), float64(b.Dy())
+		const offset, radius = screenSize/2 - portraitCenterY, 168
+		cornerScale := 2 * (math.Sqrt(w*w*(radius*radius-offset*offset)+h*h*radius*radius) - offset*h) / (w*w + h*h)
+		scale = min(scale, cornerScale, 240/h)
 	}
 	for i, crop := range crops {
 		src := img.SubImage(crop).(*image.RGBA)
@@ -331,7 +336,7 @@ func slicePortrait(sheet image.Image, bg imagecolor.RGBA) ([4]*image.RGBA, error
 		out := image.NewRGBA(image.Rect(0, 0, screenSize, screenSize))
 		draw.Draw(out, out.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
 		w, h := int(math.Round(float64(crop.Dx())*scale)), int(math.Round(float64(crop.Dy())*scale))
-		x, y := (screenSize-w)/2, (screenSize-h)/2
+		x, y := (screenSize-w)/2, portraitCenterY-h/2
 		xdraw.CatmullRom.Scale(out, image.Rect(x, y, x+w, y+h), src, crop, draw.Src, nil)
 		poses[i] = out
 	}
@@ -443,7 +448,7 @@ func (p *portraitStore) has(id string) bool {
 }
 
 func (b *bridge) preparePortrait(ctx context.Context, who peer, args object, raw any) (*pendingPortrait, error) {
-	for _, field := range []string{"sprite", "companion", "face_svg", "face_edits", "face_bg", "mark_color", "accent_color"} {
+	for _, field := range []string{"companion", "face_svg", "face_edits", "face_bg", "mark_color", "accent_color"} {
 		if _, exists := args[field]; exists {
 			return nil, fieldError("cat.portrait", "cannot combine with %s", field)
 		}

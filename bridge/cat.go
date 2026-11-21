@@ -236,7 +236,7 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 				return c, false, problem(400, "Unsupported voice")
 			}
 			c.Voice = str(val)
-		case "face_svg", "face_edits", "sprite", "companion":
+		case "face_svg", "face_edits", "companion":
 			editLook = true
 		case "configured", "save_profile", "device_id", "op":
 		default:
@@ -251,7 +251,7 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 	newPalette := [...]string{c.FaceBG, c.MarkColor, c.AccentColor}
 	edits, editParts := args["face_edits"]
 	if raw, set := args["companion"]; set {
-		for _, field := range []string{"sprite", "face_svg", "face_bg", "mark_color", "accent_color"} {
+		for _, field := range []string{"face_svg", "face_bg", "mark_color", "accent_color"} {
 			if _, exists := args[field]; exists {
 				return c, false, fieldError("cat.companion", "cannot combine with %s", field)
 			}
@@ -266,20 +266,6 @@ func updateCat(c catState, args object, voices deviceVoices) (catState, bool, er
 		} else {
 			c.FaceSVG, err = sanitizeFaceSVG(art)
 		}
-		return c, save, err
-	} else if raw, set := args["sprite"]; set {
-		if _, full := args["face_svg"]; full || editParts {
-			return c, false, fieldError("cat.sprite", "cannot combine with face_svg or face_edits")
-		}
-		spec, err := readUIValue[companionSprite](raw, companionSpriteSchema, "cat.sprite")
-		if err != nil {
-			return c, false, err
-		}
-		art, err := compileCompanionSprite(spec)
-		if err != nil {
-			return c, false, fieldError("cat.sprite", "%s", err)
-		}
-		c.FaceSVG, err = sanitizeFaceSVG(art)
 		return c, save, err
 	} else if raw, set := args["face_svg"]; set {
 		if editParts {
@@ -452,7 +438,7 @@ func (b *bridge) patchCat(ctx context.Context, id string, args object) (any, err
 	if !supplied {
 		op = "update"
 	}
-	for _, field := range []string{"face_edits", "sprite", "companion", "portrait"} {
+	for _, field := range []string{"face_edits", "companion", "portrait"} {
 		if _, set := c[field]; set && op != "update" {
 			return nil, fieldError("cat."+field, "requires cat update")
 		}

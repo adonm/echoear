@@ -436,9 +436,8 @@ Shift instantly with `patch({device_id, cat: {companion: {species: "owl",
 palette: "lavender", accessory: "scarf"}, save_profile: false}})`. Ten species
 share eight colorways: peach, mint, lavender, sage, berry, amber, sky and
 midnight. Set `eyes`, `markings` or a palette object with `base` and hex tints
-to customize. Vector faces support `face_edits` and `face_svg`. Use raw `sprite`
-only for explicitly requested hand-authored pixel art, with full rows up to
-64×64. Existing saved artwork is unchanged.
+to customize. Vector faces still support `face_edits` and `face_svg`. Existing
+saved artwork is unchanged.
 
 For bespoke creatures, costumes or styles use `cat.portrait: {prompt, bg?, edit?, style?}`. The dedicated
 OpenCode service sends a billed request to `opencode/gemini-nano-banana-2.1`
