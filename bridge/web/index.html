@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#151722">
   <title>EchoEar · Cat Club</title>
   <link rel="icon" href="data:,">
+  <link id="phone-manifest" rel="manifest" crossorigin="use-credentials">
+  <link id="phone-icon" rel="apple-touch-icon">
   <link rel="stylesheet" href="/app/style.css">
   <script type="module" src="/app/client.js"></script>
 </head>
@@ -17,6 +19,7 @@
     </div>
     <div class="row header-actions">
       <span id="link-state" class="connection" role="status">Not connected</span>
+      <button id="install-phone" class="quiet" type="button" hidden>Install cat</button>
       <button id="diagnostics-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="diagnostics" hidden>Diagnostics</button>
       <button id="library-toggle" class="quiet" type="button" aria-haspopup="dialog" hidden>Photo Library</button>
       <button id="sidebar-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="sidebar" hidden>Devices</button>
@@ -101,36 +104,46 @@
         <h2 id="face-heading">Cat face</h2>
       </header>
       <div class="stage">
-        <svg id="stage" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" aria-labelledby="screen-title screen-description">
-          <title id="screen-title">EchoEar screen</title>
-          <desc id="screen-description">No cat selected.</desc>
-          <defs><clipPath id="round-screen"><circle cx="180" cy="180" r="180"/></clipPath></defs>
-          <svg id="screen" viewBox="0 0 360 360" width="360" height="360">
-            <g id="screen-mask" clip-path="url(#round-screen)">
-              <rect id="canvas-bg" width="360" height="360" fill="#202432"/>
-              <g id="screen-placeholder" fill="none" stroke="#727b92" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M112 182v-51l43 27c16-5 34-5 50 0l43-27v51c0 39-27 63-68 63s-68-24-68-63Z"/>
-                <path d="M148 194h10m44 0h10m-36 21 4 4 4-4"/>
+        <div id="screen-content" inert>
+          <svg id="stage" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg" aria-labelledby="screen-title screen-description">
+            <title id="screen-title">EchoEar screen</title>
+            <desc id="screen-description">No cat selected.</desc>
+            <defs><clipPath id="round-screen"><circle cx="180" cy="180" r="180"/></clipPath></defs>
+            <svg id="screen" viewBox="0 0 360 360" width="360" height="360">
+              <g id="screen-mask" clip-path="url(#round-screen)">
+                <rect id="canvas-bg" width="360" height="360" fill="#202432"/>
+                <g id="screen-placeholder" fill="none" stroke="#727b92" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M112 182v-51l43 27c16-5 34-5 50 0l43-27v51c0 39-27 63-68 63s-68-24-68-63Z"/>
+                  <path d="M148 194h10m44 0h10m-36 21 4 4 4-4"/>
+                </g>
+                <g id="nodes"></g>
               </g>
-              <g id="nodes"></g>
-            </g>
+            </svg>
           </svg>
-        </svg>
+        </div>
+        <div id="reconnect-overlay" class="reconnect-overlay" role="group" aria-label="Live connection paused" hidden>
+          <p id="reconnect-note" role="status"></p>
+          <button id="reconnect-cat" class="accent" type="button">Tap to reconnect</button>
+        </div>
       </div>
       <p id="screen-status" class="screen-status" role="status">No cat selected.</p>
-      <div id="screen-controls" class="row volume" hidden>
-        <label for="volume">Volume</label>
-        <input id="volume" type="range" min="0" max="100" value="55">
-        <output for="volume" id="volume-value">55%</output>
-        <button id="volume-auto" type="button" class="quiet" aria-label="Automatic volume" aria-pressed="true">Auto</button>
-      </div>
-      <div id="voice-controls" class="row wrap voice-controls" hidden>
-        <label for="voice-select">Voice</label>
-        <button id="voice-first" type="button" class="quiet" aria-pressed="false" hidden></button>
-        <button id="voice-second" type="button" class="quiet" aria-pressed="false" hidden></button>
-        <select id="voice-select"></select>
-        <p id="voice-note" class="note" role="status"></p>
-      </div>
+      <details id="face-settings" class="face-settings" open>
+        <summary>Volume &amp; voice</summary>
+        <div id="screen-controls" class="row volume" hidden>
+          <label for="volume">Volume</label>
+          <input id="volume" type="range" min="0" max="100" value="55">
+          <output for="volume" id="volume-value">55%</output>
+          <button id="volume-auto" type="button" class="quiet" aria-label="Automatic volume" aria-pressed="true">Auto</button>
+        </div>
+        <div id="voice-controls" class="row wrap voice-controls" hidden>
+          <label for="voice-select">Voice</label>
+          <button id="voice-first" type="button" class="quiet" aria-pressed="false" hidden></button>
+          <button id="voice-second" type="button" class="quiet" aria-pressed="false" hidden></button>
+          <select id="voice-select"></select>
+          <p id="voice-note" class="note" role="status"></p>
+        </div>
+      </details>
+      <p id="phone-install-hint" class="small" hidden>In Safari, tap Share → Add to Home Screen.</p>
     </section>
 
     <section id="chat" class="chat-panel panel" aria-labelledby="chat-heading">
@@ -138,7 +151,7 @@
         <p class="eyebrow">02 / Conversation</p>
         <div class="row chat-top wrap">
           <div class="chat-identity">
-            <h2 id="chat-heading">Chat</h2>
+            <h2 id="chat-heading" tabindex="-1">Chat</h2>
             <div class="row chat-cat"><span class="cat-dot" aria-hidden="true"></span><strong id="chat-name">Choose a cat</strong><span id="chat-mode" class="pill" hidden></span></div>
           </div>
           <div class="row chat-actions">
@@ -170,9 +183,11 @@
           <button id="mic-send" type="button" class="mic-send" hidden>Send now</button>
           <button id="cancel" type="button" class="quiet mic-cancel" hidden>Cancel</button>
           <button id="sound" type="button" class="quiet">Enable speaker</button>
-          <label id="target-label" class="sr-only" for="target">Talk destination</label>
-          <select id="target"><option value="">Ask my cat</option></select>
-          <button id="call-target" type="button" class="quiet" disabled>Call</button>
+          <div class="row phone-destination">
+            <label id="target-label" class="sr-only" for="target">Talk destination</label>
+            <select id="target"><option value="">Ask my cat</option></select>
+            <button id="call-target" type="button" class="quiet" disabled>Call</button>
+          </div>
         </div>
         <p id="mic-help" class="small" hidden></p>
         <p id="chat-note" class="note" role="status"></p>
