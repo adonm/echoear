@@ -20,7 +20,7 @@ func TestNativeTapRequiresCurrentFrameRevision(t *testing.T) {
 	d.json(t, tap)
 	d.barrier(t)
 	b.ws.mu.Lock()
-	started := !b.ws.devices[id].recAt.IsZero()
+	started := b.ws.devices[id].recording.active()
 	rev = b.ws.devices[id].nativeRev // An idle blink may have produced another revision.
 	b.ws.mu.Unlock()
 	if started {
@@ -72,7 +72,7 @@ func TestNativeSayMoreRequiresCurrentFrameRevision(t *testing.T) {
 	d.json(t, tap)
 	d.barrier(t)
 	b.ws.mu.Lock()
-	started, thinkingRev := cat.capture != nil, cat.nativeRev
+	started, thinkingRev := cat.recording.endpoint != nil, cat.nativeRev
 	b.ws.mu.Unlock()
 	if started {
 		t.Fatal("a stale Talk tap started a Say more capture")
@@ -97,7 +97,7 @@ func TestNativeWakeWordUsesTalkFlowOnlyWhenEnabled(t *testing.T) {
 	d.barrier(t)
 	b.ws.mu.Lock()
 	dev := b.ws.devices[id]
-	started := !dev.recAt.IsZero()
+	started := dev.recording.active()
 	endpoint := dev.caps.BridgeEndpoint
 	b.ws.mu.Unlock()
 	if started || !endpoint {
@@ -114,7 +114,7 @@ func TestNativeWakeWordUsesTalkFlowOnlyWhenEnabled(t *testing.T) {
 	d.json(t, object{"ev": "rec_start"})
 	d.barrier(t)
 	b.ws.mu.Lock()
-	open := dev.recOpen
+	open := dev.recording.open()
 	b.ws.mu.Unlock()
 	if !open {
 		t.Fatal("recording did not wait for the normal rec_start acknowledgement")

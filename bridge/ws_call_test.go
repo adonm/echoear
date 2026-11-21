@@ -123,7 +123,7 @@ func TestWSCallDuplex(t *testing.T) {
 	checkCallStates(t, b.ws, callActive, callActive)
 	b.ws.mu.Lock()
 	for _, d := range b.ws.devices {
-		if d.mic != nil || d.recOpen || d.busy {
+		if d.recording.pcm != nil || d.recording.open() || d.busy {
 			t.Error("call audio entered the assistant turn path")
 		}
 	}
@@ -451,7 +451,8 @@ func TestCallPCMBackpressure(t *testing.T) {
 func TestLegacyCallWaitsForRecordingTail(t *testing.T) {
 	h := &wsHub{devices: make(map[string]*wsDevice)}
 	d := &wsDevice{key: callCake, callPeer: callMint, callID: 1, callState: callActive,
-		recAt: time.Now(), recOpen: true, client: &wsClient{role: "device", ctx: t.Context(), out: make(chan wsFrame, 8)}}
+		client: &wsClient{role: "device", ctx: t.Context(), out: make(chan wsFrame, 8)}}
+	d.recording.start(time.Now(), "", false)
 	p := &wsDevice{key: callMint, callPeer: callCake, callID: 1, callState: callActive,
 		client: &wsClient{ctx: t.Context(), out: make(chan wsFrame, 8)}}
 	d.client.device = d
@@ -459,7 +460,7 @@ func TestLegacyCallWaitsForRecordingTail(t *testing.T) {
 	h.abortCallRecording(d)
 	packet := func() []byte { return append([]byte{micPrefix}, make([]byte, callPCMBytes)...) }
 	h.micChunk(d.client, packet())
-	if len(p.client.out) != 0 || d.recOpen {
+	if len(p.client.out) != 0 || d.recording.open() {
 		t.Fatal("legacy note tail was not stopped")
 	}
 	h.handle(d.client, wsEvent{Event: "rec_end", Cancelled: true})

@@ -139,7 +139,7 @@ func TestEndpointWebSendCancelAndAuto(t *testing.T) {
 	appendPCM(frame) // 4.4 seconds of silence is not an endpoint in unknown speech.
 	d.barrier(t)
 	b.ws.mu.Lock()
-	stillListening := !b.ws.devices[id].recStopping
+	stillListening := b.ws.devices[id].recording.phase == captureOpen
 	b.ws.mu.Unlock()
 	if !stillListening {
 		t.Fatal("bridge stopped before the continuation")

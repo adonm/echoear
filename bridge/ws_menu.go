@@ -96,12 +96,12 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		case "status", "tap", "head", "call", "call_end", "tts_ack":
 		case "rec_start":
 			if native && !d.caps.CallPCM {
-				d.recTail = true
+				d.recording.legacyCallTail = true
 			}
 			return
 		case "rec_end":
-			d.recIgnoreStart, d.recTail = false, false
-			h.clearRecording(d)
+			d.recording.receivedEnd()
+			d.recording.clear()
 			return
 		default:
 			return
@@ -109,7 +109,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	}
 	switch ev.Event {
 	case "wake_word":
-		if native && d.caps.WakeWord && d.wakeWord && d.recAt.IsZero() && !d.busy && !d.ttsStarted && !d.awaitAck {
+		if native && d.caps.WakeWord && d.wakeWord && !d.recording.active() && !d.busy && !d.ttsStarted && !d.awaitAck {
 			h.startRecording(d, "", now, true)
 		}
 	case "status":
@@ -144,26 +144,23 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.endCall(d, "audio unavailable")
 		}
 	case "rec_start":
-		if target, ok := recordTarget(ev.Target); ok && !d.recOpen && !d.recIgnoreStart {
-			d.recTail = false
-			if target == "" {
-				target = d.recTarget
-			}
-			if !d.recAt.IsZero() {
-				d.recOpen = true
+		if target, ok := recordTarget(ev.Target); ok && d.recording.acceptsStart() {
+			d.recording.legacyCallTail = false
+			if d.recording.active() {
+				d.recording.acknowledge()
 			} else {
 				h.startRecording(d, target, now, false)
 			}
 		}
 	case "rec_request": // A virtual web cat uses the same bridge-owned handshake as a board.
-		if c.role == "web" && c.device == d && d.caps.BridgeEndpoint && h.b.endpoint != nil && d.recAt.IsZero() {
+		if c.role == "web" && c.device == d && d.caps.BridgeEndpoint && h.b.endpoint != nil && !d.recording.active() {
 			if target, ok := recordTarget(ev.Target); ok && target == "" {
 				h.startRecording(d, target, now, true)
 			}
 		}
 	case "rec_end":
-		d.recIgnoreStart, d.recTail = false, false
-		if !d.recAt.IsZero() {
+		d.recording.receivedEnd()
+		if d.recording.active() {
 			h.endRecording(d, ev, now)
 		}
 	case "text":
@@ -303,7 +300,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	case "rec-cancel", "rec-send":
 		h.recordingControl(d, now, a.kind == "rec-cancel")
 	case "rec-continue":
-		if d.busy && d.recAt.IsZero() && d.caps.BridgeEndpoint && h.b.endpoint != nil {
+		if d.busy && !d.recording.active() && d.caps.BridgeEndpoint && h.b.endpoint != nil {
 			h.startRecording(d, "", now, true)
 		}
 	case "stop":
@@ -330,7 +327,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		if key == "cat-ring" && (d.busy || d.ttsStarted || d.awaitAck) {
 			return // The previous idle frame may still have a Talk target.
 		}
-		if !d.recAt.IsZero() {
+		if d.recording.active() {
 			h.recordingControl(d, now, false)
 		} else {
 			h.startRecording(d, a.value, now, true)

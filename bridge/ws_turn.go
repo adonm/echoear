@@ -22,21 +22,6 @@ func recordTarget(s string) (string, bool) {
 	return s, s == "" || targetRE.MatchString(s)
 }
 
-func (h *wsHub) clearRecording(d *wsDevice) {
-	if c := d.capture; c != nil {
-		d.capture = nil
-		c.deadline.Stop()
-		c.cancel()
-		close(c.listening)
-	}
-	if d.recStopTimer != nil {
-		d.recStopTimer.Stop()
-		d.recStopTimer = nil
-	}
-	d.recAt, d.recOpen, d.recTarget, d.mic = time.Time{}, false, "", nil
-	d.recStopping = false
-}
-
 func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, request bool) {
 	if h.parentRefresh(d.key, now) != "" {
 		return
@@ -54,8 +39,7 @@ func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, reques
 	if !bridgeEndpoint || d.ttsStarted || d.awaitAck {
 		h.stopPlayback(d, true)
 	}
-	d.recAt, d.recOpen, d.recTarget, d.mic = now, !request, target, nil
-	d.recStopping, d.recIgnoreStart = false, false
+	d.recording.start(now, target, request)
 	if request {
 		start := object{"op": "rec", "action": "start", "target": target}
 		if bridgeEndpoint {
@@ -68,18 +52,21 @@ func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, reques
 }
 
 func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
-	if d.recAt.IsZero() || d.recStopping && !cancelled {
+	c := &d.recording
+	if !c.active() {
 		return
 	}
 	if cancelled {
-		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget, "cancelled": true}, false)
-		d.recIgnoreStart = !d.recOpen
+		h.push(d, object{"op": "rec", "action": "stop", "target": c.target, "cancelled": true}, false)
+		c.suppressLateStart()
 		h.endRecording(d, wsEvent{Cancelled: true}, now)
 		return
 	}
+	if !c.requestStop() {
+		return
+	}
 	h.push(d, object{"op": "rec", "action": "stop", "target": ""}, false)
-	d.recStopping = true
-	if d.client.role == "web" && d.capture == nil {
+	if d.client.role == "web" && c.endpoint == nil {
 		return
 	}
 	// Keep accepting DMA packets until the board's rec_end. The timer is
@@ -88,12 +75,12 @@ func (h *wsHub) recordingControl(d *wsDevice, now time.Time, cancelled bool) {
 	timer = time.AfterFunc(recStopWait, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if h.active(d) && d.recStopTimer == timer {
-			d.recIgnoreStart = !d.recOpen
+		if h.active(d) && c.stopTimer == timer {
+			c.suppressLateStart()
 			h.endRecording(d, wsEvent{}, time.Now())
 		}
 	})
-	d.recStopTimer = timer
+	c.stopTimer = timer
 }
 
 func (h *wsHub) micChunk(c *wsClient, data []byte) {
@@ -108,16 +95,17 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 	}
 	if d.callState != callNone {
 		tagged := d.caps.CallPCM && data[0] == callMicPrefix
-		legacy := !d.caps.CallPCM && !d.recTail && data[0] == micPrefix
+		legacy := !d.caps.CallPCM && !d.recording.legacyCallTail && data[0] == micPrefix
 		if d.callState == callActive && (tagged || legacy) {
 			h.relayCallPCM(d, data)
 		}
 		return
 	}
-	if data[0] != micPrefix || !d.recOpen {
+	rec := &d.recording
+	if data[0] != micPrefix || !rec.open() {
 		return
 	}
-	if c := d.capture; c != nil {
+	if c := rec.endpoint; c != nil {
 		// Bound bytes as well as entries. The limit leaves headroom over DMA and
 		// worklet frames while preventing oversized frames from filling the queue.
 		if len(data)-1 > 2*pcmPacket {
@@ -131,9 +119,9 @@ func (h *wsHub) micChunk(c *wsClient, data []byte) {
 		}
 		return
 	}
-	room := (maxPCM - len(d.mic)) &^ 1
+	room := (maxPCM - len(rec.pcm)) &^ 1
 	n := min(len(data)-1, room)
-	d.mic = append(d.mic, data[1:1+n]...)
+	rec.pcm = append(rec.pcm, data[1:1+n]...)
 	if n == room {
 		h.stopRecordingAtLimit(d, time.Now())
 	}
@@ -148,15 +136,15 @@ func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 	if h.parentRefresh(d.key, now) != "" {
 		return
 	}
-	if d.capture != nil && !ev.Cancelled {
+	if d.recording.endpoint != nil && !ev.Cancelled {
 		h.finishEndpoint(d, now)
 		return
 	}
-	pcm, target := d.mic, d.recTarget
+	pcm, target := d.recording.pcm, d.recording.target
 	if requested, ok := recordTarget(ev.Target); ok && requested != "" {
 		target = requested
 	}
-	h.clearRecording(d)
+	d.recording.clear()
 	if ev.Cancelled || len(pcm) == 0 {
 		if ev.Cancelled {
 			h.push(d, object{"op": "chime", "kind": "cancel"}, false)
@@ -211,9 +199,9 @@ func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, source stri
 func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) {
 	h.wake(d, now)
 	h.stopPlayback(d, true)
-	if !d.recAt.IsZero() {
-		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
-		h.clearRecording(d)
+	if d.recording.active() {
+		h.push(d, object{"op": "rec", "action": "stop", "target": d.recording.target}, false)
+		d.recording.clear()
 	}
 	d.drawer, d.card, d.pending = "", nil, nil
 	if !keepView {
@@ -288,9 +276,9 @@ func (h *wsHub) turnError(d *wsDevice, id uint64, message string) {
 func (h *wsHub) stopCatTurn(d *wsDevice) {
 	h.cancelLocalTurn(d)
 	h.stopPlayback(d, true)
-	if !d.recAt.IsZero() {
-		h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
-		h.clearRecording(d)
+	if d.recording.active() {
+		h.push(d, object{"op": "rec", "action": "stop", "target": d.recording.target}, false)
+		d.recording.clear()
 	}
 }
 
@@ -537,8 +525,8 @@ func (h *wsHub) streamPlayback(ctx context.Context, d *wsDevice, id uint64, stre
 		if i == 0 {
 			stream.traceFirst(trace, ttsStart)
 			h.mu.Lock()
-			for h.active(d) && d.audio == id && ctx.Err() == nil && d.capture != nil {
-				listening := d.capture.listening
+			for h.active(d) && d.audio == id && ctx.Err() == nil && d.recording.endpoint != nil {
+				listening := d.recording.endpoint.listening
 				h.mu.Unlock()
 				select {
 				case <-listening:
@@ -720,9 +708,9 @@ func (h *wsHub) deliverOnline(ctx context.Context, sender peer, recipients []pee
 		view := (intercomCard{sender, text, cat}).scene(false)
 		h.cancelTurn(d, "intercom")
 		h.stopPlayback(d, true)
-		if !d.recAt.IsZero() {
-			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)
-			h.clearRecording(d)
+		if d.recording.active() {
+			h.push(d, object{"op": "rec", "action": "stop", "target": d.recording.target}, false)
+			d.recording.clear()
 		}
 		d.drawer, d.pending = "", nil
 		if d.app != nil {

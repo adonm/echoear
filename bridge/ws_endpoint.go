@@ -37,11 +37,11 @@ type captureResult struct {
 func (h *wsHub) startEndpoint(d *wsDevice) {
 	ctx, cancel := context.WithCancel(d.client.ctx)
 	c := &endpointCapture{ctx: ctx, cancel: cancel, packets: make(chan micPacket, 64), result: make(chan captureResult, 1), listening: make(chan struct{})}
-	d.capture = c
+	d.recording.endpoint = c
 	c.deadline = time.AfterFunc(endpointLimit, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if h.active(d) && d.capture == c {
+		if h.active(d) && d.recording.endpoint == c {
 			h.recordingControl(d, time.Now(), false)
 		}
 	})
@@ -102,7 +102,7 @@ func (h *wsHub) captureEndpoint(d *wsDevice, c *endpointCapture) {
 			if decision != endpointWait {
 				h.mu.Lock()
 				// Don't stop on an old decision while more speech is queued.
-				if h.active(d) && d.capture == c && d.recOpen && len(c.packets) == 0 {
+				if h.active(d) && d.recording.endpoint == c && d.recording.open() && len(c.packets) == 0 {
 					h.recordingControl(d, time.Now(), decision == endpointDiscard)
 				}
 				h.mu.Unlock()
@@ -112,12 +112,12 @@ func (h *wsHub) captureEndpoint(d *wsDevice, c *endpointCapture) {
 }
 
 func (h *wsHub) finishEndpoint(d *wsDevice, now time.Time) {
-	c := d.capture
-	d.capture = nil
+	c := d.recording.endpoint
+	d.recording.endpoint = nil
 	c.deadline.Stop()
 	close(c.packets)
 	close(c.listening)
-	h.clearRecording(d)
+	d.recording.clear()
 	d.queuedVoice = c
 	if !h.maybeStartVoice(d, now) {
 		h.render(d, now, false)

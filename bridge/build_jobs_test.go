@@ -222,10 +222,10 @@ func TestBuildReadyWaitsForIdleAndSurvivesStop(t *testing.T) {
 	expectValue(t, stub.deleted, job)
 	waitBuildState(t, b, job, "ready")
 	h.mu.Lock()
-	if !d.recOpen || d.card != nil {
+	if !d.recording.open() || d.card != nil {
 		t.Error("Ready displaced an active recording")
 	}
-	h.clearRecording(d)
+	d.recording.clear()
 	h.mu.Unlock()
 	b.builders.signal()
 	cardAndSpeech("build-done")

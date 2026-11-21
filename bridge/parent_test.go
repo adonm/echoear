@@ -135,7 +135,7 @@ func TestParentEnforcesQuietLimitAndPause(t *testing.T) {
 			}
 			b.ws.mu.Lock()
 			d, f := b.ws.devices[id], b.ws.devices[peerID]
-			blocked := d.asleep && d.parentReason == reason && d.recAt.IsZero() && !d.recOpen && len(d.mic) == 0 &&
+			blocked := d.asleep && d.parentReason == reason && !d.recording.active() && len(d.recording.pcm) == 0 &&
 				d.callState == callNone && f.callState == callNone && d.app == nil && !d.busy && d.card == nil && d.view == nil
 			b.ws.mu.Unlock()
 			if !blocked {

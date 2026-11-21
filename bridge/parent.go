@@ -211,7 +211,7 @@ func (h *wsHub) parentAccount(key string, p *parentRuntime, now time.Time, flush
 
 func (h *wsHub) parentUsing(d *wsDevice, p *parentRuntime) bool {
 	return p.reason == "" && (len(p.offline) != 0 || d != nil && h.active(d) &&
-		(!d.recAt.IsZero() || d.busy || d.ttsStarted || d.awaitAck || d.app != nil && !d.asleep || d.callState == callActive))
+		(d.recording.active() || d.busy || d.ttsStarted || d.awaitAck || d.app != nil && !d.asleep || d.callState == callActive))
 }
 
 func (h *wsHub) parentRefresh(key string, now time.Time) parentReason {
@@ -251,9 +251,9 @@ func (h *wsHub) applyParent(d *wsDevice, r parentReason, now time.Time) {
 	d.parentReason = r
 	if r != "" {
 		h.endCall(d, "Cat is resting")
-		pendingRec := !d.recAt.IsZero() && !d.recOpen
+		pendingRec := d.recording.active() && !d.recording.open()
 		h.abortCallRecording(d)
-		d.recIgnoreStart = pendingRec
+		d.recording.ignoreStart = pendingRec
 		h.cancelTurn(d, "parent controls")
 		h.stopPlayback(d, true)
 		h.clearView(d)

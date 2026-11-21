@@ -149,23 +149,15 @@ type wsDevice struct {
 	callCancel                  context.CancelFunc
 	callFramesIn, callFramesOut uint64
 
-	recAt          time.Time
-	recOpen        bool
-	recTarget      string
-	recStopping    bool
-	recStopTimer   *time.Timer
-	recIgnoreStart bool
-	recTail        bool // Legacy clients share the note and call PCM tag.
-	mic            []byte
-	capture        *endpointCapture
-	queuedVoice    *endpointCapture
-	turn           uint64
-	trace          *turnTrace
-	cancel         context.CancelFunc
-	busy           bool
-	stopTaps       int
-	stopTapAt      time.Time
-	agentSetScene  bool
+	recording     deviceCapture
+	queuedVoice   *endpointCapture
+	turn          uint64
+	trace         *turnTrace
+	cancel        context.CancelFunc
+	busy          bool
+	stopTaps      int
+	stopTapAt     time.Time
+	agentSetScene bool
 
 	audio      uint64
 	replyAudio *turnAudio
@@ -534,7 +526,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		old.client.cancel()
 		h.endCall(old, "disconnected")
 		h.dropApp(old)
-		h.clearRecording(old)
+		old.recording.clear()
 		h.cancelTurn(old, "reconnect")
 		h.stopPlayback(old, true)
 		d.rev = old.rev
@@ -682,7 +674,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		mood = "calling"
 	case d.asleep:
 		mood = "sleepy"
-	case d.recOpen || !d.recAt.IsZero():
+	case d.recording.active():
 		mood = "listening"
 	case d.busy:
 		mood = "thinking"
@@ -934,11 +926,11 @@ func (h *wsHub) animate(ctx context.Context) {
 					continue
 				}
 				switch {
-				case !d.recAt.IsZero() && d.recStopTimer == nil && now.Sub(d.recAt) > 90*time.Second:
+				case d.recording.active() && d.recording.stopTimer == nil && now.Sub(d.recording.started) > 90*time.Second:
 					h.stopRecordingAtLimit(d, now)
 				case d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)):
 					h.playbackDone(d, now)
-				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
+				case !d.asleep && !d.busy && !d.recording.active() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
 					h.setSleeping(d, true)
 					h.render(d, now, false)
 				case d.asleep && d.caps.PanelSleep && d.client.role == "device":
@@ -947,7 +939,7 @@ func (h *wsHub) animate(ctx context.Context) {
 					h.render(d, now, false)
 				case d.stopTapsExpired(now):
 					h.render(d, now, false)
-				case (d.drawer == "" || d.asleep) && (d.app == nil && d.view == nil || d.asleep || !d.recAt.IsZero()):
+				case (d.drawer == "" || d.asleep) && (d.app == nil && d.view == nil || d.asleep || d.recording.active()):
 					if h.catPose(d, now, d.pose.mood) != d.pose {
 						h.render(d, now, false)
 					}

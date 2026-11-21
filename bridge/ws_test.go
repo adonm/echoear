@@ -480,7 +480,7 @@ func TestWSRecordingLimits(t *testing.T) {
 				// Wait for the server to consume the PCM before aging the recording.
 				dev.barrier(t)
 				b.ws.mu.Lock()
-				b.ws.devices[id].recAt = time.Now().Add(-91 * time.Second)
+				b.ws.devices[id].recording.started = time.Now().Add(-91 * time.Second)
 				b.ws.mu.Unlock()
 			}
 			dev.until(t, hasWS("rec", `"action":"stop","op":"rec","target":""`))
@@ -502,7 +502,7 @@ func TestWSRecordingLimits(t *testing.T) {
 			}
 			b.ws.mu.Lock()
 			d := b.ws.devices[id]
-			cleared := d.recAt.IsZero() && !d.recOpen && len(d.mic) == 0 && !d.busy && d.view == nil
+			cleared := !d.recording.active() && len(d.recording.pcm) == 0 && !d.busy && d.view == nil
 			b.ws.mu.Unlock()
 			if !cleared {
 				t.Fatal("an empty Hex transcript must leave the device idle with no error card")
@@ -546,7 +546,7 @@ func TestWSHardwareSendWaitsForFinalPCM(t *testing.T) {
 			dev.until(t, hasWS("rec", `"action":"stop","op":"rec","target":""`))
 			b.ws.mu.Lock()
 			d := b.ws.devices[id]
-			stopping := d.recOpen && d.recStopping && d.recStopTimer != nil && bytes.Equal(d.mic, first) && !d.busy
+			stopping := d.recording.phase == captureStoppingOpen && d.recording.stopTimer != nil && bytes.Equal(d.recording.pcm, first) && !d.busy
 			b.ws.mu.Unlock()
 			if !stopping {
 				t.Fatal("Send finalized before it could receive the final DMA packet")
@@ -564,7 +564,7 @@ func TestWSHardwareSendWaitsForFinalPCM(t *testing.T) {
 				t.Fatal("recording was not finalized")
 			}
 			b.ws.mu.Lock()
-			cleared := d.recAt.IsZero() && !d.recOpen && !d.recStopping && d.recStopTimer == nil && len(d.mic) == 0
+			cleared := !d.recording.active() && d.recording.stopTimer == nil && len(d.recording.pcm) == 0
 			b.ws.mu.Unlock()
 			if !cleared {
 				t.Fatal("recording did not clear its stop timer and PCM")
@@ -577,7 +577,8 @@ func TestWSHardwareSendFailsafeDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := &bridge{root: t.Context()}
 		c := &wsClient{role: "device", ctx: t.Context(), out: make(chan wsFrame, 8)}
-		d := &wsDevice{client: c, key: "echoear-no-ack", recAt: time.Now(), recOpen: true, screen: roundScreen, cat: blankCat()}
+		d := &wsDevice{client: c, key: "echoear-no-ack", screen: roundScreen, cat: blankCat()}
+		d.recording.start(time.Now(), "", false)
 		h := &wsHub{b: b, devices: map[string]*wsDevice{d.key: d}}
 		h.mu.Lock()
 		h.recordingControl(d, time.Now(), false)
@@ -585,7 +586,7 @@ func TestWSHardwareSendFailsafeDeadline(t *testing.T) {
 		time.Sleep(449 * time.Millisecond)
 		synctest.Wait()
 		h.mu.Lock()
-		waiting := d.recOpen && d.recStopping
+		waiting := d.recording.phase == captureStoppingOpen
 		h.mu.Unlock()
 		if !waiting {
 			t.Fatal("fail-safe fired before 450 ms")
@@ -593,7 +594,7 @@ func TestWSHardwareSendFailsafeDeadline(t *testing.T) {
 		time.Sleep(time.Millisecond)
 		synctest.Wait()
 		h.mu.Lock()
-		done := !d.recOpen && !d.recStopping && d.recStopTimer == nil
+		done := !d.recording.active() && d.recording.stopTimer == nil
 		h.mu.Unlock()
 		if !done {
 			t.Fatal("fail-safe did not clear recording at 450 ms")
