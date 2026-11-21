@@ -3,8 +3,8 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 case "$#:${1-}" in
-    0:|1:--live|1:--real-model) ;;
-    *) printf 'Usage: %s [--live | --real-model]\n' "$0" >&2; exit 2 ;;
+    0:|1:--live|1:--e2e-real|1:--deployed|1:--real-model) ;;
+    *) printf 'Usage: %s [--live | --e2e-real | --deployed | --real-model]\n' "$0" >&2; exit 2 ;;
 esac
 
 for script in scripts/*.sh; do
@@ -33,7 +33,7 @@ node --test config/opencode/*.test.mjs
     "$GO_BIN" test -race ./...
 )
 
-host_tests=$(mktemp -d)
+host_tests=$(mktemp -d "${TMPDIR:-/tmp}/echoear-check.XXXXXXXX")
 trap 'rm -rf -- "$host_tests"' EXIT
 host_cc=(gcc -std=c11 -Wall -Wextra -Werror -I firmware/main "-fsanitize=address,undefined"
          -fno-sanitize-recover=all -fno-pie -no-pie)
@@ -72,8 +72,7 @@ for view in --cached --; do
 done
 printf 'PASS tracked-file hygiene\n'
 
-if [[ ${1-} == --live ]]; then
-    # Live tests fetch OTA manifests and images; they never flash or upload to a device.
+if [[ ${1-} == --live || ${1-} == --e2e-real || ${1-} == --deployed ]]; then
     native=${ECHOEAR_PARAKEET_NATIVE:-}
     if [[ -z $native ]]; then
         data_home=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -92,9 +91,16 @@ if [[ ${1-} == --live ]]; then
         CGO_CFLAGS="\"-I$native/include\"${CGO_CFLAGS:+ $CGO_CFLAGS}" \
         CGO_LDFLAGS="\"-L$native/lib\"${CGO_LDFLAGS:+ $CGO_LDFLAGS}" \
             "$GO_BIN" build -tags parakeet -o "$test_bin" .
-        ECHOEAR_TEST_BIN="$test_bin" "$GO_BIN" test -tags=live -v -count=1 -run '^TestLive' .
+        case "$1" in
+            --live)
+                ECHOEAR_TEST_BIN="$test_bin" ECHOEAR_E2E_MODE=stub "$GO_BIN" test -tags=live -v -count=1 -run '^TestVirtualE2E$' . ;;
+            --e2e-real)
+                ECHOEAR_TEST_BIN="$test_bin" ECHOEAR_E2E_MODE=real "$GO_BIN" test -tags=live -v -count=1 -run '^TestVirtualE2E$' . ;;
+            --deployed)
+                # Read-only installed-service and OTA checks. Never uploads or flashes.
+                ECHOEAR_TEST_BIN="$test_bin" "$GO_BIN" test -tags=live -v -count=1 -run '^TestLive' . ;;
+        esac
     )
-    printf 'Real-model Code Mode smoke not run; opt in with --real-model.\n'
 elif [[ ${1-} == --real-model ]]; then
     (cd bridge && ECHOEAR_REAL_MODEL=1 "$GO_BIN" test -tags=live -v -count=1 -run '^TestRealModelEchoEarCodeMode$' .)
 fi
