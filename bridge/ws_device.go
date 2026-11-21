@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -108,6 +109,7 @@ type wsDevice struct {
 	telemetry  wsStatus
 	frame      *diagFrame
 	svg        svgScreen
+	grade      atomic.Uint32 // App workers read the board's grade without the hub lock.
 	svgWire    wsFrame
 	displayApp *appInstance
 	renderGen  uint64
@@ -649,6 +651,7 @@ type renderRequest struct {
 	pose   catPose
 	app    *appInstance
 	screen svgScreen
+	grade  gradeKey
 	full   bool
 	trace  *turnTrace
 }
@@ -659,6 +662,17 @@ func (h *wsHub) catPose(d *wsDevice, now time.Time, mood string) catPose {
 	p.stopTaps = d.stopTaps
 	p.canContinue = mood == "thinking" && h.bridgeEndpoint(d) && d.queuedVoice == nil
 	return p
+}
+
+func (h *wsHub) frameGrade(d *wsDevice, now time.Time) gradeKey {
+	if !h.b.atmosphere || d.client.role != "device" {
+		return gradeDay
+	}
+	var loc *time.Location
+	if p := h.parents[d.key]; p != nil && p.configured {
+		loc = p.loc
+	}
+	return gradeAt(now, loc)
 }
 
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
@@ -695,7 +709,8 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	}
 	pose := h.catPose(d, now, mood)
 	d.pose = pose
-	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace}
+	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace, grade: h.frameGrade(d, now)}
+	d.grade.Store(uint32(r.grade))
 	switch {
 	case d.parentReason != "":
 		r.view = parentScene(d.parentReason)
@@ -793,19 +808,32 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 				face = catArt(*r.cat, r.pose)
 			}
 			raw := r.view.svg(face)
+			photo := strings.Contains(raw, "photo:")
+			grade := r.grade
+			if photo {
+				grade = gradeDay
+			}
 			if r.view.library != nil {
 				screen, err = h.b.library.slideScreen(d.client.ctx, d.key, r.view.library, raw, geometry)
-			} else if !r.full && raw == prev.raw {
+			} else if !r.full && raw == prev.raw && grade == prev.grade {
+				screen = prev
+			} else if photo {
+				screen, err = h.b.buildScreen(raw, false, geometry)
+			} else {
+				screen, err = screens.buildGraded(raw, false, geometry, grade)
+			}
+		} else if r.grade != screen.grade && screen.fb != nil && !strings.Contains(screen.raw, "photo:") {
+			if !r.full && screen.raw == prev.raw && r.grade == prev.grade {
 				screen = prev
 			} else {
-				screen, err = h.b.buildScreen(raw, false, geometry)
+				screen, err = screens.buildGraded(screen.raw, true, geometry, r.grade)
 			}
 		}
 		var svgWire, native wsFrame
 		var rawBytes int
 		interactionChanged := pointerRev && !web &&
 			(r.view.call != oldScene.call || !maps.Equal(r.view.actions, oldScene.actions) || !slices.Equal(screen.hits, prev.hits))
-		if err == nil && (r.full && r.app == nil || screen.source != prev.source || interactionChanged) {
+		if err == nil && (r.full && r.app == nil || screen.source != prev.source || screen.grade != prev.grade || interactionChanged) {
 			start := time.Now()
 			if screen.fb != nil {
 				rect := dirtyRect(prev.fb, screen.fb, geometry)
@@ -905,6 +933,7 @@ func (h *wsHub) animate(ctx context.Context) {
 	tick := time.NewTicker(40 * time.Millisecond)
 	defer tick.Stop()
 	sincePeers := time.Now()
+	var nextGrade time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -916,6 +945,10 @@ func (h *wsHub) animate(ctx context.Context) {
 				return
 			}
 			now := time.Now()
+			checkGrade := h.b.atmosphere && !now.Before(nextGrade)
+			if checkGrade {
+				nextGrade = now.Truncate(time.Minute).Add(time.Minute)
+			}
 			for key, p := range h.parents {
 				if len(p.offline) > 0 && h.devices[key] == nil {
 					h.parentRefresh(key, now)
@@ -924,6 +957,10 @@ func (h *wsHub) animate(ctx context.Context) {
 			for _, d := range h.devices {
 				if !h.active(d) {
 					continue
+				}
+				if checkGrade && d.client.role == "device" && !(d.asleep && d.caps.PanelSleep) &&
+					d.svg.grade != h.frameGrade(d, now) && !strings.Contains(d.svg.raw, "photo:") {
+					h.render(d, now, false)
 				}
 				if h.parentRefresh(d.key, now) != "" {
 					if d.awaitAck && !d.ttsStarted && now.After(d.audioUntil.Add(4*time.Second)) {

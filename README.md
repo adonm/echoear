@@ -404,6 +404,9 @@ return `ui.screen(spec)` from JS `render` and handle IDs in `onTap`.
 `ui.sprite(rows, {x, y, scale, palette, mirror})` returns a crisp SVG fragment.
 `ui.palette` exposes the read-only palette (`.` is transparent;
 `k w p m l s y r g a b n d c o` are colors).
+Boards blend warm dawn and dusk and a cooler night using the device's Parent
+timezone (or bridge local time); the web shell uses the browser clock.
+Photo screens keep their original colors.
 
 Use `app = ui.pagedText({title, text})` for wrapped reading with built-in
 navigation, or return `ui.choices({title, prompt, choices})` from `render`

@@ -91,7 +91,7 @@ func (s *e2eSuite) apps(t *testing.T) {
 						c.input(t, "tap", 180, 320, c.revision)
 						c.scene(t, "cat-ring")
 						if s.activeApp(t, c) != nil {
-						t.Fatal("Home did not exit saved app")
+							t.Fatal("Home did not exit saved app")
 						}
 					})
 				}

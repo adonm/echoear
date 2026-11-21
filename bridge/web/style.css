@@ -26,6 +26,28 @@
 }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
+@supports (color: light-dark(white, black)) {
+  @media (forced-colors: none) {
+    :root[data-tod="dawn"] {
+      --background: light-dark(#f8eeeb, #201722);
+      --card: light-dark(#fff7f3, #2c202e);
+      --primary: light-dark(#894338, #ffc3b7);
+      --border: light-dark(#dbcad0, #4f3a51);
+    }
+    :root[data-tod="dusk"] {
+      --background: light-dark(#f8eee1, #201923);
+      --card: light-dark(#fff7eb, #2d232e);
+      --primary: light-dark(#804318, #ffd099);
+      --border: light-dark(#dacbbb, #51404b);
+    }
+    :root[data-tod="night"] {
+      --background: light-dark(#efedf6, #191629);
+      --card: light-dark(#f8f5fc, #231e35);
+      --primary: light-dark(#64466f, #edc1e9);
+      --border: light-dark(#d6cbe0, #44405a);
+    }
+  }
+}
 @supports not (color: light-dark(white, black)) {
   :root {
     --background: Canvas;

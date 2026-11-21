@@ -460,6 +460,26 @@ func (s *e2eSuite) menus(t *testing.T, variant, label string) {
 func (s *e2eSuite) rawFramebuffer(t *testing.T) {
 	c := s.board(t, "esp-vocat", "RawPixels")
 	c.mirrorOn(t, s)
+	// Pick a non-day plateau so the wire test covers the configured timezone
+	// and cannot cross an atmosphere bucket transition during the dirty patch.
+	var zone string
+	var grade gradeKey
+	now := time.Now()
+	for _, name := range []string{"UTC", "Pacific/Honolulu", "Asia/Tokyo", "Asia/Kolkata", "America/New_York"} {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g := gradeAt(now, loc); g != gradeDay && g < gradeBlend && g == gradeAt(now.Add(2*time.Minute), loc) {
+			zone, grade = name, g
+			break
+		}
+	}
+	if zone == "" {
+		t.Fatal("could not find a stable non-day test timezone")
+	}
+	e2eRequest(t, s.liveClient, "POST", "/api/devices/"+c.id+"/parent", s.parent,
+		object{"action": "settings", "timezone": zone, "quiet_start": "", "quiet_end": "", "daily_minutes": 0}, 200)
 	// Two otherwise-identical scenes make an incompressible dirty patch.
 	const background = `<svg><rect width="360" height="360" fill="black"/><text x="180" y="95">Raw pixels</text>`
 	s.tool(t, "app", object{"devices": c.id, "svg": background + "</svg>"}, false)
@@ -476,7 +496,8 @@ func (s *e2eSuite) rawFramebuffer(t *testing.T) {
 	s.tool(t, "app", object{"devices": c.id, "svg": mosaic.String()}, false)
 	f := c.expect(t, "raw RGB565 mosaic rectangle", func(f wsFrame) bool { return isDisplay(f) && f.data[9] == 0 })
 	rect, _, pixels := decodeDisplay(t, f)
-	if rect != image.Rect(170, 145, 182, 157) || pixels[0] != uint16(0x98>>3)<<11|uint16(0x7a>>2)<<5|uint16(0xb5>>3) {
+	lut := &atmosphereLUTs[grade]
+	if rect != image.Rect(170, 145, 182, 157) || pixels[0] != pack565(lut[0][0x98], lut[1][0x7a], lut[2][0xb5]) {
 		t.Fatal("wrong raw RGB565 dirty patch geometry or byte order:", rect)
 	}
 	t.Logf("native RGB565 patch %v (%d bytes)", rect, len(f.data))

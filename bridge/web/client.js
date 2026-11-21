@@ -154,5 +154,18 @@ onUnauthorized(() => {
   credentials("Your token is no longer accepted.");
 });
 onAudioActivityChanged(renderCurrent);
+
+function updateAtmosphere() {
+  const now = new Date();
+  const m = now.getHours() * 60 + now.getMinutes();
+  document.documentElement.dataset.tod = m < 330 || m >= 1230 ? "night"
+    : m < 510 ? "dawn" : m < 1020 ? "day" : "dusk";
+}
+updateAtmosphere();
+setInterval(updateAtmosphere, 15 * 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) updateAtmosphere();
+});
+
 credentials();
 if (initialToken) authorize(initialToken);

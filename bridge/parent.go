@@ -84,16 +84,17 @@ func parentScene(reason parentReason) sceneView {
 
 // parentRuntime, like device activity, is owned by the hub lock.
 type parentRuntime struct {
-	settings parentSettings
-	loc      *time.Location
-	day      string
-	dayEnd   time.Time
-	used     time.Duration
-	savedMS  int64
-	at       time.Time
-	using    bool
-	reason   parentReason
-	offline  map[context.Context]context.CancelFunc
+	settings   parentSettings
+	loc        *time.Location
+	configured bool
+	day        string
+	dayEnd     time.Time
+	used       time.Duration
+	savedMS    int64
+	at         time.Time
+	using      bool
+	reason     parentReason
+	offline    map[context.Context]context.CancelFunc
 }
 
 func (h *wsHub) parentLoad(key string) (*parentRuntime, error) {
@@ -108,6 +109,7 @@ func (h *wsHub) parentLoad(key string) (*parentRuntime, error) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
+		p.configured = err == nil
 		p.loc, err = time.LoadLocation(s.Timezone)
 		if err != nil {
 			return nil, err
@@ -138,7 +140,7 @@ func (h *wsHub) parentSet(key string, s parentSettings, loc *time.Location, now 
 	if p.settings.Timezone != s.Timezone {
 		p.day, p.dayEnd = "", time.Time{}
 	}
-	p.settings, p.loc = s, loc
+	p.settings, p.loc, p.configured = s, loc, true
 	h.parentRefresh(key, now)
 	return nil
 }

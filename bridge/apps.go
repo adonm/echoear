@@ -822,11 +822,21 @@ func (a *appInstance) screens(connected []bool) ([]svgScreen, error) {
 			}
 			raw = s.String()
 		}
-		if last := a.lastScreens[i]; last.source != "" && last.raw == raw {
+		grade := gradeDay
+		if len(a.devices) != 0 && !strings.Contains(raw, "photo:") {
+			grade = gradeKey(a.devices[i].grade.Load())
+		}
+		if last := a.lastScreens[i]; last.source != "" && last.raw == raw && last.grade == grade {
 			out[i] = last
 			continue
 		}
-		screen, err := a.buildScreen(raw, true, a.geometry[i])
+		var screen svgScreen
+		var err error
+		if grade == gradeDay {
+			screen, err = a.buildScreen(raw, true, a.geometry[i])
+		} else {
+			screen, err = screens.buildGraded(raw, true, a.geometry[i], grade)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("render for player %d: %w", i, err)
 		}

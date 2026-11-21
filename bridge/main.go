@@ -146,7 +146,7 @@ func run() error {
 	worker := newSynthWorker(root, func() (speechEngine, error) {
 		return openKokoro(modelDir, min(kokoroThreads, runtime.GOMAXPROCS(0)))
 	})
-	b := &bridge{root: root, token: token, parentToken: parentToken, db: db, peers: peers{deviceStore(db)},
+	b := &bridge{root: root, token: token, parentToken: parentToken, db: db, peers: peers{deviceStore(db)}, atmosphere: true,
 		deferMCPCompaction: os.Getenv("ECHOEAR_DEFER_MCP_COMPACTION") == "1",
 		stt:                parakeet.transcribe, endpoint: endpointConfig, oc: oc, pairPort: pairPort, worker: worker,
 		// Keep hashing the prompt behind the installed echoear agent symlink.

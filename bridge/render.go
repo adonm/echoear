@@ -67,6 +67,7 @@ type svgScreen struct {
 	hitWarnings []string
 	fb          []uint16
 	render      time.Duration
+	grade       gradeKey
 }
 
 // A prepared scene owns a normalized SVG tree and its topmost-first controls.
@@ -85,6 +86,7 @@ type screenCacheKey struct {
 	hash     [sha256.Size]byte
 	geometry screenGeometry
 	exit     bool
+	grade    gradeKey
 }
 
 // Cached screens and their slices are immutable after publication.
@@ -103,8 +105,12 @@ func buildScreen(raw string, exit bool, geometry screenGeometry) (svgScreen, err
 }
 
 func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svgScreen, error) {
+	return c.buildGraded(raw, exit, geometry, gradeDay)
+}
+
+func (c *screenCache) buildGraded(raw string, exit bool, geometry screenGeometry, grade gradeKey) (svgScreen, error) {
 	start := time.Now()
-	key := screenCacheKey{svgHash(raw), geometry, exit}
+	key := screenCacheKey{svgHash(raw), geometry, exit, grade}
 	c.mu.Lock()
 	screen, ok := c.entries[key]
 	if ok {
@@ -116,7 +122,7 @@ func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svg
 	c.misses++
 	c.mu.Unlock()
 
-	screen, err := buildScreenUncached(raw, exit, geometry)
+	screen, err := buildScreenPaint(raw, exit, geometry, nil, grade)
 	if err != nil {
 		return svgScreen{}, err
 	}
@@ -149,13 +155,20 @@ func buildScreenUncached(raw string, exit bool, geometry screenGeometry) (svgScr
 }
 
 func buildScreenWithPhotos(raw string, exit bool, geometry screenGeometry, lookup photoLookup) (svgScreen, error) {
+	return buildScreenPaint(raw, exit, geometry, lookup, gradeDay)
+}
+
+func buildScreenPaint(raw string, exit bool, geometry screenGeometry, lookup photoLookup, grade gradeKey) (svgScreen, error) {
 	scene, err := prepareScene(raw, exit)
 	if err != nil {
 		return svgScreen{}, err
 	}
-	screen := svgScreen{raw: raw, source: scene.toBrowserSVG(), hits: scene.hits, hitWarnings: scene.hitWarnings}
+	if geometry.width == 0 || strings.Contains(scene.svg, `<image `) {
+		grade = gradeDay
+	}
+	screen := svgScreen{raw: raw, source: scene.toBrowserSVG(), hits: scene.hits, hitWarnings: scene.hitWarnings, grade: grade}
 	if geometry.width != 0 {
-		screen.fb, err = scene.toRGB565(geometry, lookup)
+		screen.fb, err = scene.toRGB565(geometry, lookup, grade)
 	}
 	return screen, err
 }
@@ -865,7 +878,7 @@ func (s preparedScene) raster(w, h int, x, y float64, side int, fill imagecolor.
 	return img, err
 }
 
-func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) ([]uint16, error) {
+func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup, grade gradeKey) ([]uint16, error) {
 	w, h := screen.width, screen.height
 	side := min(w, h)
 	x, y := float64(w-side)/2, float64(h-side)/2
@@ -876,7 +889,8 @@ func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) ([]ui
 	clip := image.Rect(int(x), int(y), int(math.Ceil(x+float64(side))), int(math.Ceil(y+float64(side))))
 	fb := make([]uint16, w*h)
 	br, bgc, bb, _ := s.background.RGBA()
-	bar := uint16(br>>11)<<11 | uint16(bgc>>10)<<5 | uint16(bb>>11)
+	lut := &atmosphereLUTs[grade]
+	bar := pack565(lut[0][br>>8], lut[1][bgc>>8], lut[2][bb>>8])
 	for y := range h {
 		for x := range w {
 			dx, dy := 2*x-w, 2*y-h
@@ -884,11 +898,20 @@ func (s preparedScene) toRGB565(screen screenGeometry, lookup photoLookup) ([]ui
 				fb[y*w+x] = bar
 			} else if screen.shape == "rect" || dx*dx+dy*dy <= side*side {
 				i := y*img.Stride + x*4
-				fb[y*w+x] = uint16(img.Pix[i]&0xf8)<<8 | uint16(img.Pix[i+1]&0xfc)<<3 | uint16(img.Pix[i+2])>>3
+				p := img.Pix[i : i+4]
+				if grade == gradeDay {
+					fb[y*w+x] = pack565(p[0], p[1], p[2])
+				} else {
+					fb[y*w+x] = pack565(lut[0][p[0]], lut[1][p[1]], lut[2][p[2]])
+				}
 			}
 		}
 	}
 	return fb, nil
+}
+
+func pack565(r, g, b uint8) uint16 {
+	return uint16(r&0xf8)<<8 | uint16(g&0xfc)<<3 | uint16(b)>>3
 }
 
 type photoLookup func(string) (image.Image, error)
