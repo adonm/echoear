@@ -13,28 +13,30 @@ import (
 const wsConnections = 64
 
 type wsEvent struct {
-	Event     string `json:"ev"`
-	Role      string `json:"role"`
-	DeviceID  string `json:"device_id"`
-	Character string `json:"character"`
-	Firmware  string `json:"firmware"`
-	Proto     int    `json:"proto"`
-	Port      *int   `json:"port"`
-	Width     *int   `json:"width"`
-	Height    *int   `json:"height"`
-	Shape     string `json:"shape"`
-	Board     string `json:"board"`
-	Caps      wsCaps `json:"caps"`
-	ID        string `json:"id"`
-	X         int    `json:"x"`
-	Y         int    `json:"y"`
-	Action    string `json:"action"`
-	Target    string `json:"target"`
-	Text      string `json:"text"`
-	State     string `json:"state"`
-	Audio     uint64 `json:"audio"`
-	Call      uint32 `json:"call"`
-	Cancelled bool   `json:"cancelled"`
+	Event     string  `json:"ev"`
+	Role      string  `json:"role"`
+	DeviceID  string  `json:"device_id"`
+	Character string  `json:"character"`
+	Firmware  string  `json:"firmware"`
+	Proto     int     `json:"proto"`
+	Port      *int    `json:"port"`
+	Width     *int    `json:"width"`
+	Height    *int    `json:"height"`
+	Shape     string  `json:"shape"`
+	Board     string  `json:"board"`
+	Caps      wsCaps  `json:"caps"`
+	ID        string  `json:"id"`
+	X         int     `json:"x"`
+	Y         int     `json:"y"`
+	RevLo     *uint16 `json:"rev_lo"`
+	Action    string  `json:"action"`
+	Target    string  `json:"target"`
+	Text      string  `json:"text"`
+	State     string  `json:"state"`
+	Audio     uint64  `json:"audio"`
+	Call      uint32  `json:"call"`
+	Cancelled bool    `json:"cancelled"`
+	Enabled   *bool   `json:"enabled"`
 	wsStatus
 }
 

@@ -31,6 +31,16 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	defer h.mu.Unlock()
 	d := c.device
 	if d == nil {
+		if ev.Event == "wake_word" && c.role == "web" && c.scope == nil && ev.Enabled != nil {
+			if target := h.devices[strings.ToLower(ev.DeviceID)]; target != nil && h.active(target) && target.caps.WakeWord &&
+				target.client.role == "device" {
+				target.wakeWord = *ev.Enabled
+				f := object{"op": "wake_word", "enabled": target.wakeWord, "device_id": target.who.DeviceID}
+				h.push(target, f, false)
+				c.enqueue(textFrame(f))
+			}
+			return
+		}
 		if ev.Event == "watch" && c.role == "web" {
 			if ev.DeviceID == "" {
 				c.watch = ""
@@ -83,6 +93,10 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		}
 	}
 	switch ev.Event {
+	case "wake_word":
+		if native && d.caps.WakeWord && d.wakeWord && d.recAt.IsZero() && !d.busy && !d.ttsStarted && !d.awaitAck {
+			h.startRecording(d, "", now, true)
+		}
 	case "status":
 		d.status(ev.wsStatus)
 		if d.drawer != "stats" {
@@ -192,6 +206,9 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		key = ev.ID
 	}
 	a := d.scene.actions[key]
+	if native && !d.acceptPointerRevision(a.kind, ev.RevLo) {
+		return
+	}
 	if d.callState != callNone {
 		if d.scene.call != d.callID {
 			return
@@ -293,6 +310,19 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		}
 	case "call-peer":
 		h.startCall(d, a.value)
+	}
+}
+
+func (d *wsDevice) acceptPointerRevision(action string, rev *uint16) bool {
+	switch action {
+	case "stop", "rec-cancel", "rec-send", "listen", "reply", "call-peer",
+		"call-answer", "call-decline", "call-hangup", "call-mute":
+		if rev == nil {
+			return !d.caps.PointerRev
+		}
+		return *rev == d.nativeRev
+	default:
+		return true
 	}
 }
 

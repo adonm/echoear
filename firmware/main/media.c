@@ -7,22 +7,26 @@
 #include "display.h"
 #include "echo_suppress.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "telemetry.h"
+#include "wake_word.h"
 #include "ws_client.h"
 
 enum { TTS_BYTES = 1024 * 1024, TTS_BLOCK = 1280, CALL_FRAME = AUDIO_10MS * sizeof(int16_t) };
-typedef enum { RECORD, STREAM, CHIME, CALL } job_kind_t;
+typedef enum { RECORD, STREAM, CHIME, CALL, WAKE_CONTROL } job_kind_t;
 typedef struct {
     job_kind_t kind;
     uint32_t session;
     unsigned chime_epoch;
     char target[MEDIA_TARGET_CAP];
     audio_tone_t tone;
+    bool bridge_endpoint;
 } job_t;
 
 static QueueHandle_t jobs;
@@ -36,6 +40,7 @@ static struct {
     bool open, ended, queued;
 } stream;
 static atomic_bool recording, stop_recording, cancel_recording;
+static atomic_bool wake_enabled;
 static atomic_uint chime_epoch;
 static atomic_uint call_id;
 static atomic_bool call_muted;
@@ -52,6 +57,12 @@ static bool submit(const job_t *job)
     // Chimes must not displace recording, streaming or a call handover.
     if (job->kind == CHIME && uxQueueSpacesAvailable(jobs) <= 3) return false;
     return xQueueSend(jobs, job, 0) == pdPASS;
+}
+
+void media_set_wake_word(bool enabled)
+{
+    if (!jobs) return;
+    if (atomic_exchange(&wake_enabled, enabled) != enabled) submit(&(job_t){ .kind = WAKE_CONTROL });
 }
 
 static void interrupt_locked(void)
@@ -74,15 +85,16 @@ void media_interrupt(void)
 
 void media_link_lost(void)
 {
+    media_set_wake_word(false);
     atomic_store(&cancel_recording, true);
     media_call_end(0);
     media_interrupt();
 }
 
-bool media_record_start(const char *target)
+bool media_record_start(const char *target, bool bridge_endpoint)
 {
     if (!jobs || !target || strlen(target) >= MEDIA_TARGET_CAP) return false;
-    job_t job = { .kind = RECORD, .session = ws_client_session() };
+    job_t job = { .kind = RECORD, .session = ws_client_session(), .bridge_endpoint = bridge_endpoint };
     snprintf(job.target, sizeof(job.target), "%s", target);
     xSemaphoreTake(lock, portMAX_DELAY);
     bool accepted = !recording && !media_call_active() && submit(&job);
@@ -316,7 +328,7 @@ static void record(job_t *job)
     if (started) {
         audio_tone(AUDIO_START_TONE, capture_cancelled, NULL);
         if (!capture_cancelled(NULL)) {
-            esp_err_t err = audio_record_stream(stop_capture, upload_pcm, job);
+            esp_err_t err = audio_record_stream(job->bridge_endpoint, stop_capture, upload_pcm, job);
             cancelled = err != ESP_OK || capture_cancelled(NULL);
         }
     }
@@ -387,9 +399,44 @@ static bool chime_interrupted(const void *ctx)
 static void worker(void *arg)
 {
     (void)arg;
+    bool detecting = false, drain_before_wake = true;
+    int64_t wake_after_us = 0;
     for (;;) {
+        bool enabled = atomic_load(&wake_enabled) && ws_client_connected();
+        if (detecting && !enabled) {
+            wake_word_stop();
+            detecting = false;
+        }
         job_t job;
-        xQueueReceive(jobs, &job, portMAX_DELAY);
+        if (xQueueReceive(jobs, &job, enabled ? 0 : portMAX_DELAY) != pdPASS) {
+            if (!enabled) continue;
+            if (!detecting) {
+                detecting = wake_word_start();
+                drain_before_wake = true;
+                if (!detecting) {
+                    ESP_LOGW("media", "WakeNet model unavailable");
+                    atomic_store(&wake_enabled, false);
+                    continue;
+                }
+            }
+            bool detected = false;
+            esp_err_t err = drain_before_wake ? audio_drain_input() : wake_word_poll(&detected);
+            drain_before_wake = false;
+            if (err != ESP_OK) {
+                ESP_LOGW("media", "Disabling wake word after microphone error");
+                atomic_store(&wake_enabled, false);
+            }
+            int64_t now = esp_timer_get_time();
+            if (detected && now >= wake_after_us && atomic_load(&wake_enabled) &&
+                !media_is_recording() && !media_call_active() && ws_client_wake_word()) {
+                display_wake();
+                wake_after_us = now + 2000000;
+            }
+            continue;
+        }
+        if (job.kind == WAKE_CONTROL) continue;
+        if (detecting) wake_word_reset();
+        drain_before_wake = true;
         // The producer publishes cancellation and ownership before the worker uses the job.
         xSemaphoreTake(lock, portMAX_DELAY);
         xSemaphoreGive(lock);

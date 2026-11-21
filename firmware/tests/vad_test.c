@@ -58,4 +58,18 @@ int main(void)
     blocks(&boundary, 299, 100);
     assert(vad_update(&boundary, 100 * 100) == VAD_SEND);
     puts("PASS VAD: 150/300-frame silence at 399/400 voiced frames, 3-frame word, /4 hysteresis, 700-frame quiet send");
+
+    vad_t bridge = { 0 };
+    for (unsigned i = 0; i < 20 + 799; ++i) assert(!vad_bridge_watchdog(&bridge, 0));
+    assert(vad_bridge_watchdog(&bridge, 0));
+    bridge = (vad_t){ 0 };
+    for (unsigned i = 0; i < 20 + 700; ++i) assert(!vad_bridge_watchdog(&bridge, 0));
+    for (unsigned i = 0; i < 3; ++i) assert(!vad_bridge_watchdog(&bridge, 1000 * 1000));
+    for (unsigned i = 0; i < 799; ++i) assert(!vad_bridge_watchdog(&bridge, 0));
+    assert(vad_bridge_watchdog(&bridge, 0));
+    bridge = (vad_t){ 0 };
+    for (unsigned i = 0; i < 20; ++i) assert(!vad_bridge_watchdog(&bridge, 0));
+    for (unsigned i = 20; i < 5999; ++i) assert(!vad_bridge_watchdog(&bridge, 1000 * 1000));
+    assert(vad_bridge_watchdog(&bridge, 1000 * 1000));
+    puts("PASS bridge VAD watchdog: 8 s silence, speech resets silence, 60 s cap");
 }

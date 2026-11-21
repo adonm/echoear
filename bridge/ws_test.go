@@ -292,6 +292,7 @@ func TestWSHelloPersistsOnlyV2Hardware(t *testing.T) {
 	}
 	dev.json(t, object{"ev": "hello", "role": "device", "proto": 2, "device_id": id, "character": "Cake",
 		"ip": "192.0.2.123", "port": 8080, "width": 320, "height": 240, "shape": "rect", "board": "esp-box-3"})
+	dev.until(t, hasWS("hello_ok", ""))
 	frame, _, _ := decodeDisplay(t, dev.until(t, isDisplay))
 	if frame.Dx() != 320 || frame.Dy() != 240 {
 		t.Fatal("unexpected initial framebuffer", frame)

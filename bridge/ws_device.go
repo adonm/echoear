@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"image"
 	"log"
 	"maps"
 	"math"
@@ -19,19 +20,27 @@ const idleSleep = 120 * time.Second
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
 type wsCaps struct {
-	Battery  *bool `json:"battery,omitempty"`
-	HeadPads *bool `json:"head_pads,omitempty"`
-	Call     *bool `json:"call,omitempty"`
-	CallPCM  *bool `json:"call_pcm,omitempty"`
-	Drag     *bool `json:"drag,omitempty"`
+	WakeWord       *bool `json:"wake_word,omitempty"`
+	PanelSleep     *bool `json:"panel_sleep,omitempty"`
+	PointerRev     *bool `json:"pointer_rev,omitempty"`
+	BridgeEndpoint *bool `json:"bridge_endpoint,omitempty"`
+	Battery        *bool `json:"battery,omitempty"`
+	HeadPads       *bool `json:"head_pads,omitempty"`
+	Call           *bool `json:"call,omitempty"`
+	CallPCM        *bool `json:"call_pcm,omitempty"`
+	Drag           *bool `json:"drag,omitempty"`
 }
 
 type deviceCaps struct {
-	Battery  bool `json:"battery"`
-	HeadPads bool `json:"head_pads"`
-	Call     bool `json:"call"`
-	CallPCM  bool `json:"call_pcm,omitempty"`
-	Drag     bool `json:"drag"`
+	WakeWord       bool `json:"wake_word,omitempty"`
+	PanelSleep     bool `json:"panel_sleep,omitempty"`
+	PointerRev     bool `json:"pointer_rev,omitempty"`
+	BridgeEndpoint bool `json:"bridge_endpoint,omitempty"`
+	Battery        bool `json:"battery"`
+	HeadPads       bool `json:"head_pads"`
+	Call           bool `json:"call"`
+	CallPCM        bool `json:"call_pcm,omitempty"`
+	Drag           bool `json:"drag"`
 }
 
 func helloCaps(ev wsEvent, board string) deviceCaps {
@@ -43,11 +52,15 @@ func helloCaps(ev wsEvent, board string) deviceCaps {
 	}
 	vocat := ev.Role == "device" && board == "esp-vocat"
 	return deviceCaps{
-		Battery:  value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
-		HeadPads: value(ev.Caps.HeadPads, vocat),
-		Call:     value(ev.Caps.Call, false),
-		CallPCM:  value(ev.Caps.Call, false) && value(ev.Caps.CallPCM, false),
-		Drag:     value(ev.Caps.Drag, true),
+		WakeWord:       value(ev.Caps.WakeWord, false),
+		PanelSleep:     value(ev.Caps.PanelSleep, false),
+		PointerRev:     value(ev.Caps.PointerRev, false),
+		BridgeEndpoint: value(ev.Caps.BridgeEndpoint, false),
+		Battery:        value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
+		HeadPads:       value(ev.Caps.HeadPads, vocat),
+		Call:           value(ev.Caps.Call, false),
+		CallPCM:        value(ev.Caps.Call, false) && value(ev.Caps.CallPCM, false),
+		Drag:           value(ev.Caps.Drag, true),
 	}
 }
 
@@ -70,6 +83,7 @@ type wsStatus struct {
 	InputDrops     *uint32  `json:"input_drops,omitempty"`
 	AudioUnderruns *uint32  `json:"audio_underruns,omitempty"`
 	AudioDrops     *uint32  `json:"audio_drops,omitempty"`
+	CallTXDrops    *uint32  `json:"call_tx_drops,omitempty"`
 }
 
 type wsDevice struct {
@@ -104,22 +118,24 @@ type wsDevice struct {
 
 	lastAppError object
 
-	scene    sceneView
-	view     *sceneView
-	pending  *sceneView
-	card     *sceneView
-	drawer   string
-	menuPage int
-	homePage int
-	menuData *menuContent
-	statsAt  time.Time
-	rev      uint64
-	pose     catPose
-	moodAt   time.Time
-	last     time.Time
-	meter    time.Time
-	pet      time.Time
-	asleep   bool
+	scene     sceneView
+	view      *sceneView
+	pending   *sceneView
+	card      *sceneView
+	drawer    string
+	menuPage  int
+	homePage  int
+	menuData  *menuContent
+	statsAt   time.Time
+	rev       uint64
+	nativeRev uint16
+	pose      catPose
+	moodAt    time.Time
+	last      time.Time
+	meter     time.Time
+	pet       time.Time
+	asleep    bool
+	wakeWord  bool
 
 	callState                   callState
 	callID                      uint32
@@ -514,6 +530,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		d.rev = old.rev
 	}
 	h.devices[d.key], c.device, c.role = d, d, ev.Role
+	if ev.Role == "device" {
+		c.enqueue(textFrame(object{"op": "hello_ok"}))
+	}
 	h.render(d, now, true)
 }
 
@@ -599,6 +618,9 @@ func (d *wsDevice) status(s wsStatus) {
 	}
 	if s.AudioDrops != nil {
 		t.AudioDrops = s.AudioDrops
+	}
+	if s.CallTXDrops != nil {
+		t.CallTXDrops = s.CallTXDrops
 	}
 }
 
@@ -738,6 +760,7 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 	for d.renderNext != nil && h.active(d) {
 		r, gen, prev, rev := *d.renderNext, d.renderGen, d.svg, d.rev+1
 		web := d.client.role == "web"
+		oldScene, pointerRev := d.scene, d.caps.PointerRev
 		var geometry screenGeometry
 		if d.client.role == "device" {
 			geometry = d.screen
@@ -762,10 +785,16 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 		}
 		var svgWire, native wsFrame
 		var rawBytes int
-		if err == nil && (r.full && r.app == nil || screen.source != prev.source) {
+		interactionChanged := pointerRev && !web &&
+			(r.view.call != oldScene.call || !maps.Equal(r.view.actions, oldScene.actions) || !slices.Equal(screen.hits, prev.hits))
+		if err == nil && (r.full && r.app == nil || screen.source != prev.source || interactionChanged) {
 			start := time.Now()
 			if screen.fb != nil {
 				rect := dirtyRect(prev.fb, screen.fb, geometry)
+				if rect.Empty() && interactionChanged {
+					// Identical pixels can still map to different call peers or targets.
+					rect = image.Rect(0, 0, 1, 1)
+				}
 				if !rect.Empty() {
 					native = displayFrame(screen.fb, rect, rev, geometry.width)
 					rawBytes = 12 + rect.Dx()*rect.Dy()*2
@@ -794,6 +823,7 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 			h.trackFrame(d, screen.render, len(svgWire.data), len(screen.source), "svg")
 		} else if native.data != nil {
 			d.client.enqueue(native)
+			d.nativeRev = uint16(rev)
 			r.trace.measure(diagRender, screen.render)
 			codec := "RGB565"
 			if native.data[9] == 1 {
@@ -865,6 +895,8 @@ func (h *wsHub) animate(ctx context.Context) {
 				case !d.asleep && !d.busy && d.recAt.IsZero() && !d.ttsStarted && !d.awaitAck && now.Sub(d.last) >= idleSleep:
 					h.setSleeping(d, true)
 					h.render(d, now, false)
+				case d.asleep && d.caps.PanelSleep && d.client.role == "device":
+					// The battery board's panel is off; skip idle animation traffic.
 				case d.drawer == "stats" && !d.asleep && now.Sub(d.statsAt) >= diagInterval:
 					h.render(d, now, false)
 				case d.stopTapsExpired(now):

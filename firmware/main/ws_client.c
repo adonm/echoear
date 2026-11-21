@@ -18,7 +18,6 @@
 #include "esp_transport_ws.h"
 #include "esp_websocket_client.h"
 #include "frame.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "media.h"
@@ -28,16 +27,18 @@
 #include "wifi.h"
 
 enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, CALL_PCM = 4, STATUS_MS = 5000, INPUT_CAP = 24,
-       CALL_BYTES = AUDIO_CALL_SAMPLES * sizeof(int16_t), CALL_SEND_MS = 90 };
+       CALL_BYTES = AUDIO_CALL_SAMPLES * sizeof(int16_t), CALL_SEND_MS = 90, WS_BUFFER = 4096 };
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
                "Receive buffer must fit full raw frames and text");
-typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, TTS_ACK, REJECT_RECORD, CALL_FAILED } input_kind_t;
+_Static_assert(CALL_BYTES + 1 <= WS_BUFFER, "Best-effort call PCM must fit in one WS frame");
+typedef enum { INPUT_TAP, INPUT_DRAG, INPUT_UP, TTS_ACK, REJECT_RECORD, CALL_FAILED, WAKE_WORD } input_kind_t;
 typedef struct {
     input_kind_t kind;
     uint32_t session;
     uint32_t audio_id;
     bool aborted;
+    uint16_t rev_lo;
     int x, y;
     char target[MEDIA_TARGET_CAP];
 } input_t;
@@ -59,7 +60,9 @@ static TaskHandle_t service;
 static portMUX_TYPE input_lock = portMUX_INITIALIZER_UNLOCKED;
 static input_t inputs[INPUT_CAP], pending_drag;
 static unsigned input_head, input_count, drag_after;
-static QueueHandle_t call_tx;
+static portMUX_TYPE call_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+static call_packet_t call_tx;
+static bool call_pending;
 static uint8_t *rx_buffer;
 static fragment_t rx;
 static bool tts_accepted;
@@ -68,6 +71,10 @@ static atomic_uint socket_session, ready_session;
 static atomic_int socket_fd = -1;
 static uint32_t next_session;
 static int reconnect_ms = 1000;
+// Only the service task reads or writes this send context.
+static enum { TX_RELIABLE, TX_TRY, TX_POLL, TX_POLLED, TX_DROPPED } send_mode;
+static uint32_t best_effort_session;
+static TickType_t best_effort_queued;
 
 uint32_t ws_client_session(void)
 {
@@ -99,6 +106,54 @@ static bool send_ready(uint32_t session, const void *data, int len, bool binary)
     return send_wire(session, data, len, binary, false, pdMS_TO_TICKS(500));
 }
 
+int __real_esp_transport_poll_write(esp_transport_handle_t t, int timeout_ms);
+int __real_esp_transport_ws_send_raw(esp_transport_handle_t t, ws_transport_opcodes_t opcode,
+                                    const char *data, int len, int timeout_ms);
+
+int __wrap_esp_transport_poll_write(esp_transport_handle_t t, int timeout_ms)
+{
+    if (xTaskGetCurrentTaskHandle() != service || send_mode != TX_POLL) {
+        return __real_esp_transport_poll_write(t, timeout_ms);
+    }
+    // IDF 5.5 polls before writing the frame header. Payload/write failure
+    // after this point is not a safe drop, even if it returns zero.
+    int ready = __real_esp_transport_poll_write(t, 0);
+    send_mode = ready == 0 ? TX_DROPPED : TX_POLLED;
+    return ready;
+}
+
+int __wrap_esp_transport_ws_send_raw(esp_transport_handle_t t, ws_transport_opcodes_t opcode,
+                                    const char *data, int len, int timeout_ms)
+{
+    if (xTaskGetCurrentTaskHandle() != service || t != ws_transport || send_mode != TX_TRY) {
+        return __real_esp_transport_ws_send_raw(t, opcode, data, len, timeout_ms);
+    }
+    // The managed client's TX lock is held here. Mask a no-write drop from
+    // its abort path, but report the drop to our caller.
+    if (best_effort_session != ready_socket_session() ||
+        xTaskGetTickCount() - best_effort_queued >= pdMS_TO_TICKS(CALL_SEND_MS)) {
+        send_mode = TX_DROPPED;
+        return len;
+    }
+    send_mode = TX_POLL;
+    int written = __real_esp_transport_ws_send_raw(t, opcode, data, len, timeout_ms);
+    if (written == 0 && send_mode == TX_DROPPED) return len;
+    send_mode = TX_TRY;
+    // A partial frame on TCP/TLS cannot be abandoned and followed by another.
+    return written > 0 && written != len ? -1 : written;
+}
+
+static bool send_best_effort(uint32_t session, const void *data, int len, bool binary, TickType_t queued)
+{
+    best_effort_session = session;
+    best_effort_queued = queued;
+    send_mode = TX_TRY;
+    bool sent = send_wire(session, data, len, binary, false, pdMS_TO_TICKS(CALL_SEND_MS));
+    bool dropped = send_mode == TX_DROPPED;
+    send_mode = TX_RELIABLE;
+    return sent && !dropped;
+}
+
 static cJSON *event_json(const char *event)
 {
     cJSON *json = cJSON_CreateObject();
@@ -118,9 +173,9 @@ static bool send_json(uint32_t session, cJSON *json)
     return sent;
 }
 
-static void enqueue_session(input_t input)
+static bool enqueue_session(input_t input)
 {
-    if (!input.session || !service) return;
+    if (!input.session || !service) return false;
     bool full = false;
     portENTER_CRITICAL(&input_lock);
     if (input.kind == INPUT_DRAG) {
@@ -137,6 +192,7 @@ static void enqueue_session(input_t input)
     portEXIT_CRITICAL(&input_lock);
     if (full) atomic_fetch_add_explicit(&telemetry_io.input_drops, 1, memory_order_relaxed);
     else xTaskNotifyGive(service);
+    return !full;
 }
 
 static bool next_input(input_t *input)
@@ -164,7 +220,7 @@ static void enqueue(input_t input)
     enqueue_session(input);
 }
 
-void ws_client_pointer(const char *event, int x, int y)
+void ws_client_pointer(const char *event, int x, int y, uint16_t rev_lo)
 {
     uint32_t session = ready_socket_session();
     if (!session) return;
@@ -173,7 +229,12 @@ void ws_client_pointer(const char *event, int x, int y)
     else if (!strcmp(event, "drag")) kind = INPUT_DRAG;
     else if (!strcmp(event, "up")) kind = INPUT_UP;
     else return;
-    enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y });
+    enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y, .rev_lo = rev_lo });
+}
+
+bool ws_client_wake_word(void)
+{
+    return enqueue_session((input_t){ .kind = WAKE_WORD, .session = ready_socket_session() });
 }
 
 bool ws_client_rec_start(uint32_t session, const char *target)
@@ -198,11 +259,19 @@ bool ws_client_rec_pcm(uint32_t session, const int16_t *pcm, size_t samples)
 
 void ws_client_call_pcm(uint32_t session, uint32_t id, const int16_t *pcm, uint8_t prefix)
 {
-    if (!call_tx || !media_call_sending(id)) return;
+    if (!service || !media_call_sending(id)) return;
     // The media task never takes the socket lock. New audio replaces unsent audio.
-    call_packet_t packet = { .session = session, .id = id, .queued = xTaskGetTickCount(), .wire = { prefix } };
-    memcpy(packet.wire + 1, pcm, CALL_BYTES);
-    xQueueOverwrite(call_tx, &packet);
+    TickType_t queued = xTaskGetTickCount();
+    portENTER_CRITICAL(&call_tx_lock);
+    bool replaced = call_pending;
+    call_tx.session = session;
+    call_tx.id = id;
+    call_tx.queued = queued;
+    call_tx.wire[0] = prefix;
+    memcpy(call_tx.wire + 1, pcm, CALL_BYTES);
+    call_pending = true;
+    portEXIT_CRITICAL(&call_tx_lock);
+    if (replaced) atomic_fetch_add_explicit(&telemetry_io.call_tx_drops, 1, memory_order_relaxed);
     xTaskNotifyGive(service);
 }
 
@@ -248,9 +317,14 @@ static void send_input(const input_t *input)
         if (len > 0 && (size_t)len < sizeof(text)) send_ready(session, text, len, false);
         return;
     }
+    if (input->kind == WAKE_WORD) {
+        send_json(session, event_json("wake_word"));
+        return;
+    }
     const char *event = input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
     cJSON *json = event_json(event);
-    bool ok = cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
+    bool ok = cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y) &&
+              cJSON_AddNumberToObject(json, "rev_lo", input->rev_lo);
     if (ok) send_json(session, json);
     else cJSON_Delete(json);
 }
@@ -272,10 +346,15 @@ static bool socket_writable(void)
 static void send_call_pcm(void)
 {
     call_packet_t packet;
-    if (xQueueReceive(call_tx, &packet, 0) == pdPASS &&
-        xTaskGetTickCount() - packet.queued < pdMS_TO_TICKS(CALL_SEND_MS) &&
-        media_call_sending(packet.id) && socket_writable()) {
-        send_wire(packet.session, packet.wire, sizeof(packet.wire), true, false, pdMS_TO_TICKS(CALL_SEND_MS));
+    portENTER_CRITICAL(&call_tx_lock);
+    bool pending = call_pending;
+    if (pending) packet = call_tx;
+    call_pending = false;
+    portEXIT_CRITICAL(&call_tx_lock);
+    if (!pending || !media_call_sending(packet.id)) return;
+    if (xTaskGetTickCount() - packet.queued >= pdMS_TO_TICKS(CALL_SEND_MS) || !socket_writable() ||
+        !send_best_effort(packet.session, packet.wire, sizeof(packet.wire), true, packet.queued)) {
+        atomic_fetch_add_explicit(&telemetry_io.call_tx_drops, 1, memory_order_relaxed);
     }
 }
 
@@ -289,7 +368,7 @@ static bool send_telemetry(uint32_t session, bool hello)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char extra[384] = "";
+    char extra[448] = "";
     if (hello) {
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
@@ -297,13 +376,15 @@ static bool send_telemetry(uint32_t session, bool hello)
         int len = snprintf(extra, sizeof(extra), ",\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
                            "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
-                           "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s}",
+                            "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s,"
+                            "\"pointer_rev\":true,\"bridge_endpoint\":%s,\"panel_sleep\":%s,\"wake_word\":%s}",
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
                            BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
-                            call, call, BOARD_HAS_DRAG ? "true" : "false");
+                            call, call, BOARD_HAS_DRAG ? "true" : "false", media_audio_ready() ? "true" : "false",
+                            BOARD_HAS_BATTERY ? "true" : "false", media_audio_ready() ? "true" : "false");
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
-    char text[768];
+    char text[1024];
     int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\"%s,\"free_heap\":%zu,\"min_free_heap\":%zu,"
                        "\"free_psram\":%zu,\"wifi_rssi\":%d,\"rssi\":%d,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
                        "\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"volume\":%d" TELEMETRY_IO_JSON "}",
@@ -312,9 +393,9 @@ static bool send_telemetry(uint32_t session, bool hello)
                        BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null", audio_get_volume(),
                        TELEMETRY_IO_VALUES(hw));
     if (len <= 0 || (size_t)len >= sizeof(text)) return false;
-    // Preflight backpressure: the driver's zero-timeout transport failure can close the link.
     if (!hello && (!socket_writable() || media_is_recording())) return false;
-    return send_wire(session, text, len, false, hello, hello ? pdMS_TO_TICKS(500) : 0);
+    return hello ? send_wire(session, text, len, false, true, pdMS_TO_TICKS(500))
+                 : send_best_effort(session, text, len, false, xTaskGetTickCount());
 }
 
 static const char *field(const cJSON *msg, const char *key)
@@ -333,11 +414,22 @@ static int integer(const cJSON *msg, const char *key, int lo, int hi)
 static void dispatch(const cJSON *msg)
 {
     const char *op = field(msg, "op");
-    if (!strcmp(op, "rec")) {
+    if (!strcmp(op, "hello_ok")) {
+        uint32_t session = ws_client_session();
+        if (session && atomic_load(&wifi_online)) {
+            atomic_store(&ready_session, session);
+            ESP_LOGI(TAG, "Bridge accepted hello");
+            xTaskNotifyGive(service);
+        }
+    } else if (!strcmp(op, "wake_word")) {
+        const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(msg, "enabled");
+        if (ws_client_connected() && cJSON_IsBool(enabled)) media_set_wake_word(cJSON_IsTrue(enabled));
+    } else if (!strcmp(op, "rec")) {
         const char *action = field(msg, "action"), *target = field(msg, "target");
         if (!strcmp(action, "stop")) {
             media_record_stop(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "cancelled")));
-        } else if (!strcmp(action, "start") && strlen(target) < MEDIA_TARGET_CAP && !media_record_start(target)) {
+        } else if (!strcmp(action, "start") && strlen(target) < MEDIA_TARGET_CAP &&
+                   !media_record_start(target, !strcmp(field(msg, "endpoint"), "bridge"))) {
             input_t reject = { .kind = REJECT_RECORD };
             snprintf(reject.target, sizeof(reject.target), "%s", target);
             enqueue(reject);
@@ -524,6 +616,7 @@ static void service_task(void *arg)
 {
     (void)arg;
     bool running = false;
+    uint32_t hello_sent = 0;
     int64_t after_status = 0;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(running ? 250 : 1000));
@@ -542,13 +635,12 @@ static void service_task(void *arg)
         }
         uint32_t session = ws_client_session();
         int64_t now = esp_timer_get_time() / 1000;
-        if (session && session != atomic_load(&ready_session)) {
-            if (send_telemetry(session, true) && session == ws_client_session()) {
-                atomic_store(&ready_session, session);
+        if (session && session != hello_sent) {
+            if (send_telemetry(session, true)) {
+                hello_sent = session;
                 after_status = now + STATUS_MS;
-                ESP_LOGI(TAG, "Bridge connected");
             }
-        } else if (session && now >= after_status) {
+        } else if (ready_socket_session() && now >= after_status) {
             send_telemetry(session, false);
             after_status = now + STATUS_MS;
         }
@@ -597,12 +689,11 @@ esp_err_t ws_client_init(void)
     if (esp_transport_ws_set_config(ws_transport, &ws_config) != ESP_OK) goto fail;
     const esp_websocket_client_config_t config = {
         .uri = url, .ext_transport = ws_transport, .enable_close_reconnect = true,
-        .reconnect_timeout_ms = 1000, .network_timeout_ms = 5000, .buffer_size = 4096, .task_stack = 6144,
+        .reconnect_timeout_ms = 1000, .network_timeout_ms = 5000, .buffer_size = WS_BUFFER, .task_stack = 6144,
     };
     rx_buffer = heap_caps_malloc(FRAME_PACKET_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    call_tx = xQueueCreate(1, sizeof(call_packet_t));
     client = esp_websocket_client_init(&config);
-    if (!rx_buffer || !call_tx || !client) goto fail;
+    if (!rx_buffer || !client) goto fail;
     if (esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, on_event, NULL) != ESP_OK ||
         xTaskCreate(service_task, "ws_service", 5120, NULL, 4, &service) != pdPASS) goto fail;
     return ESP_OK;
@@ -611,11 +702,9 @@ fail:
     if (client) esp_websocket_client_destroy(client);
     if (ws_transport) esp_transport_destroy(ws_transport);
     if (parent) esp_transport_destroy(parent);
-    if (call_tx) vQueueDelete(call_tx);
     free(rx_buffer);
     client = NULL;
     ws_transport = NULL;
-    call_tx = NULL;
     rx_buffer = NULL;
     return ESP_ERR_NO_MEM;
 }
