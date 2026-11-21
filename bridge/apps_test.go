@@ -164,6 +164,10 @@ func TestWhackAMonsterOnV2Board(t *testing.T) {
 	}
 	testRequest(t, "POST", base+"/api/apps/run", "unit", object{"device_id": id, "name": "monster"}, 200)
 	web.until(t, hasWS("svg", "Score 1 / saved 1"))
+	if got := testObject(t, testRequest(t, "DELETE", base+"/api/apps/monster", "unit", nil, 409)); got["error"] != "saved app is running: monster" {
+		t.Fatal(got)
+	}
+	toolTest(t, base, "app", object{"devices": id, "exit": true}, false)
 	testRequest(t, "DELETE", base+"/api/apps/monster", "unit", nil, 204)
 	if apps := testObject(t, testRequest(t, "GET", base+"/api/apps", "unit", nil, 200))["apps"].([]any); len(apps) != 0 {
 		t.Fatal(apps)
