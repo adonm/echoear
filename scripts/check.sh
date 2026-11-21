@@ -3,8 +3,8 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 case "$#:${1-}" in
-    0:|1:--live) ;;
-    *) printf 'Usage: %s [--live]\n' "$0" >&2; exit 2 ;;
+    0:|1:--live|1:--real-model) ;;
+    *) printf 'Usage: %s [--live | --real-model]\n' "$0" >&2; exit 2 ;;
 esac
 
 for script in scripts/*.sh; do
@@ -18,6 +18,7 @@ printf 'PASS shell checks\n'
 # shellcheck source=scripts/go-bin.sh
 source scripts/go-bin.sh
 GO_BIN=$(resolve_go)
+export CGO_ENABLED=1
 for module in bridge/web/*.js; do
     node --check "$module"
 done
@@ -26,7 +27,6 @@ node --test bridge/web/*.test.mjs
 node --test config/opencode/*.test.mjs
 (
     cd bridge
-    export CGO_ENABLED=1
     "$GO_BIN" mod verify
     "$GO_BIN" vet ./...
     "$GO_BIN" test -race ./...
@@ -73,5 +73,13 @@ printf 'PASS tracked-file hygiene\n'
 
 if [[ ${1-} == --live ]]; then
     # Live tests fetch OTA manifests and images; they never flash or upload to a device.
-    (cd bridge && CGO_ENABLED=1 "$GO_BIN" test -tags=live -v -count=1 ./...)
+    (
+        cd bridge
+        test_bin="$host_tests/echoear-bridge"
+        "$GO_BIN" build -o "$test_bin" .
+        ECHOEAR_TEST_BIN="$test_bin" "$GO_BIN" test -tags=live -v -count=1 -run '^TestLive' .
+    )
+    printf 'Real-model Code Mode smoke not run; opt in with --real-model.\n'
+elif [[ ${1-} == --real-model ]]; then
+    (cd bridge && ECHOEAR_REAL_MODEL=1 "$GO_BIN" test -tags=live -v -count=1 -run '^TestRealModelEchoEarCodeMode$' .)
 fi
