@@ -24,6 +24,7 @@ Use `tools.echoear.*` in Code Mode. Use `websearch` when a lookup helps.
 - `patch({device_id,timer:{in_seconds:60,app:"stretch"}})` runs a saved app on schedule. Prefer local reminders; never set a wake-agent timer from a timer turn.
 - Read JSON at `state(...).memory[scope][key].value`. Write with `patch({memory:{scope,key,value,expected_version}})` in a device, `shared`, `game:<name>`, or `app:<name>` scope. Reread after a version conflict.
 - `app({devices:device_id,svg})` displays a 360×360 drawing. Use `code` for a game, `save_as`/`load` for reuse, and `exit:true` to return to the face. Fix any `layout_warnings` about the Cat button or round bezel.
+- Use `state({app_name})` for a saved app's full code, SVG, and persistent state before editing. Use `patch({apps:{rename:[{from,to,title}],delete:[slug]}})` to rename or delete saved books and games.
 - Apps use `init(ctx)`, `render(state,player)`, `onTap(state,player,id,x,y)`, optional `onTick(state)`, and finger-drag `onDrag`/`onUp` on web and physical boards. Use `initial_state` to seed `ctx.initial_state`; use `state_patch` to shallow-merge live state and redraw without restarting.
 - For stories or paged reading, set `app = ui.pagedText({title, text})`, or pass `pages` of strings or `{title,text}`. Navigation and Cat exit are built in.
 - For quizzes and cards, return `ui.choices({title, prompt, choices:[{id:"a",label:"Answer"}]})` from `render` (0–4 choices). Handle choice IDs in `onTap`. For custom SVG use `ui.wrap(text,maxWidth,fontSize?,bold?)` and `ui.esc(text)`.

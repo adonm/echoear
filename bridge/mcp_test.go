@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -157,6 +158,8 @@ func TestMCPClosedArguments(t *testing.T) {
 		{"patch", object{"device_id": "test", "cat": object{"save_profle": true}}, "cat.save_profle"},
 		{"patch", object{"timer": object{"seconds": 5}}, "timer.seconds"},
 		{"patch", object{"memory": []object{{"scope": "shared", "key": "k", "value": 1, "typo": 2}}}, "memory.typo"},
+		{"patch", object{"apps": object{"delete": []string{"book"}, "typo": true}}, "apps.typo"},
+		{"patch", object{"apps": object{"rename": []object{{"from": "book", "to": "novel", "typo": true}}}}, "apps.rename.typo"},
 		{"app", object{"delete_saved": "sample", "typo": true}, "typo"},
 		{"emit", object{"to": "all", "intercom": object{"from": "test", "text": "Hello", "typo": 1}}, "intercom.typo"},
 		{"emit", object{"to": "test", "call": object{"from": "caller", "typo": 1}}, "call.typo"},
@@ -246,6 +249,161 @@ func TestMCPStateSlices(t *testing.T) {
 	if len(only) != 2 || only["apps"].(object)["slices"].(object)["code"] != nil {
 		t.Fatal("unrequested slice or source leaked", only)
 	}
+}
+
+func TestMCPSavedAppReadback(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	const code = "function render(s) {\n  return '<svg><text>'+s.page+'</text></svg>';\n}"
+	const svg = `<svg viewBox="0 0 360 360"><text>My story</text></svg>`
+	if err := b.saveApp(t.Context(), savedApp{Name: "my-story", Title: "My Story", Kind: "app", Code: code, SVG: svg}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := toolTest(t, base, "state", object{"app_name": "my-story"}, false)
+	if empty := snapshot["app"].(object)["state"].(object); len(empty) != 0 {
+		t.Fatal(empty)
+	}
+	progress := object{"page": json.Number("3"), "marks": []any{"foreword", nil}}
+	toolTest(t, base, "patch", object{"memory": []object{
+		{"scope": "app:my-story", "key": "progress", "value": progress},
+		{"scope": "app:my-story", "key": "bookmark", "value": nil},
+		{"scope": "game:my-story", "key": "private", "value": true},
+	}}, false)
+	snapshot = toolTest(t, base, "state", object{"app_name": " MY-STORY ", "include_code": false}, false)
+	app := snapshot["app"].(object)
+	wantState := object{"progress": progress, "bookmark": nil}
+	updatedAt, err := app["updated_at"].(json.Number).Int64()
+	if len(snapshot) != 2 || snapshot["now"] == nil || len(app) != 6 || app["name"] != "my-story" ||
+		app["title"] != "My Story" || app["code"] != code || app["svg"] != svg ||
+		!reflect.DeepEqual(app["state"], wantState) || err != nil || updatedAt <= 0 {
+		t.Fatal(snapshot)
+	}
+	if snap := toolTest(t, base, "state", object{"app_name": "my-story", "include": []string{"apps"}}, false); snap["app"] == nil || snap["apps"] == nil {
+		t.Fatal(snap)
+	}
+	for _, tc := range []struct {
+		name any
+		err  string
+	}{
+		{"missing", "saved app not found"},
+		{"bad/slug", "app_name: invalid saved app slug"},
+		{true, "app_name: expected a string"},
+	} {
+		if got := toolTest(t, base, "state", object{"app_name": tc.name}, true); got["error"] != tc.err {
+			t.Fatal(got)
+		}
+	}
+}
+
+func TestMCPSavedAppEdits(t *testing.T) {
+	b, base := wsHarness(t, nil)
+	watcher := testConnectWS(t, base, "unit", false)
+	watcher.json(t, object{"ev": "hello", "role": "web"})
+	watcher.until(t, hasWS("peers", ""))
+	savedAppsFrame := func(f wsFrame) bool {
+		return f.op == wsText && bytes.Equal(f.data, []byte(`{"type":"saved_apps"}`))
+	}
+	noSavedAppsFrame := func() {
+		t.Helper()
+		watcher.write(t, maskedFrame(wsPing, true, nil))
+		watcher.until(t, func(f wsFrame) bool {
+			if savedAppsFrame(f) {
+				t.Fatal("unexpected saved_apps notification")
+			}
+			return f.op == wsPong
+		})
+	}
+	patch := func(args object, failed bool) object {
+		t.Helper()
+		return toolTest(t, base, "patch", object{"apps": args}, failed)
+	}
+	const svg = `<svg><text>Book</text></svg>`
+	for _, name := range []string{"book", "taken", "discard"} {
+		if err := b.saveApp(t.Context(), savedApp{Name: name, Title: "Original", Kind: "drawing", SVG: svg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.db.ExecContext(t.Context(), "UPDATE apps SET updated_at=1"); err != nil {
+		t.Fatal(err)
+	}
+	written := toolTest(t, base, "patch", object{"memory": []object{
+		{"scope": "app:book", "key": "page", "value": 2},
+		{"scope": "app:book", "key": "page", "value": 3},
+		{"scope": "app:book", "key": "mark", "value": true},
+		{"scope": "app:discard", "key": "mark", "value": "keep on rollback"},
+		{"scope": "app:reserved", "key": "page", "value": 9},
+	}}, false)["memory"].(object)
+	scopes := []string{"app:book", "app:novel", "app:discard", "app:reserved", "app:taken"}
+	stored := func() object {
+		t.Helper()
+		return toolTest(t, base, "state", object{"include": []string{"memory"}, "memory_scopes": scopes}, false)["memory"].(object)
+	}
+	before := stored()
+	apps := patch(object{"delete": []string{"discard"}, "rename": []object{{"from": "book", "to": "novel"}, {"from": "novel", "to": "taken"}}}, true)
+	if apps["error"] != "saved app already exists: taken" || !reflect.DeepEqual(stored(), before) {
+		t.Fatal("collision did not roll back app state", apps)
+	}
+	list := toolTest(t, base, "state", object{"include": []string{"apps"}}, false)["apps"].(object)
+	if len(list) != 3 || list["book"] == nil || list["taken"] == nil || list["discard"] == nil || list["novel"] != nil {
+		t.Fatal("collision did not roll back saved apps", list)
+	}
+	for _, tc := range []struct {
+		args object
+		err  string
+	}{
+		{object{"delete": []string{"book", "../bad"}}, "apps.delete: invalid saved app slug"},
+		{object{"rename": []object{{"from": "book"}}}, "apps.rename: expected to or title"},
+		{object{"rename": []object{{"title": "Missing source"}}}, "apps.rename.from: invalid saved app slug"},
+		{object{"rename": []object{{"from": "book", "title": " "}}}, "apps.rename.title: expected a non-empty title"},
+		{object{"rename": []object{{"from": "missing", "title": "No source"}}}, "saved app not found: missing"},
+		{object{"rename": []object{{"from": "book", "to": "reserved"}}}, "saved app state already exists: reserved"},
+	} {
+		if got := patch(tc.args, true); got["error"] != tc.err {
+			t.Fatal(got)
+		}
+	}
+	noSavedAppsFrame()
+
+	got := patch(object{"rename": []object{{"from": " Book ", "to": "NOVEL", "title": "First Edition"}}}, false)["apps"].(object)
+	renamed := []any{object{"from": "book", "to": "novel", "title": "First Edition"}}
+	if !reflect.DeepEqual(got["renamed"], renamed) || len(got["deleted"].([]any)) != 0 {
+		t.Fatal(got)
+	}
+	watcher.until(t, savedAppsFrame)
+	toolTest(t, base, "state", object{"app_name": "book"}, true)
+	app := toolTest(t, base, "state", object{"app_name": "novel"}, false)["app"].(object)
+	if app["name"] != "novel" || app["title"] != "First Edition" || app["svg"] != svg || app["updated_at"] == json.Number("1") {
+		t.Fatal(app)
+	}
+	if mem := stored(); len(mem["app:book"].(object)) != 0 || !reflect.DeepEqual(mem["app:novel"], written["app:book"]) {
+		t.Fatal("state or metadata did not move", mem)
+	}
+
+	got = patch(object{"rename": []object{{"from": "novel", "title": "Second Edition"}}}, false)["apps"].(object)
+	renamed = []any{object{"from": "novel", "to": "novel", "title": "Second Edition"}}
+	if !reflect.DeepEqual(got["renamed"], renamed) {
+		t.Fatal(got)
+	}
+	watcher.until(t, savedAppsFrame)
+	app = toolTest(t, base, "state", object{"app_name": "novel"}, false)["app"].(object)
+	if app["title"] != "Second Edition" || !reflect.DeepEqual(stored()["app:novel"], written["app:book"]) {
+		t.Fatal(app)
+	}
+
+	got = patch(object{"delete": []string{"novel", "missing", "discard"}}, false)["apps"].(object)
+	if !slices.Equal(got["deleted"].([]any), []any{"novel", "discard"}) || len(got["renamed"].([]any)) != 0 {
+		t.Fatal(got)
+	}
+	watcher.until(t, savedAppsFrame)
+	toolTest(t, base, "state", object{"app_name": "novel"}, true)
+	toolTest(t, base, "state", object{"app_name": "discard"}, true)
+	if mem := stored(); len(mem["app:novel"].(object)) != 0 || len(mem["app:discard"].(object)) != 0 || !reflect.DeepEqual(mem["app:reserved"], written["app:reserved"]) {
+		t.Fatal("delete did not remove only its own state", mem)
+	}
+	got = patch(object{"delete": []string{"novel"}}, false)["apps"].(object)
+	if len(got["deleted"].([]any)) != 0 {
+		t.Fatal(got)
+	}
+	noSavedAppsFrame()
 }
 
 func TestEmitIntercom(t *testing.T) {

@@ -23,6 +23,32 @@ type savedApp struct {
 	TickMS, MaxTicks                     int
 }
 
+func normalizeAppName(raw, field string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if !slugRE.MatchString(name) {
+		return "", fieldError(field, "invalid saved app slug")
+	}
+	return name, nil
+}
+
+func (b *bridge) savedAppState(ctx context.Context, name string) (object, error) {
+	if b.db == nil {
+		return nil, problem(503, "Apps unavailable")
+	}
+	var title, code, svg, state string
+	var updatedAt int64
+	err := b.db.QueryRowContext(ctx, `SELECT title,code,svg,updated_at,
+		(SELECT json_group_object(key,json(value_json)) FROM memory WHERE scope=?)
+		FROM apps WHERE name=?`, "app:"+name, name).Scan(&title, &code, &svg, &updatedAt, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, problem(404, "saved app not found")
+	}
+	if err != nil {
+		return nil, problem(502, "Cannot read saved app")
+	}
+	return object{"name": name, "title": title, "code": code, "svg": svg, "state": json.RawMessage(state), "updated_at": updatedAt}, nil
+}
+
 func (b *bridge) loadApp(ctx context.Context, name string) (savedApp, error) {
 	a := savedApp{Name: name}
 	if b.db == nil {
@@ -111,14 +137,148 @@ func (b *bridge) deleteSavedApp(ctx context.Context, name string) (bool, error) 
 	if !slugRE.MatchString(name) {
 		return false, problem(400, "Invalid app name")
 	}
-	if b.db == nil {
-		return false, problem(503, "Apps unavailable")
+	deleted, _, err := b.editSavedApps(ctx, []string{name}, nil)
+	return len(deleted) != 0, err
+}
+
+type appRename struct{ from, to, title string }
+
+func (b *bridge) patchSavedApps(ctx context.Context, args object) (object, error) {
+	var names []string
+	if raw, ok := args["delete"]; ok {
+		var err error
+		names, err = stringList(raw, "apps.delete")
+		if err != nil {
+			return nil, err
+		}
+		for i, name := range names {
+			names[i], err = normalizeAppName(name, "apps.delete")
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
-	deleted, err := deleteRow(ctx, b.db, "DELETE FROM apps WHERE name=?", name)
-	if deleted {
+	var renames []appRename
+	if raw, ok := args["rename"]; ok {
+		items, ok := raw.([]any)
+		if !ok {
+			return nil, fieldError("apps.rename", "expected an array of objects")
+		}
+		for _, item := range items {
+			rename, ok := item.(object)
+			if !ok {
+				return nil, fieldError("apps.rename", "expected a rename object")
+			}
+			from, err := normalizeAppName(str(rename["from"]), "apps.rename.from")
+			if err != nil {
+				return nil, err
+			}
+			edit := appRename{from: from, to: from}
+			to, hasTo := rename["to"]
+			title, hasTitle := rename["title"]
+			if !hasTo && !hasTitle {
+				return nil, fieldError("apps.rename", "expected to or title")
+			}
+			if hasTo {
+				edit.to, err = normalizeAppName(str(to), "apps.rename.to")
+				if err != nil {
+					return nil, err
+				}
+			}
+			if hasTitle {
+				edit.title = shortText(title, 60, false)
+				if edit.title == "" {
+					return nil, fieldError("apps.rename.title", "expected a non-empty title")
+				}
+			}
+			renames = append(renames, edit)
+		}
+	}
+	if len(names)+len(renames) == 0 {
+		return nil, fieldError("apps", "expected at least one delete or rename")
+	}
+	deleted, renamed, err := b.editSavedApps(ctx, names, renames)
+	return object{"deleted": deleted, "renamed": renamed}, err
+}
+
+var errSavedAppEdit = problem(502, "Cannot edit saved apps")
+
+func (b *bridge) editSavedApps(ctx context.Context, names []string, renames []appRename) ([]string, []object, error) {
+	if b.db == nil {
+		return nil, nil, problem(503, "Apps unavailable")
+	}
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, errSavedAppEdit
+	}
+	defer tx.Rollback()
+	deleted, renamed := []string{}, []object{}
+	for _, name := range names {
+		result, err := tx.ExecContext(ctx, "DELETE FROM apps WHERE name=?", name)
+		if err != nil {
+			return nil, nil, errSavedAppEdit
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return nil, nil, errSavedAppEdit
+		}
+		if n == 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM memory WHERE scope=?", "app:"+name); err != nil {
+			return nil, nil, errSavedAppEdit
+		}
+		deleted = append(deleted, name)
+	}
+	for _, edit := range renames {
+		result, err := renameSavedApp(ctx, tx, edit)
+		if err != nil {
+			return nil, nil, err
+		}
+		renamed = append(renamed, result)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, errSavedAppEdit
+	}
+	if len(deleted)+len(renamed) != 0 {
 		b.appsChanged()
 	}
-	return deleted, err
+	return deleted, renamed, nil
+}
+
+func renameSavedApp(ctx context.Context, tx *sql.Tx, edit appRename) (object, error) {
+	var title string
+	err := tx.QueryRowContext(ctx, "SELECT title FROM apps WHERE name=?", edit.from).Scan(&title)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, problem(404, "saved app not found: "+edit.from)
+	}
+	if err != nil {
+		return nil, errSavedAppEdit
+	}
+	if edit.to != edit.from {
+		var appExists, stateExists bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE name=?),
+			EXISTS(SELECT 1 FROM memory WHERE scope=?)`, edit.to, "app:"+edit.to).Scan(&appExists, &stateExists)
+		if err != nil {
+			return nil, errSavedAppEdit
+		}
+		if appExists {
+			return nil, problem(409, "saved app already exists: "+edit.to)
+		}
+		if stateExists {
+			return nil, problem(409, "saved app state already exists: "+edit.to)
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE memory SET scope=? WHERE scope=?", "app:"+edit.to, "app:"+edit.from); err != nil {
+			return nil, errSavedAppEdit
+		}
+	}
+	if edit.title != "" {
+		title = edit.title
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE apps SET name=?,title=?,updated_at=? WHERE name=?", edit.to, title, time.Now().UnixMilli(), edit.from); err != nil {
+		return nil, errSavedAppEdit
+	}
+	return object{"from": edit.from, "to": edit.to, "title": title}, nil
 }
 
 func (b *bridge) appAPI(w http.ResponseWriter, r *http.Request, path string) (any, error) {

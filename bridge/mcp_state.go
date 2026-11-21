@@ -30,6 +30,24 @@ func (b *bridge) mcpState(ctx context.Context, args object) (object, error) {
 	id := str(args["device_id"])
 	include := stateSlices[:5]
 	var err error
+	out := object{"now": object{"local": now.Format(time.RFC3339), "unix_ms": now.UnixMilli()}}
+	if raw, exists := args["app_name"]; exists {
+		name, ok := raw.(string)
+		if !ok {
+			return nil, fieldError("app_name", "expected a string")
+		}
+		if name != "" {
+			name, err = normalizeAppName(name, "app_name")
+			if err != nil {
+				return nil, err
+			}
+			out["app"], err = b.savedAppState(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			include = nil
+		}
+	}
 	if raw, ok := args["include"]; ok {
 		include, err = stringList(raw, "include")
 		if err != nil {
@@ -41,7 +59,6 @@ func (b *bridge) mcpState(ctx context.Context, args object) (object, error) {
 			return nil, fieldError("include", "unknown slice %q", key)
 		}
 	}
-	out := object{"now": object{"local": now.Format(time.RFC3339), "unix_ms": now.UnixMilli()}}
 	if id != "" || slices.Contains(include, "devices") || slices.Contains(include, "cats") {
 		if err := b.mcpDeviceState(out, id, include); err != nil {
 			return nil, err
@@ -153,7 +170,7 @@ func (b *bridge) mcpPatch(ctx context.Context, args object) (object, error) {
 	id := str(args["device_id"])
 	out := object{"ok": true}
 	// Apply appearance before changing sleep, and leave sleep alone on appearance-only edits.
-	for _, key := range []string{"cat", "device", "memory", "timer"} {
+	for _, key := range []string{"cat", "device", "memory", "timer", "apps"} {
 		raw, ok := args[key]
 		if !ok {
 			continue
@@ -173,6 +190,8 @@ func (b *bridge) mcpPatch(ctx context.Context, args object) (object, error) {
 				out[key], err = b.patchDevice(ctx, id, edit)
 			case "timer":
 				out[key], err = b.patchTimer(ctx, id, edit)
+			case "apps":
+				out[key], err = b.patchSavedApps(ctx, edit)
 			}
 		}
 		if err != nil {
@@ -180,7 +199,7 @@ func (b *bridge) mcpPatch(ctx context.Context, args object) (object, error) {
 		}
 	}
 	if len(out) == 1 {
-		return nil, problem(400, "Expected a device, cat, memory, or timer patch")
+		return nil, problem(400, "Expected a device, cat, memory, timer, or saved app patch")
 	}
 	return out, nil
 }
