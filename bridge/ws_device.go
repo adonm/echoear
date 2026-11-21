@@ -803,7 +803,14 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 		var err error
 		if r.app == nil {
 			var face string
+			portrait := false
 			if r.cat != nil {
+				if id := activePortrait(r.cat.FaceSVG); id != "" {
+					portrait = h.b.portraits.has(id)
+					if !portrait {
+						r.cat.FaceSVG = r.cat.defaultFace()
+					}
+				}
 				r.view = catChrome(*r.cat, r.pose)
 				face = catArt(*r.cat, r.pose)
 			}
@@ -819,6 +826,12 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 				screen = prev
 			} else if photo {
 				screen, err = h.b.buildScreen(raw, false, geometry)
+			} else if portrait {
+				p := h.b.portraits
+				screen, err = p.frames.buildGradedWithAssets(raw, false, geometry, grade, p.image)
+				if err != nil {
+					screen, err = screens.buildGraded(r.view.svg(catArt(catState{FaceSVG: r.cat.defaultFace()}, r.pose)), false, geometry, grade)
+				}
 			} else {
 				screen, err = screens.buildGraded(raw, false, geometry, grade)
 			}

@@ -41,6 +41,7 @@ type bridge struct {
 	timers    *timerManager
 	builders  *buildManager
 	library   *photoLibrary
+	portraits *portraitStore
 	diag      diagnostics
 	catMu     sync.Mutex // Serializes cat and voice writes through hub publication.
 	catTitles sync.Mutex
@@ -490,6 +491,8 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		if id, ok := photoPath(path); ok {
 			return nil, b.getPhoto(w, r, id, "")
 		}
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/portraits/"):
+		return nil, b.servePortrait(w, r, path, "")
 	case path == "/api/cats" || strings.HasPrefix(path, "/api/cats/") ||
 		strings.HasPrefix(path, "/api/devices/") && strings.HasSuffix(path, "/cat"):
 		return b.catAPI(w, r, path)

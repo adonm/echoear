@@ -109,6 +109,10 @@ func (c *screenCache) build(raw string, exit bool, geometry screenGeometry) (svg
 }
 
 func (c *screenCache) buildGraded(raw string, exit bool, geometry screenGeometry, grade gradeKey) (svgScreen, error) {
+	return c.buildGradedWithAssets(raw, exit, geometry, grade, nil)
+}
+
+func (c *screenCache) buildGradedWithAssets(raw string, exit bool, geometry screenGeometry, grade gradeKey, lookup photoLookup) (svgScreen, error) {
 	start := time.Now()
 	key := screenCacheKey{svgHash(raw), geometry, exit, grade}
 	c.mu.Lock()
@@ -122,7 +126,7 @@ func (c *screenCache) buildGraded(raw string, exit bool, geometry screenGeometry
 	c.misses++
 	c.mu.Unlock()
 
-	screen, err := buildScreenPaint(raw, exit, geometry, nil, grade)
+	screen, err := buildScreenPaint(raw, exit, geometry, lookup, grade)
 	if err != nil {
 		return svgScreen{}, err
 	}
@@ -163,7 +167,7 @@ func buildScreenPaint(raw string, exit bool, geometry screenGeometry, lookup pho
 	if err != nil {
 		return svgScreen{}, err
 	}
-	if geometry.width == 0 || strings.Contains(scene.svg, `<image `) {
+	if geometry.width == 0 || strings.Contains(scene.svg, `href="photo:`) {
 		grade = gradeDay
 	}
 	screen := svgScreen{raw: raw, source: scene.toBrowserSVG(), hits: scene.hits, hitWarnings: scene.hitWarnings, grade: grade}
@@ -464,7 +468,9 @@ func parseSVG(raw string) (*svgNode, error) {
 					n.pixelRuns = nil
 				}
 				if tag == "image" && k == "href" {
-					if id, ok := strings.CutPrefix(v, "photo:"); ok && photoID.MatchString(id) {
+					id, isPhoto := strings.CutPrefix(v, "photo:")
+					_, _, isPortrait := parsePortraitRef(v)
+					if isPhoto && photoID.MatchString(id) || isPortrait {
 						n.attr[k] = v
 					}
 				}
@@ -492,7 +498,7 @@ func parseSVG(raw string) (*svgNode, error) {
 				}
 				photos++
 				if photos > 8 {
-					return nil, fmt.Errorf("SVG exceeds 8 photo references")
+					return nil, fmt.Errorf("SVG exceeds 8 image references")
 				}
 			}
 			if len(stack) == 0 {

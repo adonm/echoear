@@ -1,0 +1,452 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"image"
+	imagecolor "image/color"
+	"image/draw"
+	_ "image/jpeg"
+	"image/png"
+	"io"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	xdraw "golang.org/x/image/draw"
+)
+
+const portraitEndpoint = "https://opencode.ai/inference/google/v1beta/models/gemini-nano-banana-2.1:generateContent"
+const portraitSheetSide = 1024
+const portraitMaxBytes = 8 << 20
+
+var portraitPoses = [...]string{"idle", "blink", "talk", "think"}
+var portraitIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var portraitSchema = closedObject(object{"prompt": uiString(600), "bg": hexTintSchema, "edit": object{"type": "boolean"}}, "prompt")
+
+type portraitSpec struct {
+	Prompt, BG string
+	Edit       bool
+}
+
+type pendingPortrait struct{ id, bg, base string }
+
+func parsePortraitRef(raw string) (id, pose string, ok bool) {
+	ref, found := strings.CutPrefix(raw, "portrait:")
+	if !found {
+		return "", "", false
+	}
+	id, pose, found = strings.Cut(ref, ":")
+	if !found || !portraitIDPattern.MatchString(id) || !slices.Contains(portraitPoses[:], pose) {
+		return "", "", false
+	}
+	return id, pose, true
+}
+
+type portraitGenerator func(ctx context.Context, prompt string, source []byte) ([]byte, error)
+
+type portraitStore struct {
+	dir      string
+	generate portraitGenerator
+	frames   screenCache
+}
+
+func portraitPrompt(spec portraitSpec) string {
+	prompt := `Create one square 1024×1024 Lark Storybook Illustration expression sheet, exactly four equal quadrants, no text, labels, borders or gridlines.
+Top-left idle: gentle closed-mouth smile. Top-right blink: both eyes closed, same smile. Bottom-left talk: open mouth, friendly eyes. Bottom-right think: eyes glance up, thoughtful mouth.
+Draw the very same front-facing character, head and rounded shoulders, at the exact same scale, silhouette, position and line weight in every quadrant. Only the expression changes. Keep each silhouette well within its quadrant; maintain generous circular margin with nothing touching an edge.
+Cozy hand-painted gouache meets soft storybook vector: crisp hue-shifted cocoa, pine, plum or navy outlines (not black), slightly warm top highlights, softly colored base shadows, simple matte pastel shapes, glossy eyes with cream catchlights. No extra props except requested accessories, no scene, no cast shadow, no texture or gradient on the background. Use the same solid flat ` + spec.BG + ` background across the entire sheet.`
+	if spec.Edit {
+		prompt += "\nUse the attached sheet as a reference. Keep character identity, silhouette, colors, expression layout and placement unchanged except for the requested change."
+	}
+	return prompt + "\nCharacter art direction: " + spec.Prompt
+}
+
+func consolePortraitGenerator(key string) portraitGenerator {
+	if key == "" {
+		return nil
+	}
+	client := &http.Client{
+		Timeout:       65 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return func(ctx context.Context, prompt string, source []byte) ([]byte, error) {
+		return requestPortrait(ctx, client, portraitEndpoint, key, prompt, source)
+	}
+}
+
+func requestPortrait(ctx context.Context, client *http.Client, endpoint, key, prompt string, source []byte) ([]byte, error) {
+	type inline struct {
+		MIME string `json:"mimeType"`
+		Data []byte `json:"data"`
+	}
+	type part struct {
+		Text   string  `json:"text,omitempty"`
+		Inline *inline `json:"inlineData,omitempty"`
+	}
+	type content struct {
+		Parts []part `json:"parts"`
+	}
+	input := content{Parts: []part{{Text: prompt}}}
+	if len(source) > 0 {
+		input.Parts = append(input.Parts, part{Inline: &inline{"image/png", source}})
+	}
+	body, err := json.Marshal(object{"contents": []content{input}, "generationConfig": object{
+		"candidateCount": 1, "responseModalities": []string{"IMAGE"},
+		"imageConfig": object{"aspectRatio": "1:1", "imageSize": "1K"},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, problem(502, "Cannot reach the Console image service")
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return nil, problem(502, fmt.Sprintf("Console image service returned HTTP %d", res.StatusCode))
+	}
+	var output struct{ Candidates []struct{ Content content } }
+	if err := json.NewDecoder(io.LimitReader(res.Body, 2*portraitMaxBytes)).Decode(&output); err != nil {
+		return nil, problem(502, "Invalid Console image response")
+	}
+	for _, candidate := range output.Candidates {
+		for _, p := range candidate.Content.Parts {
+			if p.Inline != nil && (p.Inline.MIME == "image/png" || p.Inline.MIME == "image/jpeg") &&
+				len(p.Inline.Data) > 0 && len(p.Inline.Data) <= portraitMaxBytes {
+				return p.Inline.Data, nil
+			}
+		}
+	}
+	return nil, problem(502, "Console response did not contain a portrait sheet")
+}
+
+func decodePortraitSheet(raw []byte) (image.Image, error) {
+	if len(raw) > portraitMaxBytes {
+		return nil, errors.New("portrait sheet exceeds 8 MiB")
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || (format != "png" && format != "jpeg") || cfg.Width != portraitSheetSide || cfg.Height != portraitSheetSide {
+		return nil, errors.New("expected a 1024×1024 PNG or JPEG portrait sheet")
+	}
+	sheet, _, err := image.Decode(bytes.NewReader(raw))
+	return sheet, err
+}
+
+// Use the median of the four inset corner patches, not a single noisy pixel.
+func portraitCorner(img *image.RGBA, r image.Rectangle) imagecolor.RGBA {
+	var channels [3][]uint8
+	for _, x := range []int{r.Min.X + 8, r.Max.X - 13} {
+		for _, y := range []int{r.Min.Y + 8, r.Max.Y - 13} {
+			for j := range 5 {
+				for i := range 5 {
+					c := img.RGBAAt(x+i, y+j)
+					channels[0] = append(channels[0], c.R)
+					channels[1] = append(channels[1], c.G)
+					channels[2] = append(channels[2], c.B)
+				}
+			}
+		}
+	}
+	for _, values := range channels {
+		slices.Sort(values)
+	}
+	return imagecolor.RGBA{channels[0][50], channels[1][50], channels[2][50], 255}
+}
+
+func portraitDiff(a, b imagecolor.RGBA) int {
+	sq := func(n int) int { return n * n }
+	return sq(int(a.R)-int(b.R)) + sq(int(a.G)-int(b.G)) + sq(int(a.B)-int(b.B))
+}
+
+// Use the dominant connected silhouette for the bounds, ignoring small islands
+// of compression or stray illustration at the edges.
+func portraitBounds(img *image.RGBA, r image.Rectangle, bg imagecolor.RGBA) image.Rectangle {
+	w, h := r.Dx(), r.Dy()
+	mask := make([]bool, w*h)
+	for y := range h {
+		for x := range w {
+			mask[y*w+x] = portraitDiff(img.RGBAAt(r.Min.X+x, r.Min.Y+y), bg) > 25*25
+		}
+	}
+	var best image.Rectangle
+	var queue []int
+	largest := 0
+	for i := range mask {
+		if !mask[i] {
+			continue
+		}
+		mask[i] = false
+		queue = append(queue[:0], i)
+		bounds := image.Rectangle{Min: image.Pt(w, h)}
+		for head := 0; head < len(queue); head++ {
+			pos := queue[head]
+			x, y := pos%w, pos/w
+			bounds.Min = image.Pt(min(bounds.Min.X, x), min(bounds.Min.Y, y))
+			bounds.Max = image.Pt(max(bounds.Max.X, x+1), max(bounds.Max.Y, y+1))
+			push := func(p int) {
+				if mask[p] {
+					mask[p] = false
+					queue = append(queue, p)
+				}
+			}
+			if x > 0 {
+				push(pos - 1)
+			}
+			if x+1 < w {
+				push(pos + 1)
+			}
+			if y > 0 {
+				push(pos - w)
+			}
+			if y+1 < h {
+				push(pos + w)
+			}
+		}
+		if len(queue) > largest {
+			best, largest = bounds.Add(r.Min), len(queue)
+		}
+	}
+	if largest < 1024 || best.Dx() < 70 || best.Dy() < 70 {
+		return image.Rectangle{}
+	}
+	return best
+}
+
+func slicePortrait(sheet image.Image, bg imagecolor.RGBA) ([4]*image.RGBA, error) {
+	var poses [4]*image.RGBA
+	if sheet.Bounds().Size() != image.Pt(portraitSheetSide, portraitSheetSide) {
+		return poses, errors.New("portrait sheet must be 1024×1024")
+	}
+	img := image.NewRGBA(image.Rect(0, 0, portraitSheetSide, portraitSheetSide))
+	draw.Draw(img, img.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
+	draw.Draw(img, img.Bounds(), sheet, sheet.Bounds().Min, draw.Over)
+	const side = portraitSheetSide / 2
+	var crops [4]image.Rectangle
+	var backgrounds [4]imagecolor.RGBA
+	scale := 1.0
+	for i, pose := range portraitPoses {
+		cell := image.Rect(0, 0, side, side).Add(image.Pt(i%2*side, i/2*side))
+		backgrounds[i] = portraitCorner(img, cell)
+		inner := cell.Inset(10)
+		b := portraitBounds(img, inner, backgrounds[i])
+		if b.Empty() || b.Min.X == inner.Min.X || b.Min.Y == inner.Min.Y || b.Max.X == inner.Max.X || b.Max.Y == inner.Max.Y {
+			return poses, fmt.Errorf("portrait %s needs one silhouette with a clear margin", pose)
+		}
+		b = b.Inset(-3).Intersect(cell)
+		crops[i] = b
+		// All four poses use one scale. Cap the diagonal for a round display.
+		scale = min(scale, 318/math.Hypot(float64(b.Dx()), float64(b.Dy())), 247/float64(b.Dy()))
+	}
+	for i, crop := range crops {
+		src := img.SubImage(crop).(*image.RGBA)
+		for y := crop.Min.Y; y < crop.Max.Y; y++ {
+			for x := crop.Min.X; x < crop.Max.X; x++ {
+				c := src.RGBAAt(x, y)
+				// Feather the backdrop normalization around antialiased edges.
+				weight := min(1, max(0, (math.Sqrt(float64(portraitDiff(c, backgrounds[i])))-8)/20))
+				channel := func(v, base uint8) uint8 { return uint8(math.Round(weight*float64(v) + (1-weight)*float64(base))) }
+				src.SetRGBA(x, y, imagecolor.RGBA{channel(c.R, bg.R), channel(c.G, bg.G), channel(c.B, bg.B), 255})
+			}
+		}
+		out := image.NewRGBA(image.Rect(0, 0, screenSize, screenSize))
+		draw.Draw(out, out.Bounds(), image.NewUniform(bg), image.Point{}, draw.Src)
+		w, h := int(math.Round(float64(crop.Dx())*scale)), int(math.Round(float64(crop.Dy())*scale))
+		x, y := (screenSize-w)/2, (screenSize-h)/2
+		xdraw.CatmullRom.Scale(out, image.Rect(x, y, x+w, y+h), src, crop, draw.Src, nil)
+		poses[i] = out
+	}
+	return poses, nil
+}
+
+func writePortraitPNG(dir, name string, img image.Image) error {
+	f, err := os.OpenFile(filepath.Join(dir, name+".png"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	return errors.Join(png.Encode(f, img), f.Close())
+}
+
+func (p *portraitStore) create(ctx context.Context, spec portraitSpec, currentID string) (string, error) {
+	if p == nil || p.generate == nil {
+		return "", problem(503, "Portrait generation unavailable; configure OPENCODE_API_KEY or use cat.companion")
+	}
+	var source []byte
+	if spec.Edit {
+		var err error
+		source, err = p.read(currentID, "sheet")
+		if err != nil {
+			return "", fieldError("cat.portrait.edit", "current companion has no local portrait sheet")
+		}
+	}
+	raw, err := p.generate(ctx, portraitPrompt(spec), source)
+	if err != nil {
+		return "", err
+	}
+	sheet, err := decodePortraitSheet(raw)
+	if err != nil {
+		return "", problem(502, err.Error())
+	}
+	bg, _ := directPaint(spec.BG)
+	poses, err := slicePortrait(sheet, bg)
+	if err != nil {
+		return "", problem(502, err.Error())
+	}
+	if err := os.MkdirAll(p.dir, 0o700); err != nil {
+		return "", problem(502, "Cannot create portrait storage")
+	}
+	id := randomHex(16)
+	dir := filepath.Join(p.dir, id)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return "", problem(502, "Cannot create portrait")
+	}
+	if err := func() error {
+		if err := writePortraitPNG(dir, "sheet", sheet); err != nil {
+			return err
+		}
+		for i, pose := range portraitPoses {
+			if err := writePortraitPNG(dir, pose, poses[i]); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	}(); err != nil {
+		p.discard(id)
+		return "", problem(502, "Cannot save portrait")
+	}
+	return id, nil
+}
+
+func (p *portraitStore) discard(id string) {
+	if p == nil || !portraitIDPattern.MatchString(id) {
+		return
+	}
+	dir := filepath.Join(p.dir, id)
+	for _, pose := range portraitPoses {
+		_ = os.Remove(filepath.Join(dir, pose+".png"))
+	}
+	_ = os.Remove(filepath.Join(dir, "sheet.png"))
+	_ = os.Remove(dir)
+}
+
+func (p *portraitStore) read(id, pose string) ([]byte, error) {
+	if p == nil || !portraitIDPattern.MatchString(id) || pose != "sheet" && !slices.Contains(portraitPoses[:], pose) {
+		return nil, os.ErrNotExist
+	}
+	return os.ReadFile(filepath.Join(p.dir, id, pose+".png"))
+}
+
+func (p *portraitStore) image(ref string) (image.Image, error) {
+	id, pose, ok := parsePortraitRef(ref)
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	data, err := p.read(id, pose)
+	if err != nil {
+		return nil, err
+	}
+	return png.Decode(bytes.NewReader(data))
+}
+
+func (p *portraitStore) has(id string) bool {
+	if p == nil || !portraitIDPattern.MatchString(id) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(p.dir, id, "sheet.png"))
+	return err == nil
+}
+
+func (b *bridge) preparePortrait(ctx context.Context, who peer, args object, raw any) (*pendingPortrait, error) {
+	for _, field := range []string{"sprite", "companion", "face_svg", "face_edits", "face_bg", "mark_color", "accent_color"} {
+		if _, exists := args[field]; exists {
+			return nil, fieldError("cat.portrait", "cannot combine with %s", field)
+		}
+	}
+	spec, err := readUIValue[portraitSpec](raw, portraitSchema, "cat.portrait")
+	if err != nil {
+		return nil, err
+	}
+	if spec.Prompt = strings.TrimSpace(spec.Prompt); spec.Prompt == "" {
+		return nil, fieldError("cat.portrait.prompt", "describe the character or edit")
+	}
+	current, err := b.readActiveCat(ctx, b.db, who)
+	if err != nil {
+		return nil, problem(502, "Cannot read current companion")
+	}
+	if _, _, err := updateCat(current, args, b.voices); err != nil {
+		return nil, err
+	}
+	spec.BG = colorStringOr(spec.BG, storybookPalettes["peach"].bg)
+	if spec.Edit && str(raw.(object)["bg"]) == "" {
+		spec.BG = current.FaceBG
+	}
+	id, err := b.portraits.create(ctx, spec, activePortrait(current.FaceSVG))
+	if err != nil {
+		return nil, err
+	}
+	return &pendingPortrait{id, spec.BG, current.FaceSVG}, nil
+}
+
+func colorStringOr(s, fallback string) string {
+	if pixelColor.MatchString(s) {
+		return strings.ToUpper(s)
+	}
+	return fallback
+}
+
+func portraitSVG(id, bg string) string {
+	var out strings.Builder
+	out.WriteString(svgStart + `<rect width="360" height="360" fill="` + bg + `"/>`)
+	for i, pose := range []string{"idle", "blink", "talk", "think", "listen", "sleep"} {
+		bitmap := [...]string{"idle", "blink", "talk", "think", "idle", "blink"}[i]
+		fmt.Fprintf(&out, `<g data-pose="%s"><image href="portrait:%s:%s" width="360" height="360"/></g>`, pose, id, bitmap)
+	}
+	out.WriteString(`</svg>`)
+	return out.String()
+}
+
+func activePortrait(raw string) string {
+	start := strings.Index(raw, `href="portrait:`)
+	if start < 0 {
+		return ""
+	}
+	ref, _, _ := strings.Cut(raw[start+len(`href="`):], `"`)
+	id, _, _ := parsePortraitRef(ref)
+	return id
+}
+
+func (b *bridge) servePortrait(w http.ResponseWriter, r *http.Request, path, scope string) error {
+	id, pose, found := strings.Cut(strings.TrimPrefix(path, "/api/portraits/"), "/")
+	pose, pngFile := strings.CutSuffix(pose, ".png")
+	if !found || !pngFile || !portraitIDPattern.MatchString(id) || !slices.Contains(portraitPoses[:], pose) {
+		return problem(404, "Portrait not found")
+	}
+	if scope != "" {
+		var face string
+		if b.db == nil || b.db.QueryRowContext(r.Context(), `SELECT face_svg FROM cats WHERE device_id=?`, strings.ToLower(scope)).Scan(&face) != nil ||
+			activePortrait(face) != id {
+			return problem(404, "Portrait not found")
+		}
+	}
+	data, err := b.portraits.read(id, pose)
+	if err != nil {
+		return problem(404, "Portrait not found")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	sendBytes(w, 200, "image/png", data)
+	return nil
+}

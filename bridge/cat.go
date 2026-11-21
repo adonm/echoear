@@ -320,6 +320,10 @@ func catBool(args object, key string, fallback bool) (bool, error) {
 }
 
 func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args object) (catState, bool, error) {
+	return b.changeCatPrepared(ctx, who, theme, op, args, nil)
+}
+
+func (b *bridge) changeCatPrepared(ctx context.Context, who peer, theme, op string, args object, portrait *pendingPortrait) (catState, bool, error) {
 	id := strings.ToLower(who.DeviceID)
 	unavailable := problem(502, "Cannot save cat")
 	tx, err := b.db.BeginTx(ctx, nil)
@@ -359,6 +363,17 @@ func (b *bridge) changeCat(ctx context.Context, who peer, theme, op string, args
 		next, save, err = updateCat(current, args, b.voices)
 		if err != nil {
 			return catState{}, false, err
+		}
+		if portrait != nil {
+			if current.FaceSVG != portrait.base {
+				return catState{}, false, problem(409, "Companion changed while the portrait was being drawn")
+			}
+			next.Configured, err = catBool(args, "configured", true)
+			if err != nil {
+				return catState{}, false, err
+			}
+			next.FaceBG = portrait.bg
+			next.FaceSVG = portraitSVG(portrait.id, portrait.bg)
 		}
 		// An omitted flag retains legacy auto-save; an explicit false is a
 		// temporary shift that must not overwrite a named favorite.
@@ -437,7 +452,7 @@ func (b *bridge) patchCat(ctx context.Context, id string, args object) (any, err
 	if !supplied {
 		op = "update"
 	}
-	for _, field := range []string{"face_edits", "sprite", "companion"} {
+	for _, field := range []string{"face_edits", "sprite", "companion", "portrait"} {
 		if _, set := c[field]; set && op != "update" {
 			return nil, fieldError("cat."+field, "requires cat update")
 		}
@@ -516,12 +531,24 @@ func (b *bridge) catTool(ctx context.Context, args object) (object, error) {
 		return nil, err
 	}
 	id = who.DeviceID
+	var portrait *pendingPortrait
+	if raw, ok := args["portrait"]; ok {
+		if op != "update" {
+			return nil, fieldError("cat.portrait", "requires cat update")
+		}
+		args = withDevice(args, id)
+		delete(args, "portrait")
+		portrait, err = b.preparePortrait(ctx, who, args, raw)
+		if err != nil {
+			return nil, err
+		}
+	}
 	c, err := func() (catState, error) {
 		if op != "get" {
 			b.catMu.Lock()
 			defer b.catMu.Unlock()
 		}
-		c, profilesChanged, err := b.changeCat(ctx, who, b.voiceTheme(who), op, args)
+		c, profilesChanged, err := b.changeCatPrepared(ctx, who, b.voiceTheme(who), op, args, portrait)
 		if b.ws != nil && err == nil && op != "get" {
 			b.ws.mu.Lock()
 			b.ws.catChanged(id, c, profilesChanged)
@@ -530,6 +557,9 @@ func (b *bridge) catTool(ctx context.Context, args object) (object, error) {
 		return c, err
 	}()
 	if err != nil {
+		if portrait != nil {
+			b.portraits.discard(portrait.id)
+		}
 		return nil, err
 	}
 	if op != "get" && c.Name != who.Character && b.oc != nil {

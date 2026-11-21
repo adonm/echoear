@@ -361,9 +361,10 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 		volumeID, volume := deviceSettingID(path, "volume")
 		photoDevice, uploadPhoto := deviceSettingID(path, "photo")
 		photoID, readPhoto := photoPath(path)
+		readPortrait := strings.HasPrefix(path, "/api/portraits/")
 		timers := r.Method == http.MethodGet && path == "/api/timers" ||
 			r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/timers/")
-		get := r.Method == http.MethodGet && (path == "/ws" || path == "/api/scope" || messages || readPhoto)
+		get := r.Method == http.MethodGet && (path == "/ws" || path == "/api/scope" || messages || readPhoto || readPortrait)
 		post := r.Method == http.MethodPost && (path == "/api/chat" || voice || volume || uploadPhoto)
 		if !get && !post && !timers {
 			sendError(w, problem(404, "Not found"))
@@ -383,6 +384,8 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 			sendResult(w, value, err)
 		case get && readPhoto:
 			sendResult(w, nil, b.getPhoto(w, r, photoID, v.ID))
+		case get && readPortrait:
+			sendResult(w, nil, b.servePortrait(w, r, path, v.ID))
 		case timers:
 			value, err := b.timerAPI(w, r, path, v.ID)
 			sendResult(w, value, err)

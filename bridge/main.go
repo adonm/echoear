@@ -153,8 +153,9 @@ func run() error {
 		agentPath: filepath.Join(project, "agents/echoear.md"),
 		voices:    deviceVoiceStore(db, fallbackVoice),
 		virtual:   virtualStore(db), history: &chatHistory{db},
-		ota:     otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "firmware/build")), "echoear.bin")},
-		box3OTA: otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "firmware/build-box3")), "echoear_box3.bin")}}
+		portraits: &portraitStore{dir: filepath.Join(local, "portraits"), generate: consolePortraitGenerator(os.Getenv("OPENCODE_API_KEY"))},
+		ota:       otaFile{path: filepath.Join(env("ECHOEAR_OTA_DIR", filepath.Join(project, "firmware/build")), "echoear.bin")},
+		box3OTA:   otaFile{path: filepath.Join(env("ECHOEAR_BOX3_OTA_DIR", filepath.Join(project, "firmware/build-box3")), "echoear_box3.bin")}}
 	b.ws = newWSHub(b, true)
 	b.builders = newBuildManager(b)
 	buildsDone := make(chan struct{})

@@ -557,6 +557,9 @@ func sanitizeFaceSVG(raw string) (string, error) {
 	if len(clean) > maxSVG {
 		return "", problem(400, "face_svg exceeds 64 KB after sanitizing")
 	}
+	if activePortrait(clean) != "" {
+		return "", fieldError("cat.face_svg", "portrait assets must be set using cat.portrait")
+	}
 	// Validate all poses together with chrome, including the compositor's depth
 	// and node overhead, so no accepted face can crowd out the system controls.
 	chrome := catChrome(blankCat(), catPose{mood: "listening", battery: 100, charge: true, meter: true})
