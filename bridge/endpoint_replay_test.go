@@ -115,8 +115,8 @@ func TestEndpointReplay(t *testing.T) {
 		}
 	}
 	type score struct {
-		early, missed int
-		delay         []int
+		early, missed    int
+		delay, finalized []int
 	}
 	type accuracy struct{ errors, count, failures int }
 	accuracyByPath := map[string]map[string]*accuracy{}
@@ -150,6 +150,12 @@ func TestEndpointReplay(t *testing.T) {
 			s.early++
 		default:
 			s.delay = append(s.delay, at-end)
+		}
+	}
+	recordFinal := func(label string, at, end int, start time.Time, err error) {
+		if err == nil && at >= end {
+			s := scores[label]
+			s.finalized = append(s.finalized, at-end+int(time.Since(start).Milliseconds()))
 		}
 	}
 	var partialMS []int
@@ -235,8 +241,10 @@ func TestEndpointReplay(t *testing.T) {
 		record("browser-rms", browserAt, trueEnd)
 		record("board-rms", boardAt, trueEnd)
 		record("silero-no-text", plainAt, trueEnd)
+		finalPolicy, finalAt := "silero-no-text", plainAt
 		if stream != nil {
-			record("silero-hex-partials", hintAt, trueEnd)
+			finalPolicy, finalAt = "silero-hex-partials", hintAt
+			record(finalPolicy, finalAt, trueEnd)
 		} else {
 			record("silero-oracle-text (not live)", hintAt, trueEnd)
 		}
@@ -244,6 +252,7 @@ func TestEndpointReplay(t *testing.T) {
 			partialMS = append(partialMS, first)
 		}
 		var text string
+		startFinal := time.Now()
 		if stream != nil {
 			end := len(pcm)
 			if hintAt >= 0 {
@@ -265,20 +274,21 @@ func TestEndpointReplay(t *testing.T) {
 			}
 			text, err = h.transcribe(ctx, pcm[:end])
 		}
+		recordFinal(finalPolicy, finalAt, trueEnd, startFinal, err)
 		finalPath := "silero + whole-clip Hex"
 		if streaming {
 			finalPath = "silero + Hex stream"
 		}
 		recordText(finalPath, f.targets, text, err)
-		if len(f.targets) > 0 {
-			for _, tc := range []struct {
-				path string
-				stop int
-			}{{"board-rms + Hex", boardAt}, {"browser-rms + Hex", browserAt}} {
-				if tc.stop >= 0 {
-					got, sttErr := h.transcribe(ctx, pcm[:min(len(pcm), tc.stop*32)])
-					recordText(tc.path, f.targets, got, sttErr)
-				}
+		for _, tc := range []struct {
+			path string
+			stop int
+		}{{"board-rms", boardAt}, {"browser-rms", browserAt}} {
+			if tc.stop >= 0 {
+				start := time.Now()
+				got, sttErr := h.transcribe(ctx, pcm[:min(len(pcm), tc.stop*32)])
+				recordFinal(tc.path, tc.stop, trueEnd, start, sttErr)
+				recordText(tc.path+" + Hex", f.targets, got, sttErr)
 			}
 		}
 		stop()
@@ -289,7 +299,8 @@ func TestEndpointReplay(t *testing.T) {
 			fixtureID, f.gap, trueEnd, boardAt, browserAt, plainAt, hintAt, first, err == nil)
 	}
 	for method, s := range scores {
-		t.Logf("%s premature=%d/%d missed=%d end_to_commit_ms=%s", method, s.early, len(fixtures), s.missed, replayPercentiles(s.delay))
+		t.Logf("%s premature=%d/%d missed=%d end_to_endpoint_ms=%s end_to_final_ms=%s", method, s.early, len(fixtures), s.missed,
+			replayPercentiles(s.delay), replayPercentiles(s.finalized))
 	}
 	for path, acc := range accuracyByPath {
 		n, q := acc["name"], acc["number"]

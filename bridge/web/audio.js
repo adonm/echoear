@@ -165,7 +165,7 @@ function failCall(inCall, notice) {
   say("chat-note", notice);
   send({ev:"call_end",call:inCall.id});
 }
-async function startMic(target, inCall = null) {
+async function startMic(target, inCall = null, endpoint = "") {
   if (mic || call && !inCall) return;
   if (!canCaptureMic()) {
     $("mic-help").hidden = false;
@@ -179,9 +179,12 @@ async function startMic(target, inCall = null) {
     clearPCM();
     ackIfDone();
   }
-  const rec = {target,call:inCall,stream:null,node:null,source:null,stopping:false};
+  const rec = {target,call:inCall,stream:null,node:null,source:null,stopping:false,bridgeEndpoint:endpoint === "bridge"};
   mic = rec;
-  if (!inCall) recordUI(true);
+  if (!inCall) {
+    recordUI(true);
+    if (rec.bridgeEndpoint) say("chat-note", "Opening microphone…");
+  }
   try {
     const ready = unlockAudio();
     // Autoplay policy can leave resume pending. Still ask for mic permission
@@ -195,10 +198,13 @@ async function startMic(target, inCall = null) {
     workletLoaded ||= audio.audioWorklet.addModule("/app/mic.js").catch(err => { workletLoaded = null; throw err; });
     await workletLoaded;
     if (mic !== rec) return;
+    for (const track of rec.stream.getTracks()) track.addEventListener?.("ended", () => {
+      if (mic === rec) endMic(true);
+    });
     rec.source = audio.createMediaStreamSource(rec.stream);
     rec.node = new AudioWorkletNode(audio,"echo-mic",{
       channelCount:1, channelCountMode:"explicit", processorOptions:inCall ?
-        {mode:"call", prefix:inCall.prefix, muted:inCall.muted} : {mode:"note"},
+        {mode:"call", prefix:inCall.prefix, muted:inCall.muted} : {mode:rec.bridgeEndpoint ? "bridge" : "note"},
     });
     rec.node.port.onmessage = event => {
       if (mic !== rec) return;
@@ -230,10 +236,10 @@ async function startMic(target, inCall = null) {
     }
   }
 }
-function endMic(cancelled, tell = true, flushed = false) {
+function endMic(cancelled, tell = true, flushed = false, fromBridge = false) {
   if (!mic) return;
   const rec = mic;
-  if (!rec.call && rec.node && !cancelled && !flushed) {
+  if (!rec.call && rec.node && !cancelled && !flushed && !(fromBridge && rec.bridgeEndpoint)) {
     if (!rec.stopping) {
       rec.stopping = true;
       $("mic-send").disabled = true;
@@ -294,7 +300,13 @@ function handleCall(msg) {
   }
 }
 
-$("talk").onclick = () => startMic($("target").value);
+function requestMic(target) {
+  if (!target && state.view?.bridgeEndpoint) {
+    unlockAudio(); // Preserve the user gesture before the bridge's start reply.
+    send({ev:"rec_request"});
+  } else startMic(target);
+}
+$("talk").onclick = () => requestMic($("target").value);
 $("mic-send").onclick = () => endMic(false);
 $("cancel").onclick = () => endMic(true);
 

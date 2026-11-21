@@ -86,6 +86,31 @@ test("manual flush sends the partial PCM packet before ending", () => {
   assert.equal(messages[1].byteLength, 85);
 });
 
+test("bridge mode preserves story pauses and only uses an eight-second watchdog", () => {
+  const {frames, ended} = worklet(16000, "bridge");
+  frames(10, 0);
+  frames(10, .15);
+  frames(200, 0);
+  frames(10, .15);
+  frames(399, 0);
+  frames(1, 0, false);
+  ended("auto_end", 630);
+});
+
+test("negotiated Talk waits for bridge start and bridge stop closes hardware immediately", async () => {
+  const {audio, state, dom, nodes, tracks, events, constraints} = await audioFixture("bridge-endpoint");
+  state.view.bridgeEndpoint = true;
+  dom.get("talk").onclick();
+  assert.deepEqual(events, [{ev:"rec_request"}]);
+  assert.deepEqual(constraints, []);
+  await audio.startMic("", null, "bridge");
+  assert.equal(nodes[0].options.processorOptions.mode, "bridge");
+  audio.endMic(false, true, false, true);
+  assert.equal(tracks[0].stopped, true);
+  assert.equal(nodes[0].port.closed, true);
+  assert.deepEqual(events, [{ev:"rec_request"}, {ev:"rec_start",target:""}, {ev:"rec_end",cancelled:false,target:""}]);
+});
+
 test("call mic sends continuous 40 ms PCM without VAD or a duration limit", () => {
   const {mic, frames, messages} = worklet(44100, "call");
   frames(10, .125);

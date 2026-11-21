@@ -5,6 +5,7 @@ class EchoMic extends AudioWorkletProcessor {
   constructor({processorOptions} = {}) {
     super();
     this.call = processorOptions?.mode === "call";
+    this.bridgeEndpoint = processorOptions?.mode === "bridge";
     this.prefix = this.call && processorOptions.prefix === 4 ? 4 : 1;
     this.muted = this.call && !!processorOptions.muted;
     this.packetBytes = 1 + 2 * (this.call ? callSamples : vadSamples);
@@ -60,8 +61,8 @@ class EchoMic extends AudioWorkletProcessor {
     } else {
       this.hear(rms);
     }
-    // End after 1.5 s of silence, or 3 s once 4 s of speech has accumulated.
-    const silence = this.voiced < 200 ? 75 : 150;
+    // Bridge mode retains only the local privacy watchdog.
+    const silence = this.bridgeEndpoint ? 400 : this.voiced < 200 ? 75 : 150;
     if (this.quiet >= silence || this.frames >= 3000 || (!this.voiced && this.frames >= 400)) {
       this.finish("auto_end");
     }
