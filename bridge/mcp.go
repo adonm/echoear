@@ -169,7 +169,7 @@ var mcpTools = func() []object {
 		if required == nil {
 			required = []string{}
 		}
-		return object{"type": "object", "properties": props, "required": required, "additionalProperties": false}
+		return closedObject(props, required...)
 	}
 	tool := func(name, description string, in object) object {
 		return object{"name": name, "description": description, "inputSchema": in}
@@ -200,8 +200,9 @@ var mcpTools = func() []object {
 				"memory": object{"anyOf": []object{memory, array(memory)}},
 				"apps":   schema(object{"delete": array(text), "rename": array(rename)}),
 				"timer":  schema(object{"op": enum("set", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),
-		tool("app", "Display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
+		tool("app", "Launch a data-only template, display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
+				"template": enum(templateNames()...), "data": appTemplateSchema(""),
 				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
 		tool("emit", "Call, send a spoken intercom and card, or play notes or effects. Use exact device IDs; calls cannot target all.",
 			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"),

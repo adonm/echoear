@@ -220,6 +220,11 @@ func openBridgeDB(ctx context.Context, path, legacy, remote, token, fallbackVoic
 	if err := d.addTimerAppColumn(ctx); err != nil {
 		return nil, fmt.Errorf("migrate EchoEar timer apps: %w", err)
 	}
+	if err := d.migrateColumns(ctx, "migrated_app_templates",
+		`ALTER TABLE apps ADD COLUMN template TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE apps ADD COLUMN data_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return nil, fmt.Errorf("migrate EchoEar app templates: %w", err)
+	}
 	if err := d.migrateFaceSVG(ctx); err != nil {
 		return nil, fmt.Errorf("migrate EchoEar face SVG: %w", err)
 	}
