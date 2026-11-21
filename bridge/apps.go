@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dop251/goja"
@@ -443,6 +444,7 @@ type appInstance struct {
 	effects                             []appEffect
 	allowEffects                        bool
 	geometry                            []screenGeometry
+	gradeSources                        []*atomic.Uint32 // Immutable; the hub can remove entries from devices.
 	buildScreen                         func(string, bool, screenGeometry) (svgScreen, error)
 	lastScreens                         []svgScreen
 	ctx                                 context.Context
@@ -519,13 +521,15 @@ func (a *appInstance) player(i int) goja.Value {
 
 func initApp(spec savedApp, players []appPlayer, memory map[string]json.RawMessage, devices []*wsDevice, initial json.RawMessage, renderer func(string, bool, screenGeometry) (svgScreen, error)) (*appInstance, []svgScreen, error) {
 	a := &appInstance{spec: spec, players: players, memory: memory, devices: devices, scope: "app:" + spec.Name,
-		geometry: make([]screenGeometry, len(players)), buildScreen: renderer, lastScreens: make([]svgScreen, len(players))}
+		geometry: make([]screenGeometry, len(players)), gradeSources: make([]*atomic.Uint32, len(players)),
+		buildScreen: renderer, lastScreens: make([]svgScreen, len(players))}
 	for i := range players {
 		// Geometry and the client role do not change after hello.
 		if devices == nil {
 			a.geometry[i] = roundScreen
 		} else if devices[i].client.role != "web" {
 			a.geometry[i] = devices[i].screen
+			a.gradeSources[i] = &devices[i].grade
 		}
 	}
 	if spec.scripted() {
@@ -823,8 +827,8 @@ func (a *appInstance) screens(connected []bool) ([]svgScreen, error) {
 			raw = s.String()
 		}
 		grade := gradeDay
-		if len(a.devices) != 0 && !strings.Contains(raw, "photo:") {
-			grade = gradeKey(a.devices[i].grade.Load())
+		if src := a.gradeSources[i]; src != nil && !strings.Contains(raw, "photo:") {
+			grade = gradeKey(src.Load())
 		}
 		if last := a.lastScreens[i]; last.source != "" && last.raw == raw && last.grade == grade {
 			out[i] = last
