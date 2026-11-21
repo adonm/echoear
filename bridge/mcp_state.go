@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"time"
 )
 
-var stateSlices = []string{"devices", "cats", "apps", "timers", "memory", "saved_cats", "messages", "diagnostics"}
+var stateSlices = []string{"devices", "cats", "apps", "timers", "memory", "saved_cats", "messages", "diagnostics", "photos"}
 
 func stringList(raw any, key string) ([]string, error) {
 	items, ok := raw.([]any)
@@ -103,10 +104,21 @@ func (b *bridge) mcpState(ctx context.Context, args object) (object, error) {
 			if n != nil {
 				limit = int(*n)
 			}
-			out[key] = []chatEntry{}
-			if b.history != nil {
-				out[key], err = b.history.read(ctx, id, limit)
+			var before *historyCursor
+			if raw, exists := args["messages_cursor"]; exists {
+				cursor, _ := raw.(object)
+				ts, ok := cursor["before_ts"].(json.Number)
+				msg, valid := cursor["before_id"].(string)
+				n, parseErr := ts.Int64()
+				if !ok || parseErr != nil || !valid || msg == "" || len(msg) > 512 {
+					return nil, fieldError("messages_cursor", "expected before_ts (Unix milliseconds) and before_id")
+				}
+				before = &historyCursor{TS: n, ID: msg}
 			}
+			page, readErr := b.readHistoryPage(ctx, id, limit, before)
+			out[key], out["messages_has_more"], out["messages_next_cursor"], err = page.Messages, page.HasMore, page.Next, readErr
+		case "photos":
+			out[key], err = b.photoState(ctx, id)
 		case "diagnostics":
 			out[key] = b.diagnosticReport()
 		}

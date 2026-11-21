@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"image"
@@ -32,6 +33,33 @@ func photoPath(path string) (string, bool) {
 
 func photoType(media string) bool {
 	return media == "image/png" || media == "image/jpeg" || media == "image/webp"
+}
+
+func (b *bridge) photoState(ctx context.Context, id string) ([]object, error) {
+	out := []object{}
+	if b.db == nil {
+		return out, nil
+	}
+	id = strings.ToLower(id)
+	rows, err := b.db.QueryContext(ctx, `SELECT id,device_id,mime,caption,created_at FROM photos
+		WHERE (?='' OR device_id=?) ORDER BY created_at DESC,id DESC LIMIT ?`, id, id, maxPhotos)
+	readErr := problem(502, "Cannot list photos")
+	if err != nil {
+		return nil, readErr
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var photo, device, media, caption string
+		var stamp int64
+		if err := rows.Scan(&photo, &device, &media, &caption, &stamp); err != nil {
+			return nil, readErr
+		}
+		out = append(out, object{"id": photo, "device_id": device, "mime": media, "caption": caption, "created_at": time.UnixMilli(stamp).UTC()})
+	}
+	if rows.Err() != nil {
+		return nil, readErr
+	}
+	return out, nil
 }
 
 func readPhoto(w http.ResponseWriter, r *http.Request) ([]byte, string, error) {
