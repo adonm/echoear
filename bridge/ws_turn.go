@@ -307,7 +307,7 @@ func (h *wsHub) runVoice(ctx context.Context, d *wsDevice, id uint64, target str
 		recipients := h.b.intercomTargets(others, target)
 		voice := h.b.voiceFor(sender)
 		receipts := h.deliverOnline(ctx, sender, recipients, voice, "", pcm)
-		// Connected peers can play the original clip before Hex generates a caption.
+		// Connected peers can play the original clip before transcription.
 		if len(receipts) != 0 {
 			go func() {
 				captionCtx, cancel := context.WithTimeout(context.WithValue(h.b.root, traceKey{}, traceFrom(ctx)), 30*time.Second)

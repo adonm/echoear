@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -390,7 +391,7 @@ func TestCredentialReloadOnUnauthorized(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts.Add(1)
-		if r.Header.Get("Authorization") == "Bearer new" {
+		if r.Header.Get("Authorization") == "Basic "+base64.StdEncoding.EncodeToString([]byte("opencode:new")) {
 			_, _ = io.WriteString(w, "{}")
 			return
 		}
@@ -401,12 +402,11 @@ func TestCredentialReloadOnUnauthorized(t *testing.T) {
 		w.WriteHeader(401)
 	}))
 	defer srv.Close()
-	port, _ := strconv.Atoi(strings.TrimPrefix(srv.URL, "http://127.0.0.1:"))
-	replacement, _ = json.Marshal(object{"port": port, "token": "new"})
-	if err := writeMap(path, object{"port": port, "token": "old"}); err != nil {
+	replacement, _ = json.Marshal(object{"url": srv.URL, "password": "new"})
+	if err := writeMap(path, object{"url": srv.URL, "password": "old"}); err != nil {
 		t.Fatal(err)
 	}
-	u := upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: path, read: hexEndpoint}}
+	u := upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}}
 	if !u.reachable(t.Context(), "/health") || attempts.Load() != 2 {
 		t.Fatalf("unauthorized did not reload credentials: %d requests", attempts.Load())
 	}

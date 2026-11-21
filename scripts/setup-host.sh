@@ -11,15 +11,15 @@ oc_root=$data/opencode
 env_file=$config/echoear/bridge.env
 pin_gpu=false
 ente_photos=false
-stt=hex
 usage() {
-    printf '%s\n' 'Usage: setup-host.sh [--stt hex|parakeet] [--gpu-index 0] [--ente-photos]' \
-        'Use --gpu-index 0 only if your intended Vulkan GPU is at index 0.'
+    printf '%s\n' 'Usage: setup-host.sh [--gpu-index INDEX] [--ente-photos]' \
+        'Run vulkaninfo --summary to find the intended Vulkan GPU index.'
 }
 while (($#)); do
     case "$1:${2-}" in
-        --stt:hex|--stt:parakeet) stt=$2; shift 2 ;;
-        --gpu-index:0) pin_gpu=true; shift 2 ;;
+        --gpu-index:*)
+            [[ ${2-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }
+            pin_gpu=$2; shift 2 ;;
         --ente-photos:*) ente_photos=true; shift ;;
         -h:*|--help:*) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
@@ -29,13 +29,7 @@ done
 # shellcheck source=scripts/go-bin.sh
 source "$REPO_DIR/scripts/go-bin.sh"
 GO_BIN=$(resolve_go)
-cmds=(curl gcc opencode python3 sha256sum systemctl tar)
-if [[ $stt == hex ]]; then
-    cmds+=(hex)
-else
-    cmds+=(cmake c++ glslc ninja)
-fi
-for cmd in "${cmds[@]}"; do
+for cmd in curl gcc c++ cmake glslc ninja opencode python3 sha256sum systemctl tar; do
     command -v "$cmd" >/dev/null || { echo "Install $cmd before running setup." >&2; exit 1; }
 done
 systemctl --user show-environment >/dev/null
@@ -74,24 +68,17 @@ install_kokoro
 
 bridge_bin="$data/echoear-bridge"
 build_tmp=$(mktemp "$bridge_bin.XXXXXXXX")
-stt_stage=
-trap 'rm -f -- "$build_tmp"; [[ -z $stt_stage ]] || rm -rf -- "$stt_stage"' EXIT
-if [[ $stt == parakeet ]]; then
-    stt_stage=$(mktemp -d)
-    "$REPO_DIR/scripts/build-parakeet.sh" "$stt_stage" "$data/stt-models"
-fi
+stt_stage=$(mktemp -d)
+trap 'rm -f -- "$build_tmp"; rm -rf -- "$stt_stage"' EXIT
+"$REPO_DIR/scripts/build-parakeet.sh" "$stt_stage" "$data/stt-models"
 (
     cd -- "$REPO_DIR/bridge"
     export CGO_ENABLED=1
-    # Put the installed lib directory ahead of the dependency's cgo cache RPATH.
-    export CGO_LDFLAGS="-Wl,-rpath,\$ORIGIN/lib${CGO_LDFLAGS:+ $CGO_LDFLAGS}"
-    tags=()
-    if [[ $stt == parakeet ]]; then
-        export CGO_CFLAGS="\"-I$stt_stage/native/include\"${CGO_CFLAGS:+ $CGO_CFLAGS}"
-        export CGO_LDFLAGS="\"-L$stt_stage/native/lib\" $CGO_LDFLAGS"
-        tags=(-tags parakeet)
-    fi
-    "$GO_BIN" build "${tags[@]}" -trimpath -ldflags="-s -w -extldflags \"-Wl,-rpath,\$ORIGIN/lib\"" -o "$build_tmp" .
+    export CGO_CFLAGS="\"-I$stt_stage/native/include\"${CGO_CFLAGS:+ $CGO_CFLAGS}"
+    export CGO_LDFLAGS="\"-L$stt_stage/native/lib\" -Wl,-rpath,\$ORIGIN/lib${CGO_LDFLAGS:+ $CGO_LDFLAGS}"
+    "$GO_BIN" mod download github.com/k2-fsa/sherpa-onnx-go-linux
+    "$GO_BIN" mod verify
+    "$GO_BIN" build -tags parakeet -trimpath -ldflags="-s -w -extldflags \"-Wl,-rpath,\$ORIGIN/lib\"" -o "$build_tmp" .
     case $("$GO_BIN" env GOARCH) in
         amd64) native=x86_64-unknown-linux-gnu ;;
         arm64) native=aarch64-unknown-linux-gnu ;;
@@ -100,23 +87,29 @@ fi
     esac
     module=$("$GO_BIN" list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux)
     libs=$module/lib/$native
-    install -d -m 700 -- "$data/lib"
-    install -m 755 -- "$libs/libsherpa-onnx-c-api.so" "$libs/libonnxruntime.so" "$data/lib/"
+    files=(libsherpa-onnx-c-api.so libonnxruntime.so)
     if [[ -f "$libs/libsherpa-onnx-cxx-api.so" ]]; then
-        install -m 755 -- "$libs/libsherpa-onnx-cxx-api.so" "$data/lib/"
+        files+=(libsherpa-onnx-cxx-api.so)
     fi
-    if [[ $stt == parakeet ]]; then
-        notices="$data/lib/licenses/parakeet"
-        install -D -m 644 -- "$stt_stage/source/LICENSE" "$notices/transcribe.cpp.txt"
-        install -D -m 644 -- "$stt_stage/source/ggml/LICENSE" "$notices/ggml.txt"
-        install -D -m 644 -- "$stt_stage/native/share/licenses/transcribe/LICENSE.silero_vad" "$notices/silero-vad.txt"
-    fi
+    install -d -m 700 -- "$data/lib"
+    (
+        cd -- "$libs"
+        sha256sum -- "${files[@]}" > "$stt_stage/SHA256SUMS.sherpa"
+        for lib in "${files[@]}"; do
+            install -m 755 -- "$lib" "$data/lib/.$lib.new"
+            mv -fT -- "$data/lib/.$lib.new" "$data/lib/$lib"
+        done
+    )
+    (cd -- "$data/lib"; sha256sum --check --status "$stt_stage/SHA256SUMS.sherpa")
+    install -m 644 -- "$stt_stage/SHA256SUMS.sherpa" "$data/lib/SHA256SUMS.sherpa"
+    notices="$data/lib/licenses/parakeet"
+    install -D -m 644 -- "$stt_stage/source/LICENSE" "$notices/transcribe.cpp.txt"
+    install -D -m 644 -- "$stt_stage/source/ggml/LICENSE" "$notices/ggml.txt"
+    install -D -m 644 -- "$stt_stage/native/share/licenses/transcribe/LICENSE.silero_vad" "$notices/silero-vad.txt"
 )
 chmod 700 -- "$build_tmp"
 mv -f -- "$build_tmp" "$bridge_bin"
-if [[ -n $stt_stage ]]; then
-    rm -rf -- "$stt_stage"
-fi
+rm -rf -- "$stt_stage"
 trap - EXIT
 
 mkdir -p -- "$oc_root"/{config/opencode/agents,config/opencode/plugins,data/opencode,state,cache,workspace} \
@@ -139,7 +132,7 @@ if [[ -f "$data_home/opencode/auth.json" ]]; then
     link_file "$data_home/opencode/auth.json" "$oc_root/data/opencode/auth.json"
 fi
 
-python3 - "$env_file" "$stt" "$pin_gpu" <<'PY'
+python3 - "$env_file" "$pin_gpu" <<'PY'
 import os
 import re
 import secrets
@@ -159,12 +152,11 @@ settings = {
     "ECHOEAR_OPENCODE_PASSWORD": password,
     "OPENCODE_SERVER_PASSWORD": password,
     "ECHOEAR_OPENCODE_PAIR_PORT": "49376",
-    "ECHOEAR_STT": sys.argv[2],
 }
-if sys.argv[2:] == ["parakeet", "true"]:
-    settings["GGML_VK_VISIBLE_DEVICES"] = "0"
+if sys.argv[2] != "false":
+    settings["GGML_VK_VISIBLE_DEVICES"] = sys.argv[2]
 kept = [line for line in old.splitlines(keepends=True)
-        if line.strip().partition("=")[0].rstrip() not in settings]
+        if line.strip().partition("=")[0].rstrip() not in settings.keys() | {"ECHOEAR_STT"}]
 text = "".join(kept)
 if text and not text.endswith("\n"):
     text += "\n"
@@ -178,12 +170,8 @@ with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
         Path(f.name).unlink(missing_ok=True)
 PY
 
-hex_path=
-if [[ $stt == hex && -z $(systemctl --user show hex.service --property=FragmentPath --value) ]]; then
-    hex_path=$(type -P hex)
-fi
-python3 - "$REPO_DIR" "$data_home" "$bridge_bin" "$units" "$hex_path" \
-    "$(type -P opencode)" "$env_file" "$oc_root" "$stt" <<'PY'
+python3 - "$REPO_DIR" "$data_home" "$bridge_bin" "$units" \
+    "$(type -P opencode)" "$env_file" "$oc_root" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -193,11 +181,10 @@ def escape(value):
         "\\": "\\\\", '"': '\\"', "%": "%%", "\n": "\\n", "\r": "\\r", "\t": "\\t",
     }))
 
-repo, data, binary, directory, hex_path, opencode, env_file, oc_root, stt = sys.argv[1:]
+repo, data, binary, directory, opencode, env_file, oc_root = sys.argv[1:]
 units = Path(directory)
 paths = {"REPO_DIR": repo, "DATA_HOME": data, "BRIDGE_BIN": binary,
-         "OPENCODE_BIN": opencode, "ENV_FILE": env_file,
-         "STT_DEPENDENCY": "hex.service " if stt == "hex" else ""}
+         "OPENCODE_BIN": opencode, "ENV_FILE": env_file}
 for name in ("echoear-bridge.service", "echoear-opencode.service",
              "echoear-opencode-lan.socket", "echoear-opencode-lan.service"):
     template = Path(repo, "bridge", name).read_text()
@@ -214,45 +201,10 @@ for name in ("echoear-bridge.service", "echoear-opencode.service",
     path.write_text(rendered)
     path.chmod(0o644)
 
-if hex_path:
-    (units / "hex.service").write_text(f"""[Unit]
-Description=Anomaly Hex
-
-[Service]
-Type=notify
-ExecStart="{escape(hex_path)}" service
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-""")
 PY
-if [[ $stt == hex ]] && "$pin_gpu"; then
-    mkdir -p -- "$units/hex.service.d"
-    source="$REPO_DIR/config/systemd/10-vulkan-rx6600.conf"
-    destination="$units/hex.service.d/10-vulkan-rx6600.conf"
-    if ! cmp -s -- "$source" "$destination"; then
-        install -m 644 -- "$source" "$destination"
-    fi
-fi
 
 systemctl --user daemon-reload
 systemctl --user enable echoear-opencode.service echoear-opencode-lan.socket echoear-bridge.service
-if [[ $stt == hex ]]; then
-    systemctl --user enable hex.service
-    systemctl --user restart hex.service
-    if [[ "$(hex settings get transcription_device)" != gpu ]]; then
-        hex settings set transcription_device gpu
-        systemctl --user restart hex.service
-    fi
-    model=parakeet_unified_en
-    if ! hex model status "$model" | grep -q '^installed[[:space:]]verified[[:space:]]'; then
-        hex model install "$model"
-    fi
-    if [[ "$(hex settings get transcription.model)" != "$model" ]]; then
-        hex model use "$model"
-    fi
-fi
 systemctl --user restart echoear-opencode.service echoear-bridge.service
 systemctl --user start echoear-opencode-lan.socket
 

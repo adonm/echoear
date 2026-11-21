@@ -26,9 +26,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc shellcheck
-      - name: Run offline checks
+      - name: Run offline checks (no Vulkan toolchain or GPU)
         # sherpa-onnx-go-linux supplies the CGO libraries and their RUNPATH.
-        # Kokoro's separate weights are intentionally absent.
+        # Kokoro and Parakeet weights are absent; GPU tests run via --live on a Vulkan host.
         env:
           TTS_MODEL_DIR: ${{ runner.temp }}/no-kokoro-model-pack
+          GOFLAGS: ''
         run: ./scripts/check.sh

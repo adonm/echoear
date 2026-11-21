@@ -29,6 +29,7 @@ cmake -S "$build/source" -B "$build/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DGGML_VULKAN_SHADER_TYPES=f32,f16,q8_0,q5_0 -DGGML_VULKAN_MUL_MAT_ID=OFF
 cmake --build "$build/build" --parallel 4
 cmake --install "$build/build" --prefix "$build/native"
+(cd -- "$build/native"; sha256sum lib/*.a > SHA256SUMS)
 
 mkdir -p -- "$models"
 if [[ -f $models/$model ]] && verify "$model_sha" "$models/$model"; then

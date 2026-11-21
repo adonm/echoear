@@ -24,8 +24,7 @@ type bridge struct {
 	token     string
 	agentPath string
 	peers     peers
-	hex       hexClient
-	parakeet  *parakeetSTT
+	stt       func(context.Context, []byte) (string, error)
 	endpoint  *endpointSettings
 	oc        *openCode
 	pairPort  int
@@ -46,7 +45,8 @@ type bridge struct {
 	catMu     sync.Mutex // Serializes cat and voice writes through hub publication.
 	catTitles sync.Mutex
 
-	parentToken string
+	parentToken        string
+	deferMCPCompaction bool
 }
 
 func sendBytes(w http.ResponseWriter, status int, kind string, data []byte) {
@@ -526,16 +526,13 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		case path == "/ws" && b.ws != nil:
 			return nil, b.ws.serve(w, r)
 		case path == "/health":
-			h := make(chan bool, 1)
-			go func() { h <- b.hex.config != nil && b.hex.reachable(ctx, "/health") }()
-			o := b.oc.reachable(ctx, "/api/info")
+			o := b.oc != nil && b.oc.reachable(ctx, "/api/info")
 			ready := b.worker != nil && b.worker.ready.Load()
 			engine := "unavailable"
 			if ready {
 				engine = kokoroEngine
 			}
-			hex := <-h
-			return object{"ok": true, "hex": hex, "stt": b.parakeet != nil || hex, "stt_engine": b.sttEngine(),
+			return object{"ok": true, "stt": b.stt != nil, "stt_engine": sttEngine,
 				"opencode": o, "tts": ready, "tts_engine": engine}, nil
 		case path == "/api/devices":
 			devices, err := b.deviceList()
@@ -558,6 +555,9 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			return b.box3OTA.serve(w, path == "/ota/box3/version.json")
 		}
 	case http.MethodPost:
+		if path == "/api/diagnostics/stt" {
+			return b.probeSTT(r)
+		}
 		if path == "/api/opencode/pair" {
 			return b.pairOpenCode(r)
 		}

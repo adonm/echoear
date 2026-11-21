@@ -2,6 +2,9 @@
 
 ## Synthetic shadow replay
 
+This table is the historical Hex baseline. EchoEar now decodes whole clips
+in-process with Parakeet Vulkan; see [the STT bake-off](stt-speed.md).
+
 Nine Kokoro-generated clips, one synthetic voice, no real recordings. The fixture
 generator inserts 0.7–4.0 s gaps and estimates the true end from each generated
 clause's last audible block. Names and numbers are scored as exact normalized
@@ -32,13 +35,15 @@ GO_BIN=$(resolve_go)
 cd bridge
 ECHOEAR_REPLAY_SILERO=/path/to/silero_vad_v5.onnx \
 ECHOEAR_REPLAY_KOKORO=/path/to/kokoro-multi-lang-v1_0 \
-  "$GO_BIN" test -v -run '^TestEndpointReplay$'
+ECHOEAR_BAKEOFF_MODEL="$stage/models/parakeet-unified-en-0.6b-Q8_0.gguf" \
+CGO_CFLAGS="-I$stage/native/include" CGO_LDFLAGS="-L$stage/native/lib" \
+  "$GO_BIN" test -tags parakeet -v -run '^TestEndpointReplay$'
 ```
 
-The default replay only talks to local Hex. Set `ECHOEAR_REPLAY_CLIP_ONLY=1` to skip the
-stream probe. It prints aggregate scores, not transcripts, and saves no clips.
-For an opt-in whole-clip replay with 500/700 ms pause probes instead of
-streaming, see [the STT bake-off](stt-speed.md).
+Use the `stage` prefix from [the STT build](stt-speed.md#build-and-reproduction).
+Replay prints aggregate scores, not transcripts, and saves no clips.
+Set `ECHOEAR_REPLAY_SPECULATIVE=1` to also run the experimental 500/700 ms
+pause probes. Those probes are not enabled in production.
 
 ## Enablement and wire contract
 
@@ -63,10 +68,9 @@ streaming, see [the STT bake-off](stt-speed.md).
   disconnect. No capture is silently reopened. Send asks to commit the current
   clip, and Cancel discards it without a prompt.
 - The per-device capture worker owns VAD, accumulation, and final transcription
-  off the hub lock. Hex streaming is best effort: one owned stream, bounded
-  uploads and requests, and heartbeats during a pause. Unsupported, busy,
-  timed-out, or broken streams fall back to the configured local Hex clip API.
-  PCM and partials remain in memory. Diagnostics expose
+  off the hub lock. It commits after the conservative silence threshold
+  or manual Send, and decodes once on the local GPU. There are no live text
+  hints or stream leases. PCM remains in memory. Diagnostics expose
   `speech_end_to_commit_ms` (estimated acoustic end → final transcription).
 - A user can select **Say more** while thinking. Recording holds unpublished
   audio until the mic closes. It does not cancel the in-flight prompt. The

@@ -11,7 +11,6 @@ import (
 const (
 	jsonType   = "application/json"
 	pcmType    = "audio/pcm"
-	wavType    = "audio/wav"
 	maxJSON    = 16 << 10
 	maxMessage = 400
 	maxPeerPCM = 1536 << 10

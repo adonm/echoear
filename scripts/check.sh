@@ -28,6 +28,7 @@ node --test config/opencode/*.test.mjs
 (
     cd bridge
     "$GO_BIN" mod verify
+    # No Vulkan toolchain, weights or GPU are needed for the offline suite.
     "$GO_BIN" vet ./...
     "$GO_BIN" test -race ./...
 )
@@ -73,10 +74,24 @@ printf 'PASS tracked-file hygiene\n'
 
 if [[ ${1-} == --live ]]; then
     # Live tests fetch OTA manifests and images; they never flash or upload to a device.
+    native=${ECHOEAR_PARAKEET_NATIVE:-}
+    if [[ -z $native ]]; then
+        data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+        model=parakeet-unified-en-0.6b-Q8_0.gguf
+        mkdir "$host_tests/models"
+        ln -s -- "$data_home/echoear/stt-models/$model" "$host_tests/models/$model"
+        ./scripts/build-parakeet.sh "$host_tests" "$host_tests/models"
+        native=$host_tests/native
+    else
+        native=$(realpath -- "$native")
+    fi
+    (cd -- "$native"; sha256sum --check --status SHA256SUMS)
     (
         cd bridge
         test_bin="$host_tests/echoear-bridge"
-        "$GO_BIN" build -o "$test_bin" .
+        CGO_CFLAGS="\"-I$native/include\"${CGO_CFLAGS:+ $CGO_CFLAGS}" \
+        CGO_LDFLAGS="\"-L$native/lib\"${CGO_LDFLAGS:+ $CGO_LDFLAGS}" \
+            "$GO_BIN" build -tags parakeet -o "$test_bin" .
         ECHOEAR_TEST_BIN="$test_bin" "$GO_BIN" test -tags=live -v -count=1 -run '^TestLive' .
     )
     printf 'Real-model Code Mode smoke not run; opt in with --real-model.\n'

@@ -121,8 +121,7 @@ function renderDiagnostics(data) {
   ];
   diagBar(system[2], "Host RAM used", usage);
   $("diag-system").replaceChildren(...system);
-  const stt = services.stt_engine === "parakeet" ? {stt:"Parakeet"} : {hex:"Hex"};
-  $("diag-services").replaceChildren(...Object.entries({...stt, opencode:"OpenCode", tts:"Kokoro", opentunnel:"OpenTunnel"}).map(([key, label]) =>
+  $("diag-services").replaceChildren(...Object.entries({stt:"Parakeet Vulkan", opencode:"OpenCode", tts:"Kokoro", opentunnel:"OpenTunnel"}).map(([key, label]) =>
     node("li", services[key] ? "is-up" : "", `${label} · ${services[key] ? (key === "opentunnel" ? "installed" : "ready") : "unavailable"}`)));
   $("diag-latency").replaceChildren(...Object.entries({speech_end_to_commit_ms:"Speech End → Transcript",
     stt_ms:"Speech to Text", gate_ms:"OpenCode Gate",

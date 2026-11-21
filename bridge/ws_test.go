@@ -383,59 +383,6 @@ func TestWSWebOnlyDisplayAndIdenticalAppRender(t *testing.T) {
 	}
 }
 
-func setupTestHex(t *testing.T, dir string, handle http.HandlerFunc) hexClient {
-	t.Helper()
-	srv := httptest.NewServer(handle)
-	t.Cleanup(srv.Close)
-	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	p, _ := strconv.Atoi(port)
-	path, settings := filepath.Join(dir, "hex-api.json"), filepath.Join(dir, "hex-settings.json")
-	if err := writeMap(path, object{"port": p, "token": "unit"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeMap(settings, object{"transcription": object{"model": "parakeet_unified_en"}}); err != nil {
-		t.Fatal(err)
-	}
-	return hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: path, read: hexEndpoint}},
-		&fileCache[string]{path: settings, read: hexQuery}}
-}
-
-func TestHexTranscriptionSilencePadding(t *testing.T) {
-	pcm := []byte{0, 0, 1, 0, 0, 128, 0, 0}
-	for _, tc := range []struct {
-		name     string
-		input    []byte
-		pcm, pad int
-	}{
-		{"voiced", pcm, len(pcm), 4800},
-		{"silent", make([]byte, 320), 320, 0},
-		{"empty", nil, 0, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := setupTestHex(t, t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
-				got, err := io.ReadAll(r.Body)
-				wantSize := 44 + tc.pcm + 2*tc.pad
-				if err != nil || len(got) != wantSize || r.ContentLength != int64(wantSize) {
-					t.Errorf("Hex WAV length: got %d (HTTP %d), want %d (%v)", len(got), r.ContentLength, wantSize, err)
-				} else {
-					pad := make([]byte, tc.pad)
-					want := WrapWAV(slices.Concat(pad, tc.input, pad))
-					if !bytes.Equal(got, want) {
-						t.Error("Hex WAV header, silence edges, or original PCM changed")
-					}
-				}
-				if r.URL.Query().Get("model") != "parakeet_unified_en" || r.Header.Get("Content-Type") != wavType {
-					t.Error("unexpected Hex transcription request")
-				}
-				_, _ = io.WriteString(w, `{"transcript":"Test"}`)
-			})
-			if text, err := h.transcribe(t.Context(), tc.input); err != nil || text != "Test" {
-				t.Fatalf("transcribe: %q, %v", text, err)
-			}
-		})
-	}
-}
-
 func TestWSRecordingLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -450,24 +397,19 @@ func TestWSRecordingLimits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			const id = "phone-a123"
 			pcm := tc.pcm[:min(len(tc.pcm), maxPCM)]
-			if bytes.Count(pcm, []byte{0}) != len(pcm) {
-				pad := make([]byte, len(hexSilence))
-				pcm = slices.Concat(pad, pcm, pad)
-			}
-			hexCalled := make(chan struct{}, 1)
+			sttCalled := make(chan struct{}, 1)
 			b, base := wsHarness(t, func(b *bridge, dir string) {
-				b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-					got, err := io.ReadAll(r.Body)
-					if err != nil || !bytes.Equal(got, WrapWAV(pcm)) {
-						t.Errorf("Hex received %d WAV bytes, want %d with the captured PCM intact: %v", len(got), len(pcm)+44, err)
+				b.stt = func(_ context.Context, got []byte) (string, error) {
+					if !bytes.Equal(got, pcm) {
+						t.Errorf("STT received %d bytes, want %d with the captured PCM intact", len(got), len(pcm))
 					}
 					select {
-					case hexCalled <- struct{}{}:
+					case sttCalled <- struct{}{}:
 					default:
-						t.Error("Hex transcribed the recording more than once")
+						t.Error("STT ran more than once for one recording")
 					}
-					_, _ = io.WriteString(w, `{"transcript":" "}`)
-				})
+					return "", nil
+				}
 			})
 			dev := testConnectWS(t, base, "unit", false)
 			dev.hello(t, id, "Cake")
@@ -491,7 +433,7 @@ func TestWSRecordingLimits(t *testing.T) {
 				return hasWS("mode", `"mode":"idle"`)(f)
 			})
 			select {
-			case <-hexCalled:
+			case <-sttCalled:
 				if len(tc.pcm) == 0 {
 					t.Fatal("transcribed an empty recording")
 				}
@@ -505,7 +447,7 @@ func TestWSRecordingLimits(t *testing.T) {
 			cleared := !d.recording.active() && len(d.recording.pcm) == 0 && !d.busy && d.view == nil
 			b.ws.mu.Unlock()
 			if !cleared {
-				t.Fatal("an empty Hex transcript must leave the device idle with no error card")
+				t.Fatal("an empty transcript must leave the device idle with no error card")
 			}
 		})
 	}
@@ -526,15 +468,12 @@ func TestWSHardwareSendWaitsForFinalPCM(t *testing.T) {
 			if recEnd {
 				pcm = slices.Concat(first, tail)
 			}
-			pad := make([]byte, len(hexSilence))
-			want := WrapWAV(slices.Concat(pad, pcm, pad))
-			wav := make(chan []byte, 2)
+			clips := make(chan []byte, 2)
 			b, base := wsHarness(t, func(b *bridge, dir string) {
-				b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-					got, _ := io.ReadAll(r.Body)
-					wav <- got
-					_, _ = io.WriteString(w, `{"transcript":""}`)
-				})
+				b.stt = func(_ context.Context, got []byte) (string, error) {
+					clips <- slices.Clone(got)
+					return "", nil
+				}
 			})
 			dev, web := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
 			dev.hello(t, id, "Cake")
@@ -556,9 +495,9 @@ func TestWSHardwareSendWaitsForFinalPCM(t *testing.T) {
 				dev.json(t, object{"ev": "rec_end"})
 			}
 			select {
-			case got := <-wav:
-				if !bytes.Equal(got, want) {
-					t.Fatalf("STT got %d WAV bytes, want %d with intact PCM", len(got), len(want))
+			case got := <-clips:
+				if !bytes.Equal(got, pcm) {
+					t.Fatalf("STT got %d bytes, want %d with intact PCM", len(got), len(pcm))
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("recording was not finalized")
@@ -602,21 +541,22 @@ func TestWSHardwareSendFailsafeDeadline(t *testing.T) {
 	})
 }
 
-func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
-	allowHex := make(chan struct{})
+func TestWSRawIntercomDoesNotWaitForSTT(t *testing.T) {
+	allowSTT := make(chan struct{})
 	_, base := wsHarness(t, func(b *bridge, dir string) {
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
+		b.stt = func(ctx context.Context, _ []byte) (string, error) {
 			select {
-			case <-allowHex:
-				_, _ = io.WriteString(w, `{"transcript":"Voice caption."}`)
-			case <-r.Context().Done():
+			case <-allowSTT:
+				return "Voice caption.", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
 			}
-		})
+		}
 	})
 	closed := false
 	defer func() {
 		if !closed {
-			close(allowHex)
+			close(allowSTT)
 		}
 	}()
 	from, to := testConnectWS(t, base, "unit", false), testConnectWS(t, base, "unit", true)
@@ -637,7 +577,7 @@ func TestWSRawIntercomDoesNotWaitForHex(t *testing.T) {
 	}
 	to.until(t, hasWS("tts", `"state":"end"`))
 	to.json(t, object{"ev": "tts_ack", "state": "done"})
-	close(allowHex)
+	close(allowSTT)
 	closed = true
 	to.until(t, hasWS("svg", "Voice caption."))
 	to.json(t, object{"ev": "tap", "id": "reply", "x": 180, "y": 240})
@@ -816,14 +756,12 @@ func TestWSVoicePlaysFirstSentenceBeforeFinal(t *testing.T) {
 	const last = "That lights nearby planets."
 	const raw = first + last + "\n```echoear-screen\n{\"title\":\"Night sky\",\"shapes\":[{\"t\":\"btn\",\"x\":121,\"y\":212,\"w\":118,\"h\":34,\"c\":\"#ffaa33\",\"s\":\"Fact\",\"tap\":\"Stars are bright.\"}]}\n```"
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			got, _ := io.ReadAll(r.Body)
-			pad := make([]byte, 4800)
-			if !bytes.Equal(got, WrapWAV(slices.Concat(pad, pcm, pad))) {
-				t.Error("Hex did not receive padded, framed PCM")
+		b.stt = func(_ context.Context, got []byte) (string, error) {
+			if !bytes.Equal(got, pcm) {
+				t.Error("STT did not receive the captured PCM")
 			}
-			_, _ = io.WriteString(w, `{"transcript":"What are stars?"}`)
-		})
+			return "What are stars?", nil
+		}
 		b.worker = &synthWorker{requests: make(chan ttsRequest), done: make(chan struct{})}
 		b.worker.ready.Store(true)
 		go func() {

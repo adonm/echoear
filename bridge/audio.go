@@ -68,11 +68,6 @@ func wavHeader(size int) (h [44]byte) {
 	return h
 }
 
-func WrapWAV(pcm16k []byte) []byte {
-	h := wavHeader(len(pcm16k))
-	return append(append(make([]byte, 0, len(h)+len(pcm16k)), h[:]...), pcm16k...)
-}
-
 // At an output position 3*n/2, the fractional input position is either 0 or 1/2.
 const sincRadius = 16
 

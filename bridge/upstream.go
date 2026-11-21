@@ -9,9 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -63,17 +61,6 @@ type upstream struct {
 	name   string
 	client *http.Client
 	config interface{ get(bool) (endpoint, error) }
-}
-
-func hexEndpoint(raw []byte) (endpoint, error) {
-	var info struct {
-		Port  int    `json:"port"`
-		Token string `json:"token"`
-	}
-	if json.Unmarshal(raw, &info) != nil || info.Port < 1 || info.Port > 65535 || info.Token == "" {
-		return endpoint{}, errors.New("invalid Hex service configuration")
-	}
-	return endpoint{fmt.Sprintf("http://127.0.0.1:%d", info.Port), "Bearer " + info.Token}, nil
 }
 
 type upstreamStatus struct {
@@ -163,52 +150,4 @@ func (u upstream) reachable(ctx context.Context, path string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 	return u.jsonCall(ctx, http.MethodGet, path, nil, nil) == nil
-}
-
-type hexClient struct {
-	upstream
-	query *fileCache[string]
-}
-
-func hexQuery(raw []byte) (string, error) {
-	settings := struct {
-		Transcription struct{ Model, Language string }
-	}{}
-	settings.Transcription.Language = "en"
-	if json.Unmarshal(raw, &settings) != nil || settings.Transcription.Model == "" {
-		return "", errors.New("invalid Hex transcription settings")
-	}
-	t := settings.Transcription
-	return url.Values{"model": {t.Model}, "language": {t.Language}}.Encode(), nil
-}
-
-var hexSilence [sampleRate * 150 / 1000 * 2]byte // 150 ms of 16-bit mono PCM.
-
-func (h hexClient) transcribe(ctx context.Context, audio []byte) (string, error) {
-	query, err := h.query.get(false)
-	if err != nil {
-		return "", h.invalid()
-	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	var pad []byte
-	for _, b := range audio {
-		if b != 0 {
-			pad = hexSilence[:]
-			break
-		}
-	}
-	header := wavHeader(len(audio) + 2*len(pad))
-	size := len(header) + len(audio) + 2*len(pad)
-	body := func() io.Reader {
-		return io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(pad), bytes.NewReader(audio), bytes.NewReader(pad))
-	}
-	var result struct{ Transcript *string }
-	if err := h.json(ctx, http.MethodPost, "/transcriptions?"+query, wavType, int64(size), body, &result); err != nil {
-		return "", err
-	}
-	if result.Transcript == nil {
-		return "", h.invalid()
-	}
-	return strings.TrimSpace(*result.Transcript), nil
 }

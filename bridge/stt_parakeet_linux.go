@@ -1,4 +1,4 @@
-//go:build parakeet
+//go:build linux && parakeet
 
 package main
 
@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"unsafe"
 )
@@ -39,6 +40,7 @@ func openParakeet(path string) (*parakeetSTT, error) {
 		C.transcribe_model_free(model)
 		return nil, errors.New("Parakeet requires a Vulkan GPU")
 	}
+	log.Printf("Parakeet Vulkan selected %s (%s)", C.GoString(info.description), C.GoString(info.name))
 	return &parakeetSTT{model: model, slot: make(chan struct{}, 1)}, nil
 }
 

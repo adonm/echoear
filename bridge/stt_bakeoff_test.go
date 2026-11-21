@@ -46,17 +46,8 @@ func TestSTTBakeoff(t *testing.T) {
 	model := os.Getenv("ECHOEAR_BAKEOFF_MODEL")
 	var transcribe func(context.Context, []byte) (string, error)
 	var stream func(context.Context, []byte) (time.Duration, time.Duration, time.Duration, error)
-	var texts []string
 	initStart := time.Now()
 	switch mode {
-	case "hex", "hex-stream":
-		threads = 1
-		h := replayHex(t)
-		if mode == "hex" {
-			transcribe = h.transcribe
-		} else {
-			stream = h.bakeoffStream
-		}
 	case "sherpa":
 		transcribe = bakeoffSherpa(t, model, threads)
 	case "parakeet":
@@ -66,7 +57,7 @@ func TestSTTBakeoff(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(p.close)
-		transcribe = (&bridge{parakeet: p}).decodeClip
+		transcribe = p.transcribe
 	case "sherpa-stream":
 		recognizer := sherpa.NewOnlineRecognizer(&sherpa.OnlineRecognizerConfig{
 			FeatConfig: sherpa.FeatureConfig{SampleRate: sampleRate, FeatureDim: 80},
@@ -91,7 +82,7 @@ func TestSTTBakeoff(t *testing.T) {
 		t.Fatalf("unknown bake-off mode %q", mode)
 	}
 	init := time.Since(initStart)
-	pid, _ := strconv.Atoi(env("ECHOEAR_BAKEOFF_PID", strconv.Itoa(os.Getpid())))
+	pid := os.Getpid()
 	var first, final, flush []int
 	var totalWork time.Duration
 	if transcribe != nil {
@@ -117,7 +108,6 @@ func TestSTTBakeoff(t *testing.T) {
 			elapsed := time.Since(start)
 			totalWork += elapsed
 			final = append(final, int(elapsed.Milliseconds()))
-			texts = append(texts, text)
 		} else {
 			f, end, finish, err := stream(ctx, pcm)
 			stop()
@@ -147,39 +137,15 @@ func TestSTTBakeoff(t *testing.T) {
 	t.Logf("mode=%s threads=%d first_partial_ms=(%s) final_ms=(%s) flush_ms=(%s) cpu_pct=%.0f %s%s",
 		mode, threads, replayPercentiles(first), replayPercentiles(final), replayPercentiles(flush),
 		100*(bakeoffCPU(t, pid)-cpuStart).Seconds()/totalWork.Seconds(), memory, bakeoffVRAM(pid))
-	if mode == "parakeet" && os.Getenv("ECHOEAR_BAKEOFF_HEX_PARITY") == "1" {
-		h := replayHex(t)
-		different := 0
-		for i, pcm := range audio {
-			text, err := h.transcribe(t.Context(), pcm)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if text != texts[i] {
-				different++
-			}
-		}
-		t.Logf("whole-clip differences from Hex: %d/%d", different, len(audio))
-	}
 }
 
 func bakeoffCPU(t *testing.T, pid int) time.Duration {
 	t.Helper()
-	if pid == os.Getpid() {
-		var usage syscall.Rusage
-		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-			t.Fatal(err)
-		}
-		return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
-	}
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields(string(b)[strings.LastIndexByte(string(b), ')')+1:])
-	user, _ := strconv.Atoi(fields[11])
-	system, _ := strconv.Atoi(fields[12])
-	return time.Duration(user+system) * (time.Second / 100) // Linux USER_HZ on this host.
+	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }
 
 func bakeoffVRAM(pid int) string {
@@ -204,9 +170,6 @@ func bakeoffVRAM(pid int) string {
 	var total int64
 	for _, kiB := range clients {
 		total += kiB
-	}
-	if pid != os.Getpid() && len(clients) == 0 {
-		return "vram=unavailable"
 	}
 	return fmt.Sprintf("vram_kib=%d", total)
 }
@@ -276,65 +239,6 @@ func bakeoffSherpaStream(r *sherpa.OnlineRecognizer, pcm []byte) (first, final, 
 		return 0, 0, 0, fmt.Errorf("missing final")
 	}
 	return first, time.Since(start) - time.Duration(len(samples))*time.Second/sampleRate, time.Since(flushStart), nil
-}
-
-func (h hexClient) bakeoffStream(ctx context.Context, pcm []byte) (first, final, flush time.Duration, err error) {
-	s, err := h.openStream(ctx)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	finished := false
-	defer func() {
-		if !finished {
-			s.cancel()
-		}
-	}()
-	if !s.partials {
-		return 0, 0, 0, fmt.Errorf("Hex did not advertise partials")
-	}
-	eventsCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	partial := make(chan time.Time, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- s.events(eventsCtx, func(ev hexStreamEvent) {
-			if (ev.Type == "partial" || ev.Type == "segment") && strings.TrimSpace(ev.Stable+ev.Tentative+ev.Text) != "" {
-				select {
-				case partial <- time.Now():
-				default:
-				}
-			}
-		})
-	}()
-	start := time.Now()
-	for at := 0; at < len(pcm); {
-		end := min(len(pcm), at+8*endpointBytes)
-		time.Sleep(time.Until(start.Add(time.Duration(end/2) * time.Second / sampleRate)))
-		if err := s.post(ctx, "audio", pcm[at:end]); err != nil {
-			return 0, 0, 0, err
-		}
-		at = end
-	}
-	flushStart := time.Now()
-	text, err := s.finish(ctx)
-	finishAt := time.Now()
-	if err != nil || text == "" {
-		return 0, 0, 0, fmt.Errorf("missing final (%v)", err)
-	}
-	finished = true
-	select {
-	case <-done:
-	case <-ctx.Done():
-	case <-time.After(100 * time.Millisecond):
-	}
-	select {
-	case when := <-partial:
-		if when.Before(flushStart) {
-			first = when.Sub(start)
-		}
-	default:
-	}
-	return first, finishAt.Sub(start) - time.Duration(len(pcm)/2)*time.Second/sampleRate, finishAt.Sub(flushStart), nil
 }
 
 func generateBakeoffAudio(t *testing.T) {

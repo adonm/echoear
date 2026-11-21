@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -31,7 +29,7 @@ func (v *testEndpointVAD) detect(frame []byte) bool {
 func (*testEndpointVAD) close() {}
 
 func testEndpointSettings() *endpointSettings {
-	return &endpointSettings{newVAD: func() endpointVAD { return &testEndpointVAD{} }, streams: make(chan struct{}, 1)}
+	return &endpointSettings{newVAD: func() endpointVAD { return &testEndpointVAD{} }}
 }
 
 func TestEndpointWaitsForContinuation(t *testing.T) {
@@ -84,21 +82,13 @@ func TestEndpointAccumulatorPreservesOriginalPCM(t *testing.T) {
 }
 
 func TestEndpointWebSendCancelAndAuto(t *testing.T) {
-	wav := make(chan []byte, 4)
+	clips := make(chan []byte, 4)
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.endpoint = testEndpointSettings()
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/streams":
-				http.Error(w, "no live model", http.StatusServiceUnavailable)
-			case "/transcriptions":
-				pcm, _ := io.ReadAll(r.Body)
-				wav <- pcm
-				_, _ = io.WriteString(w, `{"transcript":""}`)
-			default:
-				t.Errorf("unexpected Hex request %s", r.URL.Path)
-			}
-		})
+		b.stt = func(_ context.Context, pcm []byte) (string, error) {
+			clips <- slices.Clone(pcm)
+			return "", nil
+		}
 	})
 	const id = "phone-e021"
 	d := testConnectWS(t, base, "unit", false)
@@ -121,10 +111,9 @@ func TestEndpointWebSendCancelAndAuto(t *testing.T) {
 	appendPCM(frame)
 	d.json(t, object{"ev": "rec_end"}) // Browser Send now flushes then sends rec_end.
 	d.until(t, hasWS("mode", `"mode":"idle"`))
-	pad := make([]byte, len(hexSilence))
 	select {
-	case got := <-wav:
-		if !bytes.Equal(got, WrapWAV(slices.Concat(pad, frame, pad))) {
+	case got := <-clips:
+		if !bytes.Equal(got, frame) {
 			t.Fatal("Send did not commit the original single frame exactly once")
 		}
 	default:
@@ -151,15 +140,15 @@ func TestEndpointWebSendCancelAndAuto(t *testing.T) {
 	d.json(t, object{"ev": "rec_end"})
 	d.until(t, hasWS("mode", `"mode":"idle"`))
 	select {
-	case got := <-wav:
+	case got := <-clips:
 		voices := bytes.Count(got, frame)
 		if voices != 2 {
-			t.Fatalf("whole clip fallback did not contain exactly both clauses (got %d)", voices)
+			t.Fatalf("whole clip did not contain exactly both clauses (got %d)", voices)
 		}
 	default:
 		t.Fatal("automatic endpoint did not transcribe")
 	}
-	if len(wav) != 0 {
+	if len(clips) != 0 {
 		t.Fatal("capture was transcribed more than once")
 	}
 	b.diag.mu.Lock()
@@ -265,13 +254,7 @@ func TestEndpointQueuesWhileOpenCodeOwnsTurn(t *testing.T) {
 	var count atomic.Int32
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.endpoint = testEndpointSettings()
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/streams" {
-				http.Error(w, "no live model", http.StatusServiceUnavailable)
-				return
-			}
-			_, _ = io.WriteString(w, `{"transcript":"and add stars"}`)
-		})
+		b.stt = func(context.Context, []byte) (string, error) { return "and add stars", nil }
 		b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/api/session", "/api/session/" + sid:
@@ -329,69 +312,5 @@ func TestEndpointQueuesWhileOpenCodeOwnsTurn(t *testing.T) {
 	})
 	if count.Load() != 2 {
 		t.Fatal("prompt was replayed")
-	}
-}
-
-func TestCaptureHexPostsOneOwnedStream(t *testing.T) {
-	const owner = "fake-stream-owner"
-	audio := make(chan []byte, 2)
-	calls := make(chan string, 8)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/streams":
-			calls <- "open"
-			_, _ = io.WriteString(w, `{"id":7,"ownerToken":"`+owner+`","partials":true,"leaseMs":10000}`)
-		case "/streams/7/events":
-			if r.Header.Get("X-Hex-Stream-Token") != owner {
-				t.Error("missing owner token")
-			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, `data: {"type":"partial","stable":"Start a timer","tentative":"for ninety seconds"}`+"\n\n")
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-		case "/streams/7/audio":
-			if r.Header.Get("X-Hex-Stream-Token") != owner || r.Header.Get("Content-Type") != "application/octet-stream" {
-				t.Error("bad audio request headers")
-			}
-			pcm, _ := io.ReadAll(r.Body)
-			audio <- pcm
-			w.WriteHeader(http.StatusNoContent)
-		case "/streams/7/finish":
-			calls <- "finish"
-			_, _ = io.WriteString(w, `{"text":"Start a timer for ninety seconds."}`)
-		default:
-			t.Errorf("unexpected request %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	b := &bridge{endpoint: testEndpointSettings(), hex: hexClient{upstream: upstream{"Hex", server.Client(), fixedEndpoint{base: server.URL}}}}
-	h := &wsHub{b: b}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	stream := h.startCaptureHex(ctx)
-	expectValue(t, calls, "open")
-	if second := h.startCaptureHex(ctx); second != nil {
-		t.Fatal("allowed simultaneous streams")
-	}
-	eventually(t, func() bool { return stream.hint.Load() != nil })
-	if got := *stream.hint.Load(); got != "Start a timer for ninety seconds" {
-		t.Fatal(got)
-	}
-	pcm := []byte{34, 0, 17, 0}
-	stream.push(pcm)
-	close(stream.audio)
-	text, ok := stream.final(ctx)
-	if !ok || text != "Start a timer for ninety seconds." {
-		t.Fatalf("lost authoritative final: %q", text)
-	}
-	expectValue(t, calls, "finish")
-	select {
-	case got := <-audio:
-		if !bytes.Equal(got, pcm) {
-			t.Fatal("mutated streaming PCM")
-		}
-	default:
-		t.Fatal("did not upload original PCM")
 	}
 }

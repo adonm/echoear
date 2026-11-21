@@ -4,7 +4,7 @@ EchoEar is a tap-to-talk companion with interactive diagrams, voice notes, live 
 
 ```text
 EchoEar <-- /ws: RGB565 frames, touch, PCM --> Go bridge :8765 <-- /app: SVG --> Browser
-                                              |-- Hex      (speech to text)
+                                              |-- Parakeet (in-process Vulkan speech to text)
                                               |-- OpenCode :49375 (loopback, reply deltas over SSE)
                                               `-- Kokoro   (FP32, embedded via sherpa-onnx)
 ```
@@ -23,32 +23,32 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 
 ## Quickstart
 
-1. On Linux, install Go 1.26, GCC, Python 3.11+, Hex 3.4.0, OpenCode V2, Vulkan
-   drivers, Podman, `uvx` (USB flashing only), and `curl`. Use a systemd user session.
+1. On Linux, install Go 1.26, GCC, a C++17 compiler, CMake ≥3.19, Ninja,
+   Vulkan drivers and development headers/loader, `glslc`, the SPIR-V Headers
+   CMake package, Python 3.11+, OpenCode V2, Podman, `uvx` (USB flashing only),
+   and `curl`. Use a systemd user session.
 
    ```sh
-   hex model devices
-   ./scripts/setup-host.sh --gpu-index 0
+   ./scripts/setup-host.sh
    ```
 
-   Pass `--gpu-index 0` only if it selects your intended Vulkan GPU. Setup builds
-   the Go bridge, installs Hex's `parakeet_unified_en` and the SHA-256-pinned
-   FP32 `kokoro-multi-lang-v1_0` pack, and starts Hex, the bridge, and a
-   dedicated OpenCode service. The bridge runs Kokoro in-process via
-   `sherpa-onnx-go` and native libraries in `lib/`. Host setup still uses
+   Setup builds the Go bridge with in-process Vulkan STT, installs the
+   SHA-256-pinned Parakeet Q8_0 GGUF and FP32 `kokoro-multi-lang-v1_0` pack,
+   and starts the bridge and a dedicated OpenCode service. On a multi-GPU
+   host, use `vulkaninfo --summary` and pass `--gpu-index INDEX` for the
+   intended device. The bridge runs Kokoro in-process via
+   `sherpa-onnx-go` and checksum-verified libraries in `$ORIGIN/lib`.
+   The Vulkan loader and driver come from the OS. Host setup still uses
    Python; the bridge has no Python runtime or TTS subprocess. Set
    `TTS_MODEL_DIR` in `bridge.env` to load that pack from a different directory.
    Set `ECHOEAR_REPO_DIR` when launching outside the checkout to locate the
    agent prompt and OTA files (the systemd unit sets it). Choose the models in
    the [dedicated OpenCode config](#echoear-models).
 
-   **Optional, Linux Vulkan:** `./scripts/setup-host.sh --stt parakeet`
-   builds the bridge with the same Parakeet GGUF and inference engine as Hex
-   3.4.0. It needs CMake ≥3.19, Ninja, a C++17 compiler, Vulkan development
-   headers/loader, `glslc`, and the SPIR-V Headers CMake package. This mode
-   needs no Hex service or X display; setup leaves any existing Hex service
-   alone. It uses whole-clip recognition, not live partials or Hex vocabulary
-   settings. Plain setup selects Hex. See [STT measurements](bridge/stt-speed.md).
+   STT needs a Vulkan GPU, not Hex or an X display. EchoEar recognizes
+   whole clips in English without live partials or custom vocabulary.
+   Existing Hex installations are not changed by setup. See
+   [STT measurements and artifact pins](bridge/stt-speed.md).
 
 2. Create the private firmware config once:
 
@@ -91,14 +91,17 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 
 5. Run `./scripts/check.sh` for ShellCheck (if installed), Node tests, Go vet
    and race tests, strict GCC/ASan/UBSan host tests for both board layouts,
-   and tracked-file hygiene. GitHub Actions runs this offline without Kokoro
-   weights; it does not build ESP-IDF images. Build those locally with the
+   and tracked-file hygiene. GitHub Actions runs this offline without model
+   weights or a Vulkan GPU; it does not build ESP-IDF images. Build those locally with the
    commands above (`BOARD=vocat` and `BOARD=box3`).
 
    Add `--live` to check the deployed web/OTA endpoints and run WebSocket
    and voice/chat tests against a fresh bridge binary with a temporary database,
-   real Hex/Kokoro, and a deterministic model stub. No device is flashed, and
-   this check does not use model quota. See [evals and real-model smoke](docs/evals.md)
+   real Parakeet/Kokoro, and a deterministic model stub. On a Vulkan host,
+   set `ECHOEAR_PARAKEET_NATIVE` to the `native/` prefix from
+   `scripts/build-parakeet.sh` to reuse its verified static libraries.
+   No device is flashed, and this check does not use model quota.
+   See [evals and real-model smoke](docs/evals.md)
    for optional tests against the configured model.
 
 ## Controls, voice notes, and calls
@@ -192,6 +195,14 @@ its route, then **Copy Share Link**. The HTTPS link opens the same cat and
 conversation as the LAN dashboard, with mic, screen, voice notes, and calls to
 online EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
 other cats' chats. Treat the link as a password and use **Close Tunnel** to revoke it.
+
+### Ente Photos
+
+The optional LAN-only **Photo Library** uses your hosted Ente Photos account. It syncs
+metadata nightly and fetches originals only when needed; the bridge keeps small local
+JPEG previews, not a full originals export. Parents can hide the library per cat, add
+labels, and review face groups if local models are installed. See
+[Ente Photos setup](docs/ente-photos.md) for interactive login, storage and backfill costs.
 
 ### Geeky diagnostics
 
@@ -294,6 +305,9 @@ OpenCode config contains only the executable and its argument, no secrets.
 After a change to MCP schemas, instructions, the agent prompt, or the runtime
 contract version, the bridge reconnects EchoEar MCP and compacts active
 OpenCode sessions on startup without changing canonical chat history.
+Set `ECHOEAR_DEFER_MCP_COMPACTION=1` to refresh the catalog without sending
+compaction work to existing sessions. Diagnostics report `deferred`; remove
+the setting and restart the bridge to resume pending compactions.
 Code Mode exposes exactly four MCP tools under `tools.echoear`:
 
 | Tool | Purpose |
@@ -374,13 +388,6 @@ artwork and maps raw touch coordinates back into SVG space. Browsers receive
 `op: "svg"` with `device_id`; controls share the boards’ hit targets and also
 work with Tab, Enter, and Space.
 
-### Ente Photos
-
-The optional LAN-only **Photo Library** uses your hosted Ente Photos account. It syncs
-metadata nightly and fetches originals only when needed; the bridge keeps small local
-JPEG previews, not a full originals export. Parents can hide the library per cat, add
-labels, and review face groups if local models are installed. See
-[Ente Photos setup](docs/ente-photos.md) for interactive login, storage and backfill costs.
 `0x01` note upload and `0x02` playback carry 16 kHz signed 16-bit
 little-endian mono PCM. Clients with `caps.call_pcm` use `0x04` for 40 ms call
 uploads when `call.start` sets `mic_prefix: 4`; legacy clients use `0x01`.
@@ -391,9 +398,10 @@ synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 
 | Bridge · port 8765 | Request → response |
 | --- | --- |
-| `GET /health` | STT engine/readiness, Hex (when selected), OpenCode, and TTS readiness |
+| `GET /health` | STT engine/readiness, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
 | `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, Kokoro readiness, bridge and host resource usage, and MCP contract refresh state (`mcp_contract_refresh`) |
+| `POST /api/diagnostics/stt` | Loopback only: synthesize and transcribe a fixed test phrase without a session or playback |
 | `GET /api/devices` | Remembered devices with `device_id`, `character`, `cat`, `voice`, and current `ws_connected`; hardware also includes `ip`, `port`, and `last_seen` |
 | `GET /api/scope` | Current scope and ordered `voices` catalog |
 | `POST /api/virtual-clients` | `{}` creates a blank cat; optional legacy `character` and `theme` seed a designed cat |

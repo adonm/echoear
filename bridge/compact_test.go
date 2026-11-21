@@ -174,13 +174,14 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	}
 }
 
-func TestContractRefreshRetriesAdmittedItemAndReportsState(t *testing.T) {
-	var enqueued, waits atomic.Int32
+func TestContractRefreshDefersThenRetriesAdmittedItem(t *testing.T) {
+	var connects, enqueued, waits atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/info":
 			sendJSON(w, 200, object{})
 		case "/api/experimental/mcp/echoear/connect":
+			connects.Add(1)
 			w.WriteHeader(204)
 		case "/api/session/ses-cake":
 			sendJSON(w, 200, object{"data": object{"id": "ses-cake"}})
@@ -208,6 +209,12 @@ func TestContractRefreshRetriesAdmittedItemAndReportsState(t *testing.T) {
 	if err := b.oc.save("Cake", "ses-cake"); err != nil {
 		t.Fatal(err)
 	}
+	b.deferMCPCompaction = true
+	b.runSchemaUpgrade(ctx, 500*time.Millisecond, time.Second)
+	if b.diag.refresh.State != "deferred" || connects.Load() != 1 || enqueued.Load() != 0 {
+		t.Fatal("deferral must reconnect MCP without a compaction")
+	}
+	b.deferMCPCompaction = false
 	lan := httptest.NewServer(b)
 	defer lan.Close()
 	done := make(chan struct{})
@@ -247,8 +254,8 @@ func TestContractRefreshRetriesAdmittedItemAndReportsState(t *testing.T) {
 	if got.State != "current" || got.Attempts != 2 || got.Pending == nil || *got.Pending != 0 || got.RetryAt != nil {
 		t.Fatalf("wrong settled diagnostic state: %+v", got)
 	}
-	if enqueued.Load() != 1 || waits.Load() != 2 {
-		t.Fatal("retry duplicated an already admitted compaction")
+	if connects.Load() != 1 || enqueued.Load() != 1 || waits.Load() != 2 {
+		t.Fatal("retry duplicated a reconnect or an already admitted compaction")
 	}
 }
 

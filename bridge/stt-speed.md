@@ -1,16 +1,15 @@
 # Local STT bake-off
 
-**Use in-process Parakeet Vulkan for push-to-talk and whole-clip captions.**
+**EchoEar runs in-process Parakeet Vulkan for push-to-talk and whole-clip captions.**
 It uses the same engine and weights as Hex 3.4.0, ran headless on the RX 6600,
-and was within 1.5× of Hex's fast whole-clip median. Use Hex if you need live
-partials, custom vocabulary, or Hex's GPU-to-CPU fallback. The default stays
-Hex. The opt-in does not change the bridge's turn-taking rules; without live
-partials, configured Silero endpointing uses its existing conservative
-no-partial policy. The speculative experiment below is replay-only.
+and was within 1.5× of Hex's fast whole-clip median. EchoEar no longer
+uses the Hex service, HTTP API, streaming, or settings. The measurements below
+retain Hex as a historical baseline. Configured Silero endpointing uses its
+existing conservative no-partial policy. Speculative decoding is replay-only.
 
 ## Equivalence
 
-| | Hex 3.4.0 on this host | `ECHOEAR_STT=parakeet` | Sherpa ONNX Runtime CPU (bench only) |
+| | Hex 3.4.0 (historical) | In-process Parakeet | Sherpa ONNX Runtime CPU (bench only) |
 |---|---|---|---|
 | Weights | NVIDIA Unified EN 0.6B (`d4ac992`), exact handy-computer GGUF below | Same SHA-256 and revision | Same named NVIDIA checkpoint and RNN-T head; separate FP32 and ONNX int8 conversions, not the Hex GGUF. NVIDIA source revision not confirmed. |
 | Precision and engine | `transcribe.cpp` 0.4.1 fork at `bcb639faa4c74a2300ba19e30360cb2355b1663a`, ggml/Vulkan encoder + one CPU decoder thread; GGUF Q8_0 (225 Q8_0, 688 F32, 48 F16 tensors) | Same source revision, compiler options for the backend/shader subset and GGUF; one decoder thread | FP32 or ONNX dynamic int8, which is not ggml's block quantization; CPU only |
@@ -123,6 +122,11 @@ grew from 39.6 to 49.8 MiB (+10.2 MiB) and now links `libvulkan.so.1`.
 At runtime it needs the Vulkan loader and working driver, not Hex, Xvfb, a stream lease,
 an HTTP token or any other service. A native driver crash now takes down
 the bridge, not only STT. Errors do not silently move inference to CPU.
+The production setup verifies the source archive and GGUF by SHA-256.
+The bridge verifies the model again at startup. The build records the
+static library digests; deployed Sherpa/ORT libraries come from the Go module
+verified against `go.sum` and have a SHA-256 manifest in `$ORIGIN/lib`.
+The Vulkan loader and driver are system dependencies, not bundled copies.
 The bundled Sherpa/ORT is still used for Kokoro and Silero. Sherpa 1.13.8
 does not expose an AMD Linux GPU provider: MIGraphX would need a custom
 ORT/Sherpa build and a supported AMD stack (RX 6600/gfx1032 is not in the
@@ -146,12 +150,10 @@ env -u DISPLAY -u WAYLAND_DISPLAY GGML_VK_VISIBLE_DEVICES=0 \
   ECHOEAR_BAKEOFF_MODEL="$model" "$stage/bakeoff" -test.v -test.run '^TestSTTBakeoff$'
 ```
 
-Use `ECHOEAR_BAKEOFF=hex|hex-stream|sherpa|sherpa-stream` for the other
+Use `ECHOEAR_BAKEOFF=sherpa|sherpa-stream` for the other
 paths, `ECHOEAR_BAKEOFF_THREADS=1|4|8|16` for Sherpa, and
-`ECHOEAR_BAKEOFF_ONNX_EXT=.onnx` for FP32. Hex modes read local Hex settings
-and API discovery without printing credentials. Set `ECHOEAR_BAKEOFF_PID`
-to the Hex PID for its resource usage. Run only one Hex stream at a time.
-For the endpoint experiment, set `ECHOEAR_REPLAY_SPECULATIVE=parakeet`
+`ECHOEAR_BAKEOFF_ONNX_EXT=.onnx` for FP32.
+For the endpoint experiment, set `ECHOEAR_REPLAY_SPECULATIVE=1`
 and `ECHOEAR_BAKEOFF_MODEL` on the documented `TestEndpointReplay` command
 using a `-tags parakeet` build.
 

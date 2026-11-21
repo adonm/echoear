@@ -143,9 +143,7 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 		b.virtual = virtualStore(b.db)
 		b.tunnels = newTunnelManager(b, "mock-opentunnel", r)
 		b.history = &chatHistory{b.db}
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.WriteString(w, `{"transcript":"Voice to Cake."}`)
-		})
+		b.stt = func(context.Context, []byte) (string, error) { return "Voice to Cake.", nil }
 		path := filepath.Join(dir, "service.json")
 		if err := writeMap(path, object{"url": oc.URL, "password": "unit"}); err != nil {
 			t.Fatal(err)

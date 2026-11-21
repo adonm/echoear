@@ -19,6 +19,8 @@ const mcpSchemaMeta = "mcp_schema_hash"
 const mcpRefreshMeta = "mcp_contract_refresh_progress"
 const mcpRuntimeContract = "2" // Bump when runtime semantics change without a schema or prompt edit.
 
+var errMCPCompactionDeferred = errors.New("MCP contract compaction deferred")
+
 func hashMCPSchema(tools []object, instructions, runtime, prompt string) string {
 	// json.Marshal sorts map keys, including nested schema properties.
 	raw, err := json.Marshal(object{"tools": tools, "instructions": instructions, "runtime": runtime, "prompt": prompt})
@@ -101,6 +103,12 @@ func (b *bridge) runSchemaUpgrade(ctx context.Context, delay, maxDelay time.Dura
 		b.diag.mu.Unlock()
 		err := b.syncSchemaUpgrade(ctx)
 		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, errMCPCompactionDeferred) {
+			b.diag.mu.Lock()
+			b.diag.refresh.State = "deferred"
+			b.diag.mu.Unlock()
 			return
 		}
 		if err == nil {
@@ -193,6 +201,9 @@ func (b *bridge) syncSchemaUpgrade(ctx context.Context) error {
 		if err := save(); err != nil {
 			return err
 		}
+	}
+	if b.deferMCPCompaction && len(remaining) != 0 {
+		return errMCPCompactionDeferred
 	}
 	var failures []error
 	var compacted, skipped []string

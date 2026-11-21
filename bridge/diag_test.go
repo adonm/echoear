@@ -231,11 +231,10 @@ func TestDiagnosticsTTSQueueDropsCanceledSpeechWithoutRestart(t *testing.T) {
 func TestAccessibleRecordingControls(t *testing.T) {
 	transcribed := make(chan struct{}, 2)
 	_, base := wsHarness(t, func(b *bridge, dir string) {
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.Copy(io.Discard, r.Body)
+		b.stt = func(context.Context, []byte) (string, error) {
 			transcribed <- struct{}{}
-			_, _ = io.WriteString(w, `{"transcript":""}`)
-		})
+			return "", nil
+		}
 	})
 	dev := testConnectWS(t, base, "unit", false)
 	const id = "echoear-mic-controls"
@@ -259,7 +258,7 @@ func TestAccessibleRecordingControls(t *testing.T) {
 	mirror.until(t, hasWS("svg", `data-id=\"menu\"`))
 	select {
 	case <-transcribed:
-		t.Fatal("cancelled PCM reached Hex")
+		t.Fatal("cancelled PCM reached STT")
 	default:
 	}
 	record()

@@ -235,7 +235,6 @@ type diagHost struct {
 }
 
 type diagServices struct {
-	Hex        bool   `json:"hex"`
 	STT        bool   `json:"stt"`
 	STTEngine  string `json:"stt_engine"`
 	OpenCode   bool   `json:"opencode"`
@@ -502,16 +501,11 @@ func (b *bridge) sampleDiagnostics(start time.Time, path string) func() {
 				report.Services.TTS = report.TTS.Ready
 			}
 			report.Services.OpenTunnel = b.tunnels != nil && b.tunnels.runner != nil
-			var wg sync.WaitGroup
-			if b.hex.config != nil {
-				wg.Go(func() { report.Services.Hex = b.hex.reachable(ctx, "/health") })
-			}
 			if b.oc != nil && b.oc.config != nil {
-				wg.Go(func() { report.Services.OpenCode = b.oc.reachable(ctx, "/api/info") })
+				report.Services.OpenCode = b.oc.reachable(ctx, "/api/info")
 			}
-			wg.Wait()
-			report.Services.STT = b.parakeet != nil || report.Services.Hex
-			report.Services.STTEngine = b.sttEngine()
+			report.Services.STT = b.stt != nil
+			report.Services.STTEngine = sttEngine
 			b.diag.mu.Lock()
 			b.diag.system = report
 			b.diag.mu.Unlock()

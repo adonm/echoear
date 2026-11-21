@@ -135,7 +135,7 @@ func endpointSilence(text string) time.Duration {
 }
 
 // One capture worker owns this accumulator. Keep the original clip for the
-// same whole-clip Hex fallback even when partial or VAD service fails.
+// same whole-clip STT path even if VAD is unavailable.
 type utterance struct {
 	pcm    []byte
 	scan   int

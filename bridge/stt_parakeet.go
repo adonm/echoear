@@ -6,13 +6,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 )
 
 const (
+	sttEngine      = "parakeet"
 	parakeetModel  = "parakeet-unified-en-0.6b-Q8_0.gguf"
 	parakeetSHA256 = "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795"
 )
@@ -20,7 +24,7 @@ const (
 func checkParakeetModel(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return errors.New("Parakeet model missing; run setup-host.sh --stt parakeet")
+		return errors.New("Parakeet model missing; run scripts/setup-host.sh")
 	}
 	defer f.Close()
 	sum := sha256.New()
@@ -31,23 +35,40 @@ func checkParakeetModel(path string) error {
 }
 
 func (b *bridge) decodeClip(ctx context.Context, pcm []byte) (string, error) {
-	if b.parakeet != nil {
-		return b.parakeet.transcribe(ctx, pcm)
+	if b.stt == nil {
+		return "", errors.New("STT unavailable")
 	}
-	return b.hex.transcribe(ctx, pcm)
+	return b.stt(ctx, pcm)
 }
 
-func (b *bridge) sttEngine() string {
-	if b.parakeet != nil {
-		return "parakeet"
+// The host can check the installed TTS and STT together without creating a
+// device, touching chat history, or routing audio to a board.
+func (b *bridge) probeSTT(r *http.Request) (object, error) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !net.ParseIP(host).IsLoopback() {
+		return nil, problem(404, "Not found")
 	}
-	return "hex"
+	if b.stt == nil || b.worker == nil || !b.worker.ready.Load() {
+		return nil, problem(503, "Speech engines not ready")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), ttsWait)
+	defer cancel()
+	pcm, err := b.worker.synthesize(ctx, heartVoice, "The moon reflects sunlight.")
+	if err != nil {
+		return nil, problem(502, "STT probe synthesis failed")
+	}
+	start := time.Now()
+	text, err := b.decodeClip(ctx, pcm)
+	if err != nil {
+		return nil, problem(502, "STT probe transcription failed")
+	}
+	return object{"transcript": text, "stt_ms": time.Since(start).Milliseconds(), "clip_ms": len(pcm) * 1000 / (2 * sampleRate)}, nil
 }
 
 // Match the EchoEar WAV padding, then Hex's 1.5 s minimum and 400 ms
 // trailing silence for Unified EN. Already-16 kHz mono audio is not resampled.
 func parakeetSamples(pcm []byte) []float32 {
-	const pad = len(hexSilence) / 2
+	const pad = sampleRate * 150 / 1000
 	start, tail := 0, 0
 	for _, b := range pcm {
 		if b != 0 {

@@ -96,7 +96,7 @@ func liveConfig(t *testing.T, home string) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(string(raw), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || (!strings.HasPrefix(key, "ECHOEAR_") && key != "TTS_MODEL_DIR") {
+		if !ok || (!strings.HasPrefix(key, "ECHOEAR_") && key != "TTS_MODEL_DIR" && key != "GGML_VK_VISIBLE_DEVICES") {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -111,7 +111,7 @@ func liveConfig(t *testing.T, home string) map[string]string {
 	}
 	for _, key := range []string{"ECHOEAR_BRIDGE_TOKEN", "ECHOEAR_BRIDGE_PORT", "ECHOEAR_OPENCODE_AGENT",
 		"ECHOEAR_OPENCODE_URL", "ECHOEAR_OPENCODE_PASSWORD", "ECHOEAR_OPENCODE_DIR",
-		"TTS_MODEL_DIR"} {
+		"TTS_MODEL_DIR", "GGML_VK_VISIBLE_DEVICES"} {
 		out[key] = env(key, out[key])
 	}
 	if !tokenRE.MatchString(out["ECHOEAR_BRIDGE_TOKEN"]) {
@@ -140,13 +140,16 @@ func liveOpenCodeDir(home string, conf map[string]string) string {
 func liveHealthy(t *testing.T, c liveClient) {
 	t.Helper()
 	health := liveJSON[object](t, c, "/health", nil, nil, "", nil)
-	for _, k := range []string{"ok", "hex", "opencode", "tts"} {
+	for _, k := range []string{"ok", "stt", "opencode", "tts"} {
 		if health[k] != true {
 			t.Fatalf("unhealthy live backend %s", k)
 		}
 	}
 	if health["tts_engine"] != kokoroEngine {
 		t.Fatal("TTS engine metadata mismatch")
+	}
+	if health["stt_engine"] != sttEngine {
+		t.Fatal("STT engine metadata mismatch")
 	}
 }
 
@@ -221,7 +224,7 @@ func liveIsolated(t *testing.T, data string, conf map[string]string, token strin
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range []string{"hex", "echoear/tts-models"} {
+	for _, rel := range []string{"echoear/stt-models", "echoear/tts-models"} {
 		if err := os.Symlink(filepath.Join(data, rel), filepath.Join(root, rel)); err != nil {
 			t.Fatal(err)
 		}
@@ -237,7 +240,7 @@ func liveIsolated(t *testing.T, data string, conf map[string]string, token strin
 		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"],
 		"ECHOEAR_OPENCODE_URL="+conf["ECHOEAR_OPENCODE_URL"], "ECHOEAR_OPENCODE_PASSWORD="+conf["ECHOEAR_OPENCODE_PASSWORD"],
 		"ECHOEAR_OPENCODE_DIR="+filepath.Join(root, "workspace"), "ECHOEAR_OPENCODE_PAIR_PORT=0",
-		"TTS_MODEL_DIR="+conf["TTS_MODEL_DIR"])
+		"TTS_MODEL_DIR="+conf["TTS_MODEL_DIR"], "GGML_VK_VISIBLE_DEVICES="+conf["GGML_VK_VISIBLE_DEVICES"])
 	logs, err := cmd.StderrPipe()
 	if err != nil || cmd.Start() != nil {
 		t.Fatal("cannot start isolated Go bridge")
@@ -356,6 +359,18 @@ func TestLive(t *testing.T) {
 	if res.Header.Get("Content-Type") != pcmType || !livePCMOK(direct) {
 		t.Fatal("direct TTS returned invalid PCM")
 	}
+	t.Run("DeployedSTT", func(t *testing.T) {
+		unauthorized.read(t, "/api/diagnostics/stt", []byte{}, "", nil, 401)
+		probe := liveJSON[struct {
+			Transcript string
+			ClipMS     int `json:"clip_ms"`
+			STTMS      int `json:"stt_ms"`
+		}](t, c, "/api/diagnostics/stt", nil, []byte{}, "", nil)
+		if !strings.EqualFold(probe.Transcript, "The moon reflects sunlight.") || probe.ClipMS < 500 {
+			t.Fatal("deployed bridge did not transcribe the synthetic clip")
+		}
+		t.Logf("Parakeet decoded %d ms of synthetic speech in %d ms", probe.ClipMS, probe.STTMS)
+	})
 	t.Run("VoiceAndChat", func(t *testing.T) {
 		settings := openCodeSettings("echoear")
 		settings.Model = ocModel{Provider: "test", ID: "deterministic"}

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,7 +72,7 @@ func checkCallStates(t *testing.T, h *wsHub, a, b callState) {
 func TestWSCallDuplex(t *testing.T) {
 	var stt atomic.Int32
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) { stt.Add(1) })
+		b.stt = func(context.Context, []byte) (string, error) { stt.Add(1); return "", nil }
 	})
 	cake := callClient(t, b, base, callCake, "Cake")
 	mint := callClient(t, b, base, callMint, "Mint")
@@ -148,7 +146,7 @@ func TestWSCallDuplex(t *testing.T) {
 	}
 	checkCallStates(t, b.ws, callNone, callNone)
 	if stt.Load() != 0 {
-		t.Fatal("duplex call invoked Hex")
+		t.Fatal("duplex call invoked STT")
 	}
 }
 
@@ -196,9 +194,7 @@ func TestWSCallDeclineBusyTimeoutAndDisconnect(t *testing.T) {
 
 func TestWSCallCardAndVoiceCommand(t *testing.T) {
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.WriteString(w, `{"transcript":"Can you call Mint?"}`)
-		})
+		b.stt = func(context.Context, []byte) (string, error) { return "Can you call Mint?", nil }
 	})
 	cake := callClient(t, b, base, callCake, "Cake")
 	mint := callClient(t, b, base, callMint, "Mint")
@@ -240,9 +236,7 @@ func TestParseCallCommand(t *testing.T) {
 func TestWSNaturalVoiceCallRequiresKnownPeer(t *testing.T) {
 	transcripts := make(chan string, 1)
 	b, base := wsHarness(t, func(b *bridge, dir string) {
-		b.hex = setupTestHex(t, dir, func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"transcript":%q}`, <-transcripts)
-		})
+		b.stt = func(context.Context, []byte) (string, error) { return <-transcripts, nil }
 	})
 	cake := callClient(t, b, base, callCake, "Cake")
 	mint := callClient(t, b, base, callMint, "Mint")
