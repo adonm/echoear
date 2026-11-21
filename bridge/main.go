@@ -68,6 +68,12 @@ func run() error {
 	if _, err := parakeet.transcribe(context.Background(), make([]byte, sampleRate*2)); err != nil {
 		return err
 	}
+	vad := newSileroVAD(vadPath)
+	if vad == nil {
+		return errors.New("could not load the pinned Silero v5 model")
+	}
+	vad.close()
+	log.Print("EchoEar endpoint VAD ready (in-process Silero v5)")
 	endpointConfig := &endpointSettings{newVAD: func() endpointVAD { return newSileroVAD(vadPath) }}
 	ocURL, ocPassword := os.Getenv("ECHOEAR_OPENCODE_URL"), os.Getenv("ECHOEAR_OPENCODE_PASSWORD")
 	ocAPI, err := openCodeUpstream(pooledClient(), state, ocURL, ocPassword)
@@ -225,11 +231,7 @@ func run() error {
 	go func() {
 		ctx, cancel := context.WithTimeout(root, ttsWait)
 		defer cancel()
-		_, _ = b.clips.get(ctx, worker, b.voices.fallback, "Sent to everyone!")
-		others, _ := b.peers.snapshot("")
-		for _, p := range others {
-			b.warmCharacter(ctx, b.voiceFor(p), p.Character)
-		}
+		_, _ = b.clips.getWith(ctx, worker.warm, b.voices.fallback, "Sent to everyone!")
 	}()
 	server := &http.Server{Handler: b, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 105 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}

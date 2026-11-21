@@ -30,6 +30,8 @@ const (
 	diagTTSInfer
 	diagFirstPCM
 	diagEndpoint
+	diagPromptPrep
+	diagPromptSubmit
 	diagMetricCount
 )
 
@@ -38,6 +40,7 @@ var diagMetricNames = [diagMetricCount]string{
 	"render_ms", "frame_bytes", "frame_raw_bytes",
 	"gate_ms", "first_sentence_ms", "tts_queue_ms", "tts_infer_ms", "first_pcm_ms",
 	"speech_end_to_commit_ms",
+	"prompt_prep_ms", "prompt_submit_ms",
 }
 
 const diagInterval = 2 * time.Second
@@ -108,6 +111,8 @@ type diagTurn struct {
 	Render        *float64 `json:"render_ms"`
 	FirstPCM      *float64 `json:"first_pcm_ms"`
 	Endpoint      *float64 `json:"speech_end_to_commit_ms"`
+	PromptPrep    *float64 `json:"prompt_prep_ms"`
+	PromptSubmit  *float64 `json:"prompt_submit_ms"`
 }
 
 type diagFrame struct {
@@ -162,7 +167,8 @@ func (t *turnTrace) measure(metric diagMetric, elapsed time.Duration) {
 		diagTTSFirst: &t.record.TTS, diagE2E: &t.record.E2E, diagRender: &t.record.Render,
 		diagGate: &t.record.Gate, diagFirstSentence: &t.record.FirstSentence,
 		diagTTSQueue: &t.record.TTSQueue, diagTTSInfer: &t.record.TTSInfer, diagFirstPCM: &t.record.FirstPCM,
-		diagEndpoint: &t.record.Endpoint,
+		diagEndpoint:   &t.record.Endpoint,
+		diagPromptPrep: &t.record.PromptPrep, diagPromptSubmit: &t.record.PromptSubmit,
 	}[metric]
 	if field != nil && *field == nil {
 		*field = &value
@@ -291,20 +297,21 @@ func (b *bridge) diagnosticReport() diagReport {
 }
 
 type diagDevice struct {
-	ID        string     `json:"device_id"`
-	Character string     `json:"character"`
-	Kind      string     `json:"kind"`
-	Board     string     `json:"board,omitempty"`
-	Firmware  string     `json:"firmware,omitempty"`
-	OTA       string     `json:"ota,omitempty"`
-	OTABundle bool       `json:"ota_bundle"`
-	WS        bool       `json:"ws_connected"`
-	Mode      string     `json:"mode"`
-	RTT       *float64   `json:"rtt_ms"`
-	Frame     *diagFrame `json:"last_frame"`
-	Ambient   *float64   `json:"ambient_rms"`
-	Auto      bool       `json:"auto_volume"`
-	DeviceVol *int       `json:"reported_volume"`
+	ID           string     `json:"device_id"`
+	Character    string     `json:"character"`
+	Kind         string     `json:"kind"`
+	Board        string     `json:"board,omitempty"`
+	Firmware     string     `json:"firmware,omitempty"`
+	OTA          string     `json:"ota,omitempty"`
+	OTABundle    bool       `json:"ota_bundle"`
+	WS           bool       `json:"ws_connected"`
+	NoteEndpoint string     `json:"note_endpoint,omitempty"`
+	Mode         string     `json:"mode"`
+	RTT          *float64   `json:"rtt_ms"`
+	Frame        *diagFrame `json:"last_frame"`
+	Ambient      *float64   `json:"ambient_rms"`
+	Auto         bool       `json:"auto_volume"`
+	DeviceVol    *int       `json:"reported_volume"`
 	wsStatus
 }
 
@@ -339,6 +346,10 @@ func (h *wsHub) diagDevices() []diagDevice {
 	for id, d := range h.devices {
 		if h.active(d) {
 			device := d.diagDevice()
+			device.NoteEndpoint = "client"
+			if h.bridgeEndpoint(d) {
+				device.NoteEndpoint = "bridge"
+			}
 			device.OTABundle = device.Board == "esp-box-3" && boxOTA || device.Board == "esp-vocat" && roundOTA
 			devices[id] = device
 		}

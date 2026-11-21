@@ -555,7 +555,7 @@ func (h *wsHub) announce(d *wsDevice) {
 	c := d.client
 	if c.role == "web" {
 		c.enqueue(catFrame(d.who.DeviceID, d.cat, d.voice))
-		if d.caps.BridgeEndpoint && h.b.endpoint != nil {
+		if h.bridgeEndpoint(d) {
 			h.push(d, object{"op": "capabilities", "bridge_endpoint": true}, false)
 		}
 	}
@@ -567,14 +567,6 @@ func (h *wsHub) announce(d *wsDevice) {
 	h.broadcastPeers()
 	if c.role == "web" {
 		c.pushPeers(h.peerFrame(c.scope != nil))
-	}
-	if h.b.worker != nil {
-		name, voice := d.cat.Name, d.voice
-		go func() {
-			ctx, cancel := context.WithTimeout(c.ctx, ttsWait)
-			defer cancel()
-			h.b.warmCharacter(ctx, voice, name)
-		}()
 	}
 }
 
@@ -665,7 +657,7 @@ func (h *wsHub) catPose(d *wsDevice, now time.Time, mood string) catPose {
 	p := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 	p.blink = p.blink || now.Before(d.pet)
 	p.stopTaps = d.stopTaps
-	p.canContinue = mood == "thinking" && h.b.endpoint != nil && d.caps.BridgeEndpoint && d.queuedVoice == nil
+	p.canContinue = mood == "thinking" && h.bridgeEndpoint(d) && d.queuedVoice == nil
 	return p
 }
 
@@ -686,10 +678,10 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		mood = "sleepy"
 	case d.recording.active():
 		mood = "listening"
-	case d.busy:
-		mood = "thinking"
 	case d.ttsStarted || d.awaitAck:
 		mood = "speaking"
+	case d.busy:
+		mood = "thinking"
 	}
 	if mood != "thinking" || d.stopTapsExpired(now) {
 		d.resetStopTaps()

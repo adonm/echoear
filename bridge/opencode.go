@@ -751,7 +751,8 @@ func (o *openCode) askPrepared(ctx context.Context, device string, prepare func(
 	if err != nil {
 		return "", "", err
 	}
-	trace.measure(diagGate, time.Since(waiting))
+	admitted := time.Now()
+	trace.measure(diagGate, admitted.Sub(waiting))
 	defer unlock()
 	character, prompt := prepare()
 	sid, err = o.ensureSession(ctx, device, character)
@@ -762,6 +763,7 @@ func (o *openCode) askPrepared(ctx context.Context, device string, prepare func(
 		finish := begin()
 		defer finish()
 	}
+	trace.measure(diagPromptPrep, time.Since(admitted))
 	reply, err = o.runTurnStreaming(ctx, sid, prompt, stream, source, onChat)
 	if err != nil {
 		o.requestInterrupt(device)

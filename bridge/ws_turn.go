@@ -22,11 +22,15 @@ func recordTarget(s string) (string, bool) {
 	return s, s == "" || targetRE.MatchString(s)
 }
 
+func (h *wsHub) bridgeEndpoint(d *wsDevice) bool {
+	return h.b.endpoint != nil && d.caps.BridgeEndpoint
+}
+
 func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, request bool) {
 	if h.parentRefresh(d.key, now) != "" {
 		return
 	}
-	bridgeEndpoint := request && target == "" && h.b.endpoint != nil && d.caps.BridgeEndpoint
+	bridgeEndpoint := request && target == "" && h.bridgeEndpoint(d)
 	if bridgeEndpoint && d.queuedVoice != nil {
 		// Recording remains explicitly initiated; no automatic reopening.
 		return
@@ -40,6 +44,16 @@ func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, reques
 		h.stopPlayback(d, true)
 	}
 	d.recording.start(now, target, request)
+	if w := h.b.worker; target != "" && w != nil && w.ready.Load() {
+		// A voice note can use the cached introduction without waiting on
+		// synthesis. Warm it while its sender is recording, not on every hello.
+		intro, voice := "From "+d.cat.Name+"!", d.voice
+		go func() {
+			ctx, cancel := context.WithTimeout(d.client.ctx, ttsWait)
+			defer cancel()
+			_, _ = h.b.clips.getWith(ctx, w.warm, voice, intro)
+		}()
+	}
 	if request {
 		start := object{"op": "rec", "action": "start", "target": target}
 		if bridgeEndpoint {

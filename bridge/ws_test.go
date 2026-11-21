@@ -746,6 +746,11 @@ func TestWSPlaybackAbortIgnoresOldACKs(t *testing.T) {
 }
 
 func TestWSVoicePlaysFirstSentenceBeforeFinal(t *testing.T) {
+	t.Run("Complete", func(t *testing.T) { wsEagerVoice(t, false) })
+	t.Run("StopWhileGenerating", func(t *testing.T) { wsEagerVoice(t, true) })
+}
+
+func wsEagerVoice(t *testing.T, stopWhileGenerating bool) {
 	release := make(chan struct{})
 	closeRelease := syncOnceClose(release)
 	defer closeRelease()
@@ -835,10 +840,12 @@ func TestWSVoicePlaysFirstSentenceBeforeFinal(t *testing.T) {
 	})
 	dev := testConnectWS(t, base, "unit", false)
 	dev.hello(t, "echoear-a", "Cake")
+	mirror := testConnectWS(t, base, "unit", true)
+	mirror.watch(t, "echoear-a")
 	dev.json(t, object{"ev": "rec_start"})
 	dev.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, pcm...)))
 	dev.json(t, object{"ev": "rec_end", "cancelled": false})
-	dev.until(t, hasWS("tts", `"state":"start"`))
+	start := dev.until(t, hasWS("tts", `"state":"start"`))
 	got := dev.until(t, isPlayback)
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], speech) {
 		t.Fatal("did not receive eager Kokoro frame")
@@ -847,6 +854,21 @@ func TestWSVoicePlaysFirstSentenceBeforeFinal(t *testing.T) {
 		turns := b.diagnosticReport().Turns
 		return len(turns) == 1 && turns[0].TTS != nil && turns[0].E2E != nil && turns[0].Total == nil
 	})
+	if stopWhileGenerating {
+		mirror.until(t, func(f wsFrame) bool {
+			return hasWS("svg", `aria-label=\"Stop\"`)(f) && !bytes.Contains(f.data, []byte("Thinking"))
+		})
+		dev.json(t, object{"ev": "tap", "x": 180, "y": 315})
+		abort := dev.until(t, hasWS("tts", `"state":"abort"`))
+		if testObject(t, abort.data)["audio"] != testObject(t, start.data)["audio"] {
+			t.Fatal("one Stop tap must abort the audio that is playing")
+		}
+		entries := apiObjects(t, base+"/api/devices/echoear-a/messages", "messages")
+		if len(entries) != 1 {
+			t.Fatal("Stop during eager playback must not commit a reply")
+		}
+		return
+	}
 	closeRelease()
 	got = dev.until(t, isPlayback)
 	if len(got.data) != 1+sampleRate/5+len(speech) || !bytes.HasSuffix(got.data, speech) {

@@ -238,7 +238,7 @@ func TestBuildReadyWaitsForIdleAndSurvivesStop(t *testing.T) {
 		t.Fatalf("build did not save valid template: %v", err)
 	}
 	b.ws.announceBuild(t.Context(), buildJob{id: job, device: device, state: "ready", result: "Dinosaur Quiz is ready in Games."})
-	if got := speech.Load(); got != 5 { // Three warmed intercom clips, then acknowledgement and Ready.
+	if got := speech.Load(); got != 2 { // Build acknowledgement and Ready.
 		t.Errorf("wanted one acknowledgement and one announcement after warmup, got %d calls", got)
 	}
 	if sid, err := b.oc.get(device); err != nil || sid != "" {

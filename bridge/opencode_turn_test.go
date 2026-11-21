@@ -281,7 +281,6 @@ func TestWSEagerTTSFailureShowsAnswerUnlessInterrupted(t *testing.T) {
 			}
 			board := testConnectWS(t, base, "unit", false)
 			board.helloV2(t, id, "Cake")
-			nextSpeech("From Cake!").done <- ttsResult{err: errTTS} // Stop the unrelated intercom warmup.
 			board.json(t, object{"ev": "text", "text": "Speak two sentences."})
 			nextSpeech(first).done <- ttsResult{pcm: make([]byte, 640)}
 			start := testObject(t, board.until(t, hasWS("tts", `"state":"start"`)).data)

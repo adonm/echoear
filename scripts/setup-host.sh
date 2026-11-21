@@ -11,8 +11,10 @@ oc_root=$data/opencode
 env_file=$config/echoear/bridge.env
 pin_gpu=false
 ente_photos=false
+models_only=false
 usage() {
     printf '%s\n' 'Usage: setup-host.sh [--gpu-index INDEX] [--ente-photos]' \
+        '       setup-host.sh --models-only  # Kokoro and Silero; no service changes' \
         'Run vulkaninfo --summary to find the intended Vulkan GPU index.'
 }
 while (($#)); do
@@ -21,20 +23,30 @@ while (($#)); do
             [[ ${2-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }
             pin_gpu=$2; shift 2 ;;
         --ente-photos:*) ente_photos=true; shift ;;
+        --models-only:*) models_only=true; shift ;;
         -h:*|--help:*) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
 done
 
-# shellcheck source=scripts/go-bin.sh
-source "$REPO_DIR/scripts/go-bin.sh"
-GO_BIN=$(resolve_go)
-for cmd in curl gcc c++ cmake glslc ninja opencode python3 sha256sum systemctl tar; do
+if "$models_only" && { "$ente_photos" || [[ $pin_gpu != false ]]; }; then
+    usage >&2
+    exit 2
+fi
+for cmd in curl sha256sum tar; do
     command -v "$cmd" >/dev/null || { echo "Install $cmd before running setup." >&2; exit 1; }
 done
-systemctl --user show-environment >/dev/null
-if "$ente_photos"; then
-    "$REPO_DIR/scripts/setup-ente-photos.sh"
+if ! "$models_only"; then
+    # shellcheck source=scripts/go-bin.sh
+    source "$REPO_DIR/scripts/go-bin.sh"
+    GO_BIN=$(resolve_go)
+    for cmd in gcc c++ cmake glslc ninja opencode python3 systemctl; do
+        command -v "$cmd" >/dev/null || { echo "Install $cmd before running setup." >&2; exit 1; }
+    done
+    systemctl --user show-environment >/dev/null
+    if "$ente_photos"; then
+        "$REPO_DIR/scripts/setup-ente-photos.sh"
+    fi
 fi
 
 install_kokoro() (
@@ -86,6 +98,9 @@ install_silero() (
     mv -fT -- "$staged" "$destination"
 )
 install_silero
+if "$models_only"; then
+    exit 0
+fi
 
 bridge_bin="$data/echoear-bridge"
 build_tmp=$(mktemp "$bridge_bin.XXXXXXXX")

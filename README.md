@@ -100,11 +100,13 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
 
    Add `--live` to exercise the product with virtual browser cats and firmware
    clients for both board layouts. It builds a fresh loopback bridge with a
-   temporary database, real Parakeet Vulkan, Silero and Kokoro, synthetic photos, and a
-   deterministic model stub. It does not connect to the installed bridge, use
+   temporary database, real Parakeet Vulkan, Silero and Kokoro, synthetic
+   photos, and a deterministic model stub. It does not connect to the installed bridge, use
    model quota, or test wake word. Allow at least two minutes for the actual
    idle timeout. Set `ECHOEAR_PARAKEET_NATIVE` to the `native/` prefix from
    `scripts/build-parakeet.sh` to reuse its verified static libraries.
+   `scripts/setup-host.sh --models-only` installs the pinned Kokoro and Silero
+   assets without replacing the bridge or restarting services.
 
    `--e2e-real` uses the dedicated local OpenCode server, its configured EchoEar
    model and fallback, and disposable sessions; it can spend model quota.

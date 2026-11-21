@@ -35,6 +35,7 @@ type ttsResult struct {
 type synthWorker struct {
 	ready    atomic.Bool
 	requests chan ttsRequest
+	warming  chan ttsRequest
 	done     chan struct{}
 }
 
@@ -44,7 +45,7 @@ type speechEngine interface {
 }
 
 func newSynthWorker(ctx context.Context, open func() (speechEngine, error)) *synthWorker {
-	w := &synthWorker{requests: make(chan ttsRequest), done: make(chan struct{})}
+	w := &synthWorker{requests: make(chan ttsRequest), warming: make(chan ttsRequest), done: make(chan struct{})}
 	go w.run(ctx, open)
 	return w
 }
@@ -75,25 +76,42 @@ func (w *synthWorker) run(ctx context.Context, open func() (speechEngine, error)
 	w.ready.Store(true)
 	defer w.ready.Store(false)
 	for ctx.Err() == nil {
-		select {
-		case <-ctx.Done():
+		req, ok := w.next(ctx)
+		if !ok {
 			return
-		case req := <-w.requests:
-			if err := req.ctx.Err(); err != nil {
-				req.done <- ttsResult{err: err}
-				continue
-			}
-			turn, cancel := context.WithTimeout(req.ctx, ttsWait)
-			stop := context.AfterFunc(ctx, cancel)
-			trace := traceFrom(req.ctx)
-			admitted := time.Now()
-			trace.measure(diagTTSQueue, admitted.Sub(req.queuedAt))
-			pcm, err := synthesizePCM(turn, engine, req.voice, req.text)
-			trace.measure(diagTTSInfer, time.Since(admitted))
-			stop()
-			cancel()
-			req.done <- ttsResult{pcm, err}
 		}
+		if err := req.ctx.Err(); err != nil {
+			req.done <- ttsResult{err: err}
+			continue
+		}
+		turn, cancel := context.WithTimeout(req.ctx, ttsWait)
+		stop := context.AfterFunc(ctx, cancel)
+		trace := traceFrom(req.ctx)
+		admitted := time.Now()
+		trace.measure(diagTTSQueue, admitted.Sub(req.queuedAt))
+		pcm, err := synthesizePCM(turn, engine, req.voice, req.text)
+		trace.measure(diagTTSInfer, time.Since(admitted))
+		stop()
+		cancel()
+		req.done <- ttsResult{pcm, err}
+	}
+}
+
+func (w *synthWorker) next(ctx context.Context) (ttsRequest, bool) {
+	// Let an active reply start as soon as the current inference ends instead
+	// of waiting behind speculative intercom introductions.
+	select {
+	case req := <-w.requests:
+		return req, true
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ttsRequest{}, false
+	case req := <-w.requests:
+		return req, true
+	case req := <-w.warming:
+		return req, true
 	}
 }
 
@@ -102,12 +120,20 @@ func (w *synthWorker) synthesize(ctx context.Context, voice, text string) ([]byt
 }
 
 func (w *synthWorker) synthesizeQueued(ctx context.Context, voice, text string, at time.Time) ([]byte, error) {
+	return w.synthesizeOn(ctx, w.requests, voice, text, at)
+}
+
+func (w *synthWorker) warm(ctx context.Context, voice, text string) ([]byte, error) {
+	return w.synthesizeOn(ctx, w.warming, voice, text, time.Now())
+}
+
+func (w *synthWorker) synthesizeOn(ctx context.Context, queue chan<- ttsRequest, voice, text string, at time.Time) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	req := ttsRequest{ctx: ctx, voice: voice, text: text, done: make(chan ttsResult, 1), queuedAt: at}
 	select {
-	case w.requests <- req:
+	case queue <- req:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-w.done:
@@ -152,6 +178,10 @@ func (c *speechClips) peek(voice, text string) []byte {
 }
 
 func (c *speechClips) get(ctx context.Context, w *synthWorker, voice, text string) ([]byte, error) {
+	return c.getWith(ctx, w.synthesize, voice, text)
+}
+
+func (c *speechClips) getWith(ctx context.Context, synth func(context.Context, string, string) ([]byte, error), voice, text string) ([]byte, error) {
 	key := clipKey{voice, text}
 	c.mu.Lock()
 	if c.clips == nil {
@@ -174,7 +204,7 @@ func (c *speechClips) get(ctx context.Context, w *synthWorker, voice, text strin
 	c.clips[key] = item
 	c.order = append(c.order, key)
 	c.mu.Unlock()
-	item.pcm, item.err = w.synthesize(ctx, voice, text)
+	item.pcm, item.err = synth(ctx, voice, text)
 	if item.err != nil {
 		c.mu.Lock()
 		if c.clips[key] == item {

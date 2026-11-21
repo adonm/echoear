@@ -82,20 +82,19 @@ func toolTest(t *testing.T, base, tool string, args object, failed bool) object 
 }
 
 func fakeTTS(ctx context.Context, requests *atomic.Int32) *synthWorker {
-	w := &synthWorker{requests: make(chan ttsRequest), done: make(chan struct{})}
+	w := &synthWorker{requests: make(chan ttsRequest), warming: make(chan ttsRequest), done: make(chan struct{})}
 	w.ready.Store(true)
 	go func() {
 		defer close(w.done)
 		for {
-			select {
-			case <-ctx.Done():
+			req, ok := w.next(ctx)
+			if !ok {
 				return
-			case req := <-w.requests:
-				if requests != nil {
-					requests.Add(1)
-				}
-				req.done <- ttsResult{pcm: []byte{1, 2, 3, 4}}
 			}
+			if requests != nil {
+				requests.Add(1)
+			}
+			req.done <- ttsResult{pcm: []byte{1, 2, 3, 4}}
 		}
 	}()
 	return w

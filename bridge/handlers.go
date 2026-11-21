@@ -214,14 +214,6 @@ func (b *bridge) voiceAPI(r *http.Request, id string) (any, error) {
 	return object{"device_id": id, "voice": voice}, nil
 }
 
-func (b *bridge) warmCharacter(ctx context.Context, voice, character string) {
-	for _, intro := range []string{"From ", "Message from ", "Sent to "} {
-		if _, err := b.clips.get(ctx, b.worker, voice, intro+character+"!"); err != nil {
-			return
-		}
-	}
-}
-
 type answer struct {
 	Reply, SessionID string
 	AudioURL         *string

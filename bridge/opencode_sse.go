@@ -353,6 +353,7 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, str
 	// local turn has been cancelled in the meantime.
 	submit, stopSubmit := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	result, err := ocData[struct{ ID string }](submit, o.upstream, http.MethodPost, path+"/prompt", input)
+	trace.measure(diagPromptSubmit, time.Since(start))
 	stopSubmit()
 	if ctx.Err() != nil {
 		return "", o.unavailable(ctx.Err())
