@@ -45,6 +45,8 @@ func tapCallControl(t *testing.T, c *testWS, id string) {
 func finishTestCall(t *testing.T, caller, peer *testWS) {
 	t.Helper()
 	caller.json(t, object{"ev": "head", "action": "pet"})
+	caller.barrier(t)
+	tapCallControl(t, caller, "call-hangup")
 	for _, c := range []*testWS{caller, peer} {
 		c.until(t, hasWS("call", `"reason":"hung up"`))
 		c.until(t, func(f wsFrame) bool {

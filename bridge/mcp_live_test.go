@@ -122,7 +122,7 @@ func TestRealModelEchoEarCodeMode(t *testing.T) {
 		legacyCat(character, "cake"))
 	turn, endTurn := context.WithTimeout(root, 60*time.Second)
 	defer endTurn()
-	_, sid, err := o.ask(turn, peer{DeviceID: prefix, Character: character}, prompt, nil, "typed", nil, nil)
+	_, sid, err := o.askPrepared(turn, prefix, func() (string, string) { return character, prompt }, turnStream{}, "typed", nil, nil)
 	if err != nil {
 		t.Fatalf("real-model Code Mode smoke failed (separate from release checks): %v", err)
 	}

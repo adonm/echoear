@@ -64,7 +64,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 		if ev.Event == "text" && ev.DeviceID != "" {
 			d = h.devices[strings.ToLower(ev.DeviceID)]
 		}
-		if ev.Event != "tap" && ev.Event != "drag" && ev.Event != "up" && ev.Event != "text" && ev.Event != "head" {
+		if ev.Event != "tap" && ev.Event != "drag" && ev.Event != "up" && ev.Event != "text" {
 			return
 		}
 	}
@@ -85,7 +85,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			h.push(d, object{"op": "rec", "action": "stop", "cancelled": true}, false)
 			return
 		default:
-			if native && (ev.Event == "tap" || ev.Event == "head") {
+			if native && ev.Event == "tap" {
 				h.push(d, object{"op": "power", "brightness": d.brightness()}, false)
 			}
 			return
@@ -93,7 +93,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	}
 	if d.callState != callNone {
 		switch ev.Event {
-		case "status", "tap", "head", "call", "call_end", "tts_ack":
+		case "status", "tap", "call", "call_end", "tts_ack":
 		case "rec_start":
 			if native && !d.caps.CallPCM {
 				d.recording.legacyCallTail = true
@@ -122,18 +122,6 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 	case "drag", "up":
 		if d.caps.Drag && (native || c.role == "web") && d.displayApp != nil && d.app == d.displayApp && !d.asleep {
 			h.pointer(d, ev, now, native)
-		}
-	case "head":
-		switch ev.Action {
-		case "pet":
-			if d.callState != callNone {
-				h.endCall(d, "hung up")
-				return
-			}
-			h.wake(d, now)
-			d.pet = now.Add(300 * time.Millisecond)
-			h.push(d, object{"op": "chime", "kind": "tap"}, false)
-			h.render(d, now, false)
 		}
 	case "call":
 		if target, ok := recordTarget(ev.Target); ok && target != "" && c.device == d {
@@ -187,7 +175,7 @@ func (h *wsHub) handle(c *wsClient, ev wsEvent) {
 			})
 		}
 	case "tts_ack":
-		if ev.Audio != 0 && ev.Audio != d.audio {
+		if ev.Audio == 0 || ev.Audio != d.audio {
 			return
 		}
 		if ev.State == "interrupted" && (d.ttsStarted || d.awaitAck) {

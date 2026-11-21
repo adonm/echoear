@@ -575,8 +575,8 @@ func TestWSRawIntercomDoesNotWaitForSTT(t *testing.T) {
 	if got.data[0] != pcmPrefix || !bytes.Equal(got.data[1:], pcm) {
 		t.Fatal("raw intercom did not preserve concatenated PCM frames")
 	}
-	to.until(t, hasWS("tts", `"state":"end"`))
-	to.json(t, object{"ev": "tts_ack", "state": "done"})
+	end := to.until(t, hasWS("tts", `"state":"end"`))
+	to.json(t, object{"ev": "tts_ack", "state": "done", "audio": testObject(t, end.data)["audio"]})
 	close(allowSTT)
 	closed = true
 	to.until(t, hasWS("svg", "Voice caption."))
@@ -731,17 +731,15 @@ func TestWSPlaybackAbortIgnoresOldACKs(t *testing.T) {
 	if !awaiting() {
 		t.Fatal("aborted stream ACK cleared replacement playback")
 	}
+	dev.json(t, object{"ev": "tts_ack", "state": "done"})
+	dev.barrier(t)
+	if !awaiting() {
+		t.Fatal("ACK without an audio ID cleared replacement playback")
+	}
 	dev.json(t, object{"ev": "tts_ack", "state": "done", "audio": second})
 	dev.barrier(t)
 	if awaiting() {
 		t.Fatal("matching audio ACK did not clear replacement playback")
-	}
-	play()
-	dev.until(t, hasWS("tts", `"state":"end"`))
-	dev.json(t, object{"ev": "tts_ack", "state": "done"})
-	dev.barrier(t)
-	if awaiting() {
-		t.Fatal("0.8.4 ACK without an audio ID was not accepted")
 	}
 }
 
@@ -874,8 +872,8 @@ func wsEagerVoice(t *testing.T, stopWhileGenerating bool) {
 	if len(got.data) != 1+sampleRate/5+len(speech) || !bytes.HasSuffix(got.data, speech) {
 		t.Fatal("did not receive tail sentence")
 	}
-	dev.until(t, hasWS("tts", `"state":"end"`))
-	dev.json(t, object{"ev": "tts_ack", "state": "done"})
+	end := dev.until(t, hasWS("tts", `"state":"end"`))
+	dev.json(t, object{"ev": "tts_ack", "state": "done", "audio": testObject(t, end.data)["audio"]})
 	eventually(t, func() bool {
 		b.ws.mu.Lock()
 		defer b.ws.mu.Unlock()

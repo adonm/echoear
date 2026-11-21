@@ -392,12 +392,12 @@ func TestOpenCodeStreamingAndFallback(t *testing.T) {
 				return o.feed.connected
 			})
 			var heard []string
-			got, err := o.RunTurnStreaming(ctx, "ses1", "test", func(s string) {
+			got, err := o.runTurnStreaming(ctx, "ses1", "test", turnStream{sentence: func(s string) {
 				heard = append(heard, s)
 				if len(heard) == 1 {
 					close(early)
 				}
-			})
+			}}, "", nil)
 			if got != reply || err != nil || !slices.Equal(heard, []string{first}) {
 				t.Fatalf("didn't overlap or lost final: %q %v %v", got, heard, err)
 			}

@@ -740,10 +740,6 @@ func (o *openCode) lockPrompt(ctx context.Context, device string) (context.Conte
 	}
 }
 
-func (o *openCode) ask(ctx context.Context, who peer, prompt string, onSentence func(string), source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
-	return o.askPrepared(ctx, who.DeviceID, func() (string, string) { return who.Character, prompt }, turnStream{sentence: onSentence}, source, begin, onChat)
-}
-
 func (o *openCode) askPrepared(ctx context.Context, device string, prepare func() (string, string), stream turnStream, source string, begin func() func(), onChat func(chatEntry)) (reply, sid string, err error) {
 	waiting := time.Now()
 	trace := traceFrom(ctx)

@@ -32,7 +32,6 @@ type wsEvent struct {
 	X         int     `json:"x"`
 	Y         int     `json:"y"`
 	RevLo     *uint16 `json:"rev_lo"`
-	Action    string  `json:"action"`
 	Target    string  `json:"target"`
 	Text      string  `json:"text"`
 	State     string  `json:"state"`

@@ -137,7 +137,6 @@ type wsDevice struct {
 	moodAt    time.Time
 	last      time.Time
 	meter     time.Time
-	pet       time.Time
 	asleep    bool
 	wakeWord  bool
 
@@ -658,7 +657,6 @@ type renderRequest struct {
 
 func (h *wsHub) catPose(d *wsDevice, now time.Time, mood string) catPose {
 	p := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
-	p.blink = p.blink || now.Before(d.pet)
 	p.stopTaps = d.stopTaps
 	p.canContinue = mood == "thinking" && h.bridgeEndpoint(d) && d.queuedVoice == nil
 	return p

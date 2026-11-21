@@ -465,10 +465,11 @@ or connectivity are required for normal local operation.
 
 Authenticated HTTP requests accept `X-Lark-Token` or `X-EchoEar-Token`. The
 same compatibility applies to `X-Lark-Parent-Token` and `X-EchoEar-Parent-Token`.
-Hardware needs firmware `0.8.0` or newer and announces `proto: 2` in its
-authenticated `/ws` `hello`. Firmware `0.9.2` and newer report `caps` for battery,
-head pads, Call, and drag. Firmware `0.9.3` reports `head_pads: false` on both
-boards. The bridge remembers each board there, using the socket IP and port 80
+Hardware needs firmware `0.9.0` or newer for playback acknowledgments with an
+audio ID, and announces `proto: 2` in its authenticated `/ws` `hello`.
+Firmware `0.9.2` and newer report `caps` for battery, Call, and drag. Both
+current boards use touchscreens, not head pads. The bridge remembers each
+board there, using the socket IP and port 80
 unless the hello specifies a port. The SVG renderer
 streams dirty rectangles as `0x03` RGB565 binary frames, using RLE565 when
 smaller. BOX-3 announces its native size; the bridge centers the square

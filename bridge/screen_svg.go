@@ -647,10 +647,6 @@ func faceLayer(root *svgNode, pose string) *svgNode {
 	return root
 }
 
-func catSVG(cat catState, pose catPose) string {
-	return catChrome(cat, pose).svg(catArt(cat, pose))
-}
-
 type faceLayerKey struct {
 	hash [32]byte
 	pose string

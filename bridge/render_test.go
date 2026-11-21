@@ -17,6 +17,10 @@ import (
 	"github.com/srwiley/rasterx"
 )
 
+func catSVG(cat catState, pose catPose) string {
+	return catChrome(cat, pose).svg(catArt(cat, pose))
+}
+
 func facePoseSVGs() []string {
 	cat := blankCat()
 	return []string{

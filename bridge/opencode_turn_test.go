@@ -106,7 +106,9 @@ func TestOpenCodeAdmitsPromptBeforeEventStreamConnects(t *testing.T) {
 		}
 	})
 	start := time.Now()
-	reply, err := o.RunTurnStreaming(ctx, sid, "Hello", func(string) { t.Error("disconnected stream spoke partial text") })
+	reply, err := o.runTurnStreaming(ctx, sid, "Hello", turnStream{sentence: func(string) {
+		t.Error("disconnected stream spoke partial text")
+	}}, "", nil)
 	if err != nil || reply != "Ready?" {
 		t.Fatalf("final reply %q, %v", reply, err)
 	}
@@ -488,10 +490,16 @@ func TestOpenCodeInterruptOrdersReplacementPrompt(t *testing.T) {
 	})
 	who := peer{DeviceID: id, Character: "Cake"}
 	first, second := make(chan error, 1), make(chan error, 1)
-	go func() { _, _, err := o.ask(root, who, "First", nil, "text", nil, nil); first <- err }()
+	go func() {
+		_, _, err := o.askPrepared(root, who.DeviceID, func() (string, string) { return who.Character, "First" }, turnStream{}, "text", nil, nil)
+		first <- err
+	}()
 	expectValue(t, prompts, "First")
 	o.interruptDevice(id)
-	go func() { _, _, err := o.ask(root, who, "Second", nil, "text", nil, nil); second <- err }()
+	go func() {
+		_, _, err := o.askPrepared(root, who.DeviceID, func() (string, string) { return who.Character, "Second" }, turnStream{}, "text", nil, nil)
+		second <- err
+	}()
 	select {
 	case <-interrupt:
 		t.Fatal("interrupt raced prompt admission")

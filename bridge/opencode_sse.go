@@ -17,28 +17,17 @@ import (
 type ocEventData struct {
 	SessionID          string `json:"sessionID"`
 	AssistantMessageID string `json:"assistantMessageID"`
-	MessageID          string `json:"messageID"`
-	PartID             string `json:"partID"`
 	Ordinal            int    `json:"ordinal"`
-	Field              string `json:"field"`
 	Delta              string `json:"delta"`
 	Text               string `json:"text"`
 	Status             struct {
 		Type string `json:"type"`
 	} `json:"status"`
-	Part struct {
-		ID        string `json:"id"`
-		SessionID string `json:"sessionID"`
-		MessageID string `json:"messageID"`
-		Type      string `json:"type"`
-		Text      string `json:"text"`
-	} `json:"part"`
 }
 
 type ocEvent struct {
-	Type       string      `json:"type"`
-	Data       ocEventData `json:"data"`
-	Properties ocEventData `json:"properties"` // Older event envelope.
+	Type string      `json:"type"`
+	Data ocEventData `json:"data"`
 }
 
 type eventFeed struct {
@@ -92,17 +81,14 @@ func (f *eventFeed) dispatch(raw []byte) {
 	switch event.Type {
 	case "session.text.started", "session.text.delta", "session.text.ended", "session.step.started",
 		"session.tool.input.started", "session.tool.called",
-		"message.part.delta", "message.part.updated", "session.idle", "session.status", "session.error", "session.interrupted",
+		"session.idle", "session.status",
 		"session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
 	default:
 		return
 	}
-	if event.Data.SessionID == "" && event.Data.Part.SessionID == "" {
-		event.Data = event.Properties
-	}
 	id := event.Data.SessionID
 	if id == "" {
-		id = event.Data.Part.SessionID
+		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -228,7 +214,6 @@ type streamedText struct {
 	sentenceExtractor
 	onFirst   func()
 	messageID string
-	parts     map[string]string
 	byOrdinal map[int]*strings.Builder
 	ordinal   int
 	havePart  bool
@@ -247,28 +232,13 @@ func (t *streamedText) addEvent(event ocEvent) []string {
 	d := event.Data
 	switch event.Type {
 	case "session.text.started", "session.text.delta", "session.text.ended":
-	case "message.part.updated":
-		if d.Part.Type != "text" {
-			return nil
-		}
-	case "message.part.delta":
-		if d.Field != "text" {
-			return nil
-		}
 	default:
 		return nil
 	}
 	id := d.AssistantMessageID
-	if id == "" {
-		id = d.MessageID
-	}
-	if id == "" {
-		id = d.Part.MessageID
-	}
 	if id != "" && id != t.messageID {
 		t.messageID = id
 		t.sentenceExtractor = sentenceExtractor{}
-		clear(t.parts)
 		clear(t.byOrdinal)
 		t.havePart = false
 	}
@@ -304,28 +274,8 @@ func (t *streamedText) addEvent(event ocEvent) []string {
 			return t.add(tail + "\n")
 		}
 		t.halted = true // The authoritative final message may differ from the deltas.
-	case "message.part.updated":
-		if d.Part.Type == "text" {
-			if t.parts == nil {
-				t.parts = map[string]string{}
-			}
-			prev := t.parts[d.Part.ID]
-			if tail, ok := strings.CutPrefix(d.Part.Text, prev); ok {
-				t.parts[d.Part.ID] = d.Part.Text
-				return t.add(tail)
-			}
-		}
-	case "message.part.delta":
-		if prev, ok := t.parts[d.PartID]; ok && d.Field == "text" {
-			t.parts[d.PartID] = prev + d.Delta
-			return t.add(d.Delta)
-		}
 	}
 	return nil
-}
-
-func (o *openCode) RunTurnStreaming(ctx context.Context, sid, prompt string, onSentence func(string)) (string, error) {
-	return o.runTurnStreaming(ctx, sid, prompt, turnStream{sentence: onSentence}, "", nil)
 }
 
 type turnStream struct {
@@ -448,15 +398,14 @@ stream:
 					continue
 				}
 				fallthrough
-			case "session.idle", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.error", "session.interrupted":
+			case "session.idle", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
 				reply, err := readFinal()
 				if !errors.Is(err, errNoFinal) {
 					return reply, err
 				}
 				break stream
 			default:
-				if strings.HasPrefix(event.Type, "session.tool.") ||
-					event.Type == "message.part.updated" && event.Data.Part.Type == "tool" {
+				if strings.HasPrefix(event.Type, "session.tool.") {
 					markTool()
 				}
 				if !usedTool && stream.sentence != nil || trace != nil && (!firstSentence || streamed.onFirst != nil) {
