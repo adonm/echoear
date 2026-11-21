@@ -37,11 +37,41 @@ func expectValue[T comparable](t *testing.T, result <-chan T, want T) {
 	}
 }
 
+func TestOpenCodeAdmitsPromptBeforeEventStreamConnects(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	prompted := make(chan time.Time, 1)
+	const sid = "ses-disconnected"
+	o := testOpenCode(t, ctx, t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/event":
+			<-r.Context().Done()
+		case "/api/session/" + sid + "/prompt":
+			prompted <- time.Now()
+			sendJSON(w, 200, object{"data": object{"id": "prompt"}})
+		case "/api/experimental/session/" + sid + "/wait":
+			sendJSON(w, 200, object{})
+		case "/api/session/" + sid + "/message":
+			_, _ = io.WriteString(w, `{"data":[{"id":"answer","type":"assistant","finish":"stop","content":[{"type":"text","text":"Ready?"}]},{"id":"prompt","type":"user"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	start := time.Now()
+	reply, err := o.RunTurnStreaming(ctx, sid, "Hello", func(string) { t.Error("disconnected stream spoke partial text") })
+	if err != nil || reply != "Ready?" {
+		t.Fatalf("final reply %q, %v", reply, err)
+	}
+	if delay := (<-prompted).Sub(start); delay >= 400*time.Millisecond {
+		t.Fatalf("prompt waited %s for a disconnected event stream", delay)
+	}
+}
+
 func TestEagerReplyPublishesPCMBeforeSSEFinishes(t *testing.T) {
 	for _, mode := range []string{"matching", "divergent", "tool"} {
 		t.Run(mode, func(t *testing.T) {
 			const id, sid = "echoear-eager", "ses-eager"
-			const prefix, tail = "First sentence. ", "Here is another sentence."
+			const prefix, tail = "Ready? ", "Here is another sentence."
 			final := prefix + tail
 			if mode == "divergent" {
 				final = "A different first sentence. " + tail

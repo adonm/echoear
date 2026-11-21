@@ -203,7 +203,7 @@ func sentences(text string, final, boundary bool) (out []string) {
 					count++
 				}
 			}
-			if count < 20 {
+			if count == 0 || start != 0 && count < 20 {
 				continue
 			}
 		}
@@ -251,7 +251,9 @@ func (s *sentenceExtractor) boundary(out []string) []string {
 				n++
 			}
 		}
-		if n < 20 {
+		// Start speaking on a short opening question or exclamation;
+		// coalesce short later clauses to avoid tiny synthesis jobs.
+		if n == 0 || s.start != 0 && n < 20 {
 			return out
 		}
 	}

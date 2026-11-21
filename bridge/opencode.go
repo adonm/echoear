@@ -108,7 +108,7 @@ func newOpenCode(ctx context.Context, u upstream, db *bridgeDB, project string, 
 	o := &openCode{upstream: u, project: project, settings: settings,
 		store:  sessionStore(db),
 		active: make(map[string]context.CancelFunc), interrupts: make(map[string]bool), resets: make(map[string]*ocReset),
-		feed: eventFeed{ready: make(chan struct{}), bySession: make(map[string]map[chan ocEvent]struct{})}}
+		feed: eventFeed{bySession: make(map[string]map[chan ocEvent]struct{})}}
 	for i := range o.turns {
 		o.turns[i] = make(chan struct{}, 1)
 	}

@@ -38,7 +38,7 @@ func TestTurnPromptIdentifiesDeviceAndInput(t *testing.T) {
 }
 
 func TestSentencesAndFence(t *testing.T) {
-	want := []string{"Whoa! Dr. Lee found a 3.2-inch shell.", "Ooh, awesome question! What made it spiral?"}
+	want := []string{"Whoa!", "Dr. Lee found a 3.2-inch shell.", "Ooh, awesome question! What made it spiral?"}
 	if got := SplitSentences("**Whoa!** Dr. Lee found a 3.2-inch shell. Ooh, awesome question! What made it spiral?"); !slices.Equal(got, want) {
 		t.Fatal(got)
 	}
@@ -47,7 +47,7 @@ func TestSentencesAndFence(t *testing.T) {
 	for _, delta := range []string{"**Whoa!** Dr. Lee found a 3.", "2-inch shell. ", "Ooh, awesome question!", " What made it spiral in circles?\n", "``", "`echoear-screen", "\nNever say this. \n```", "Not eager even after fence. "} {
 		streamed = append(streamed, s.add(delta)...)
 	}
-	want[1] = "Ooh, awesome question! What made it spiral in circles?"
+	want[2] = "Ooh, awesome question! What made it spiral in circles?"
 	if !s.halted || !slices.Equal(streamed, want) {
 		t.Fatal(streamed)
 	}
@@ -362,6 +362,11 @@ func TestOpenCodeStreamingAndFallback(t *testing.T) {
 			}
 			o := newOpenCode(ctx, upstream{"OpenCode", pooledClient(), &fileCache[endpoint]{path: path, read: openCodeEndpoint}},
 				testDB(t, ":memory:", ""), t.TempDir(), ocSettings{})
+			eventually(t, func() bool {
+				o.feed.mu.Lock()
+				defer o.feed.mu.Unlock()
+				return o.feed.connected
+			})
 			var heard []string
 			got, err := o.RunTurnStreaming(ctx, "ses1", "test", func(s string) {
 				heard = append(heard, s)

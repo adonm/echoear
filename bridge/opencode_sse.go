@@ -43,7 +43,6 @@ type ocEvent struct {
 
 type eventFeed struct {
 	mu        sync.Mutex
-	ready     chan struct{}
 	connected bool
 	bySession map[string]map[chan ocEvent]struct{}
 }
@@ -52,10 +51,7 @@ func (f *eventFeed) setConnected(connected bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connected = connected
-	if connected {
-		close(f.ready)
-	} else {
-		f.ready = make(chan struct{})
+	if !connected {
 		for _, subs := range f.bySession {
 			for ch := range subs {
 				close(ch)
@@ -65,34 +61,26 @@ func (f *eventFeed) setConnected(connected bool) {
 	}
 }
 
-func (f *eventFeed) subscribe(ctx context.Context, sid string) (<-chan ocEvent, func()) {
-	wait, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-	for {
+func (f *eventFeed) subscribe(sid string) (<-chan ocEvent, func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.connected {
+		// Admit the prompt without delaying for a reconnect. A mid-turn
+		// subscription could miss earlier text or tool use; use the final reply.
+		return nil, func() {}
+	}
+	ch := make(chan ocEvent, 256)
+	if f.bySession[sid] == nil {
+		f.bySession[sid] = map[chan ocEvent]struct{}{}
+	}
+	f.bySession[sid][ch] = struct{}{}
+	return ch, func() {
 		f.mu.Lock()
-		if f.connected {
-			ch := make(chan ocEvent, 256)
-			if f.bySession[sid] == nil {
-				f.bySession[sid] = map[chan ocEvent]struct{}{}
-			}
-			f.bySession[sid][ch] = struct{}{}
-			f.mu.Unlock()
-			return ch, func() {
-				f.mu.Lock()
-				delete(f.bySession[sid], ch)
-				if len(f.bySession[sid]) == 0 {
-					delete(f.bySession, sid)
-				}
-				f.mu.Unlock()
-			}
+		delete(f.bySession[sid], ch)
+		if len(f.bySession[sid]) == 0 {
+			delete(f.bySession, sid)
 		}
-		ready := f.ready
 		f.mu.Unlock()
-		select {
-		case <-ready:
-		case <-wait.Done():
-			return nil, func() {}
-		}
 	}
 }
 
@@ -351,7 +339,7 @@ func (o *openCode) runTurnStreaming(ctx context.Context, sid, prompt string, str
 	defer func() { trace.measure(diagLLMTotal, time.Since(start)) }()
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
-	events, unsubscribe := o.feed.subscribe(ctx, sid)
+	events, unsubscribe := o.feed.subscribe(sid)
 	defer unsubscribe()
 	path := "/api/session/" + sid
 	input := object{"text": prompt}
