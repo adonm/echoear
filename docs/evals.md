@@ -51,6 +51,15 @@ network and no quota. The offline suite checks the CLI, export, score and
 session cleanup against synthetic fixtures and local stubs. Stub numbers
 are not evidence of model quality or latency.
 
+For background-build prompts, replay `cmd/echoear-eval/testdata/builds.json`
+with `-session Synthetic -turns 1,2,3`. Replay scores the OpenCode turn;
+it bypasses the bridge, so it cannot measure the new local acknowledgement.
+For the foreground comparison, run `"$GO_BIN" test -v -run '^TestBuildForegroundLatencyStub$' .`
+from `bridge`. It sends the same build request through the bridge with and
+without background routing, against a fake OpenCode with a fixed 250 ms model
+delay. This measures bridge text reply latency, not time to audible speech
+or real model speed.
+
 For a real replay, prepare a disposable loopback OpenCode instance with its
 own config/data/cache/state/workspace, the EchoEar agent revision to test, and
 **only** the EchoEar MCP connected to a separate local bridge with a temporary
