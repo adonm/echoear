@@ -213,6 +213,31 @@ An explicit rate-limit or supported upstream rejection before output or tools
 can retry once on the configured fallback. The next turn starts on the
 primary. Stalls, interruptions and permission failures do not switch models.
 
+### Background builds
+
+Say “Make me a dinosaur quiz,” “Edit this game to add a hard round,” or
+“Give yourself a bigger smile.” The cat acknowledges immediately and stays
+available for other requests. For edits, open the saved app first, or type its
+slug in backticks: ``Edit the app `dinosaur-quiz` to add a hard round``.
+If the target is unclear, the cat asks. Playing saved games, calls, intercom,
+and other simple controls don't start builds.
+
+The cat shows a **Ready** card and announces the result once when awake and
+idle. Saved builds appear in **Menu → Games**; they never replace the running
+app. Face changes apply only if the cat hasn't changed in the meantime. If
+the saved app changed while the builder worked, it keeps the newer version.
+Tap **Cancel build** on the progress card or say “Cancel the build.” Regular
+**Stop** only stops the foreground turn or speech. A cat can have one build at
+a time. After a bridge restart, queued work can continue; in-flight work is
+reported as interrupted.
+
+Setup links the tool-free `echoear-builder` agent in the dedicated OpenCode
+configuration. The builder uses `agents.echoear.model` by default. To use a
+different model, add `agents.echoear-builder.model` in that same JSONC file,
+using the same `provider/model#variant` format. The bridge explicitly selects
+both the agent and model for each disposable session and deletes it afterward.
+The fallback router retains its existing foreground configuration.
+
 ### Pairing
 
 Click **Pair OpenCode** in the LAN dashboard's Devices sidebar to create a

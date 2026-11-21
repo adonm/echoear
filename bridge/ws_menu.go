@@ -293,6 +293,8 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		}
 	case "stop":
 		h.tapStop(d, now)
+	case "build-cancel":
+		h.cancelBuildCard(d, a.value)
 	case "cat":
 		h.leaveScene(d, now, "leave-scene")
 	case "dismiss":
@@ -326,7 +328,7 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 func (d *wsDevice) acceptPointerRevision(action string, rev *uint16) bool {
 	switch action {
 	case "stop", "rec-cancel", "rec-send", "rec-continue", "listen", "reply", "call-peer",
-		"call-answer", "call-decline", "call-hangup", "call-mute":
+		"call-answer", "call-decline", "call-hangup", "call-mute", "build-cancel":
 		if rev == nil {
 			return !d.caps.PointerRev
 		}

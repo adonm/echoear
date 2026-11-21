@@ -366,6 +366,10 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		h.sendIntercom(ctx, d, id, others, direct.target, direct.text, pcm)
 		return
 	}
+	if reply, job := h.b.buildReply(ctx, d.who, text, source); reply != "" {
+		h.buildAcknowledgement(ctx, d, id, reply, job)
+		return
+	}
 	if h.b.oc == nil {
 		h.turnError(d, id, "Chat is not ready yet.")
 		return
