@@ -96,7 +96,7 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 }
 .masthead { display: flex; align-items: center; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap; padding-block: 1.15rem; }
 .brand { display: flex; align-items: center; gap: .7rem; }
-.brand-mark { flex: none; color: var(--primary); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-medium); padding: .2rem; }
+.brand-mark { flex: none; box-sizing: border-box; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-medium); padding: 3px; }
 .eyebrow { display: block; color: var(--primary); font-size: .69rem; line-height: 1.35; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
 .eyebrow + :is(h1, h2) { margin-block-start: .15rem; }
 .header-actions { flex-wrap: wrap; gap: .35rem; min-inline-size: 0; }

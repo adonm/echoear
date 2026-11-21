@@ -21,7 +21,7 @@ func serveApp(w http.ResponseWriter, path string) bool {
 		name, mime = "index.html", "text/html; charset=utf-8"
 	case "/app/style.css":
 		name, mime = "style.css", "text/css; charset=utf-8"
-	case "/app/lark.svg":
+	case "/app/lark.svg", "/favicon.svg":
 		name, mime = "lark.svg", "image/svg+xml"
 	default:
 		var ok bool
