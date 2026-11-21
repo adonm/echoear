@@ -289,7 +289,7 @@ static bool send_telemetry(uint32_t session, bool hello)
         snprintf(pct, sizeof(pct), "%d", battery.pct);
         snprintf(mv, sizeof(mv), "%u", battery.millivolts);
     }
-    char extra[384] = "";
+    char extra[448] = "";
     if (hello) {
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
@@ -297,13 +297,14 @@ static bool send_telemetry(uint32_t session, bool hello)
         int len = snprintf(extra, sizeof(extra), ",\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
                            "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
-                           "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s}",
+                            "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s,"
+                            "\"bridge_endpoint\":%s}",
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
                            BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
-                            call, call, BOARD_HAS_DRAG ? "true" : "false");
+                             call, call, BOARD_HAS_DRAG ? "true" : "false", media_audio_ready() ? "true" : "false");
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
-    char text[768];
+    char text[1024];
     int len = snprintf(text, sizeof(text), "{\"ev\":\"%s\"%s,\"free_heap\":%zu,\"min_free_heap\":%zu,"
                        "\"free_psram\":%zu,\"wifi_rssi\":%d,\"rssi\":%d,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
                        "\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"volume\":%d" TELEMETRY_IO_JSON "}",
@@ -337,7 +338,8 @@ static void dispatch(const cJSON *msg)
         const char *action = field(msg, "action"), *target = field(msg, "target");
         if (!strcmp(action, "stop")) {
             media_record_stop(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "cancelled")));
-        } else if (!strcmp(action, "start") && strlen(target) < MEDIA_TARGET_CAP && !media_record_start(target)) {
+        } else if (!strcmp(action, "start") && strlen(target) < MEDIA_TARGET_CAP &&
+                   !media_record_start(target, !strcmp(field(msg, "endpoint"), "bridge"))) {
             input_t reject = { .kind = REJECT_RECORD };
             snprintf(reject.target, sizeof(reject.target), "%s", target);
             enqueue(reject);

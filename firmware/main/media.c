@@ -23,6 +23,7 @@ typedef struct {
     unsigned chime_epoch;
     char target[MEDIA_TARGET_CAP];
     audio_tone_t tone;
+    bool bridge_endpoint;
 } job_t;
 
 static QueueHandle_t jobs;
@@ -79,10 +80,10 @@ void media_link_lost(void)
     media_interrupt();
 }
 
-bool media_record_start(const char *target)
+bool media_record_start(const char *target, bool bridge_endpoint)
 {
     if (!jobs || !target || strlen(target) >= MEDIA_TARGET_CAP) return false;
-    job_t job = { .kind = RECORD, .session = ws_client_session() };
+    job_t job = { .kind = RECORD, .session = ws_client_session(), .bridge_endpoint = bridge_endpoint };
     snprintf(job.target, sizeof(job.target), "%s", target);
     xSemaphoreTake(lock, portMAX_DELAY);
     bool accepted = !recording && !media_call_active() && submit(&job);
@@ -316,7 +317,7 @@ static void record(job_t *job)
     if (started) {
         audio_tone(AUDIO_START_TONE, capture_cancelled, NULL);
         if (!capture_cancelled(NULL)) {
-            esp_err_t err = audio_record_stream(stop_capture, upload_pcm, job);
+            esp_err_t err = audio_record_stream(job->bridge_endpoint, stop_capture, upload_pcm, job);
             cancelled = err != ESP_OK || capture_cancelled(NULL);
         }
     }

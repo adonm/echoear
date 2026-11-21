@@ -6,7 +6,7 @@ enum {
     SHORT_SILENCE_FRAMES = 150, LONG_SILENCE_FRAMES = 300,
 };
 
-vad_result_t vad_update(vad_t *v, uint32_t energy)
+static bool calibrate(vad_t *v, uint32_t energy)
 {
     if (++v->frames <= CALIBRATION) {
         // Quietest four of the first 20 blocks limit bias if speech starts early.
@@ -26,9 +26,14 @@ vad_result_t vad_update(vad_t *v, uint32_t energy)
             v->threshold = adaptive < MIN_RMS * MIN_RMS ? MIN_RMS * MIN_RMS :
                            adaptive > MAX_RMS * MAX_RMS ? MAX_RMS * MAX_RMS : adaptive;
         }
-        return VAD_CONTINUE;
+        return true;
     }
+    return false;
+}
 
+vad_result_t vad_update(vad_t *v, uint32_t energy)
+{
+    if (calibrate(v, energy)) return VAD_CONTINUE;
     if (!v->voiced) {
         v->streak = energy >= v->threshold ? v->streak + 1 : 0;
         if (v->streak >= MIN_WORD_FRAMES) {
@@ -43,4 +48,17 @@ vad_result_t vad_update(vad_t *v, uint32_t energy)
         return v->voiced >= MIN_WORD_FRAMES ? VAD_SEND : VAD_NO_SPEECH;
     }
     return VAD_CONTINUE;
+}
+
+bool vad_bridge_watchdog(vad_t *v, uint32_t energy)
+{
+    enum { BRIDGE_SILENT_FRAMES = 800, BRIDGE_LIMIT_FRAMES = 6000 };
+    if (calibrate(v, energy)) return false;
+    if (energy >= v->threshold) {
+        if (++v->streak >= MIN_WORD_FRAMES) v->silence = 0;
+    } else {
+        v->streak = 0;
+        ++v->silence;
+    }
+    return v->silence >= BRIDGE_SILENT_FRAMES || v->frames >= BRIDGE_LIMIT_FRAMES;
 }

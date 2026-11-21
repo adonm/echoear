@@ -19,19 +19,21 @@ const idleSleep = 120 * time.Second
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
 type wsCaps struct {
-	Battery  *bool `json:"battery,omitempty"`
-	HeadPads *bool `json:"head_pads,omitempty"`
-	Call     *bool `json:"call,omitempty"`
-	CallPCM  *bool `json:"call_pcm,omitempty"`
-	Drag     *bool `json:"drag,omitempty"`
+	BridgeEndpoint *bool `json:"bridge_endpoint,omitempty"`
+	Battery        *bool `json:"battery,omitempty"`
+	HeadPads       *bool `json:"head_pads,omitempty"`
+	Call           *bool `json:"call,omitempty"`
+	CallPCM        *bool `json:"call_pcm,omitempty"`
+	Drag           *bool `json:"drag,omitempty"`
 }
 
 type deviceCaps struct {
-	Battery  bool `json:"battery"`
-	HeadPads bool `json:"head_pads"`
-	Call     bool `json:"call"`
-	CallPCM  bool `json:"call_pcm,omitempty"`
-	Drag     bool `json:"drag"`
+	BridgeEndpoint bool `json:"bridge_endpoint,omitempty"`
+	Battery        bool `json:"battery"`
+	HeadPads       bool `json:"head_pads"`
+	Call           bool `json:"call"`
+	CallPCM        bool `json:"call_pcm,omitempty"`
+	Drag           bool `json:"drag"`
 }
 
 func helloCaps(ev wsEvent, board string) deviceCaps {
@@ -43,11 +45,12 @@ func helloCaps(ev wsEvent, board string) deviceCaps {
 	}
 	vocat := ev.Role == "device" && board == "esp-vocat"
 	return deviceCaps{
-		Battery:  value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
-		HeadPads: value(ev.Caps.HeadPads, vocat),
-		Call:     value(ev.Caps.Call, false),
-		CallPCM:  value(ev.Caps.Call, false) && value(ev.Caps.CallPCM, false),
-		Drag:     value(ev.Caps.Drag, true),
+		BridgeEndpoint: value(ev.Caps.BridgeEndpoint, false),
+		Battery:        value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
+		HeadPads:       value(ev.Caps.HeadPads, vocat),
+		Call:           value(ev.Caps.Call, false),
+		CallPCM:        value(ev.Caps.Call, false) && value(ev.Caps.CallPCM, false),
+		Drag:           value(ev.Caps.Drag, true),
 	}
 }
 

@@ -199,7 +199,7 @@ void audio_tone(audio_tone_t tone, bool (*stop_requested)(const void *), const v
     }
 }
 
-esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t sink, void *ctx)
+esp_err_t audio_record_stream(bool bridge_endpoint, bool (*stop_requested)(void), audio_capture_sink_t sink, void *ctx)
 {
     _Static_assert(AUDIO_RECORD_CHUNK_SAMPLES % FRAMES == 0, "Chunk must contain whole VAD frames");
     int16_t mono[FRAMES];
@@ -216,7 +216,8 @@ esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t
             recording[pending++] = sample;
             sum += sample * sample;
         }
-        vad_result_t result = vad_update(&vad, sum / FRAMES);
+        vad_result_t result = bridge_endpoint ? (vad_bridge_watchdog(&vad, sum / FRAMES) ? VAD_SEND : VAD_CONTINUE)
+                                              : vad_update(&vad, sum / FRAMES);
         if (result == VAD_NO_SPEECH && !stop_requested()) {
             return ESP_ERR_NOT_FOUND;
         }

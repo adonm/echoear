@@ -6,7 +6,7 @@ enum { MEDIA_TARGET_CAP = 64 };
 
 esp_err_t media_init(bool audio_ready);
 bool media_audio_ready(void);
-bool media_record_start(const char *target);
+bool media_record_start(const char *target, bool bridge_endpoint);
 void media_record_stop(bool cancelled);
 bool media_is_recording(void);
 bool media_tts_start(uint32_t audio_id);
