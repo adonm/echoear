@@ -11,7 +11,7 @@ func TestMCPCompanionSprite(t *testing.T) {
 	const id = "echoear-pixel-test"
 	board := testConnectWS(t, base, "unit", false)
 	board.helloV2(t, id, "")
-	spec := object{"rows": defaultStarterCatSprite.Rows, "mirror": true,
+	spec := object{"rows": defaultStarterCatSprite.Rows,
 		"palette": object{"p": "#DC9944", "H": "#FFFFFF", "q": "#28756D", "f": "#E8CFBD"}}
 	patch := func(cat object, fail bool) object {
 		return toolTest(t, base, "patch", object{"device_id": id, "cat": cat}, fail)
@@ -57,6 +57,10 @@ func TestMCPCompanionSprite(t *testing.T) {
 	}
 	patch(object{"sprite": spec, "face_svg": "<svg/>"}, true)
 	patch(object{"op": "reset_blank", "sprite": spec}, true)
+	rejected := patch(object{"sprite": object{"rows": []string{"kk", "k."}, "mirror": true}}, true)
+	if got := str(rejected["error"]); got != "cat.sprite.mirror: unknown argument" {
+		t.Fatalf("expected strict MCP rejection; got %q", got)
+	}
 	if got := str(stateMe(t, base, id)["cat"].(object)["face_svg"]); got != raw {
 		t.Fatal("invalid patch changed the persisted face")
 	}
@@ -110,6 +114,7 @@ func TestMCPDeclarativeScreen(t *testing.T) {
 		`{"body":[],"actions":[{"id":"echoear-exit","label":"Bad"}]}`,
 		`{"body":[{"type":"sprite","rows":["ww","ww"],"id":"a"}],"actions":[{"id":"a","label":"Dup"}]}`,
 		`{"body":[{"type":"sprite","rows":["ww","ww"],"palette":{"bad":"#112233"}}]}`,
+		`{"body":[{"type":"sprite","rows":["ww","wk"],"mirror":true}]}`,
 	} {
 		fields, err := decodeObject([]byte(bad))
 		if err != nil {
@@ -126,8 +131,10 @@ func TestJSDeclarativeScreen(t *testing.T) {
 		if (ui.palette.p !== "#F5AD7E") throw Error("changed palette");
 		const sprite = ui.sprite(["XX",".X"], {x:3,y:6,scale:3,palette:{X:"#010203"}});
 		if (!sprite.includes('width="6"') || !sprite.includes('fill="#010203"')) throw Error("sprite");
-		const mirror = ui.sprite(["k.","pk"], {scale:3,mirror:true,id:"test"});
-		if (!mirror.includes('data-hit="0,0,12,6"') || !mirror.includes('x="9"')) throw Error("mirror");
+		const fullRows = ui.sprite(["k...","p..k"], {scale:3,id:"test"});
+		if (!fullRows.includes('data-hit="0,0,12,6"') || !fullRows.includes('x="9"')) throw Error("sprite width");
+		try { ui.sprite(["kk","k."], {mirror:true}); throw Error("accepted mirror"); }
+		catch (e) { if (!e.message.includes("sprite options.mirror: unknown argument")) throw e; }
 		for (const id of ["lark-exit","echoear-exit"]) {
 			try { ui.choices({choices:[{id,label:"no"}]}); throw Error("accepted reserved id"); }
 			catch (e) { if (!e.message.includes("reserved")) throw e; }

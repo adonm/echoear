@@ -409,6 +409,31 @@ func TestBuildProposesStorybookCompanion(t *testing.T) {
 	}
 }
 
+func TestBuildProposesBespokePortrait(t *testing.T) {
+	stub := &buildStub{allow: make(chan struct{}), reply: `{"portrait":{"prompt":"a hedgehog in a space suit","style":"pixel"}}`}
+	b, _ := stubBuildBridge(t, stub, true, nil)
+	sheet := portraitFixture(t)
+	b.portraits = &portraitStore{dir: t.TempDir(), generate: func(_ context.Context, prompt string, _ []byte) ([]byte, error) {
+		if !strings.Contains(prompt, "indie-game pixel art") || !strings.Contains(prompt, "a hedgehog in a space suit") {
+			t.Error("builder lost the portrait art direction")
+		}
+		return sheet, nil
+	}}
+	who := peer{DeviceID: "echoear-portrait-build", Character: "Bean"}
+	job, err := b.builders.enqueue(t.Context(), who, buildIntent{kind: "face"}, "Make your face a hedgehog in a space suit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectValue(t, stub.prompted, job)
+	close(stub.allow)
+	expectValue(t, stub.deleted, job)
+	waitBuildState(t, b, job, "ready")
+	cat := b.catFor(who)
+	if !cat.Configured || cat.Name != "Bean" || !b.portraits.has(activePortrait(cat.FaceSVG)) {
+		t.Fatal("did not apply the proposed portrait")
+	}
+}
+
 func TestBuildRejectsNewerAppAndFace(t *testing.T) {
 	for _, kind := range []string{"edit", "face", "new"} {
 		t.Run(kind, func(t *testing.T) {

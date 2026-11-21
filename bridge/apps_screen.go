@@ -14,7 +14,7 @@ var (
 	uiColorSchema = object{"type": "string", "pattern": `^(?:#[0-9a-fA-F]{6}|[kwpmlsyrgabndco])$`}
 	uiIDSchema    = object{"type": "string", "pattern": svgID.String()}
 	uiVariant     = object{"type": "string", "enum": []string{"default", "primary", "secondary", "outline", "ghost", "success", "danger"}}
-	uiSpriteOpts  = closedObject(object{"x": uiInt(-1024, 1024), "y": uiInt(-1024, 1024), "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema, "mirror": object{"type": "boolean"}})
+	uiSpriteOpts  = closedObject(object{"x": uiInt(-1024, 1024), "y": uiInt(-1024, 1024), "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema})
 )
 
 var declarativeScreenSchema = func() object {
@@ -26,7 +26,7 @@ var declarativeScreenSchema = func() object {
 		"title": uiString(96), "badge": uiString(64), "bg": uiColorSchema, "accent": uiColorSchema,
 		"actions": uiArray(action, 0, 3),
 		"body": uiArray(object{"oneOf": []object{
-			closedObject(object{"type": tag("sprite"), "rows": pixelRowsSchema, "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema, "mirror": flags}, "type", "rows"),
+			closedObject(object{"type": tag("sprite"), "rows": pixelRowsSchema, "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema}, "type", "rows"),
 			closedObject(object{"type": tag("sticker"), "name": stickerNameSchema, "size": uiInt(12, 240), "palette": storybookPaletteSchema, "id": uiIDSchema}, "type", "name"),
 			closedObject(object{"type": tag("text"), "text": uiString(512), "size": uiInt(10, 40), "bold": flags, "muted": flags}, "type", "text"),
 			closedObject(object{"type": tag("meter"), "label": uiString(80), "value": object{"type": "number"},
@@ -40,7 +40,6 @@ type uiSpriteOptions struct {
 	X, Y, Scale int
 	Palette     map[string]string
 	ID          string
-	Mirror      bool
 }
 
 type declarativeScreen struct {
@@ -52,7 +51,7 @@ type declarativeScreen struct {
 type screenBlock struct {
 	Type, ID, Text, Label, Color, Name string
 	Size, Scale, Cols                  int
-	Bold, Muted, Mirror                bool
+	Bold, Muted                        bool
 	Value, Max                         float64
 	Rows                               []string
 	Palette                            any
@@ -190,9 +189,6 @@ func (s declarativeScreen) svg() (string, error) {
 			case "sprite":
 				scale := b.Scale
 				cols := len(b.Rows[0])
-				if b.Mirror {
-					cols *= 2
-				}
 				if scale == 0 {
 					scale = max(1, 96/max(len(b.Rows), cols))
 				}
@@ -209,7 +205,7 @@ func (s declarativeScreen) svg() (string, error) {
 						overrides[key] = str(value)
 					}
 				}
-				art, err := compileSprite(b.Rows, overrides, x, 0, scale, b.Mirror)
+				art, err := compileSprite(b.Rows, overrides, x, 0, scale)
 				if err != nil {
 					return "", err
 				}

@@ -8,6 +8,7 @@ import (
 	imagecolor "image/color"
 	"image/draw"
 	"image/png"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,6 +78,88 @@ func TestPortraitAlignsTranslatedSilhouettes(t *testing.T) {
 	}
 	if _, err := slicePortrait(image.NewRGBA(image.Rect(0, 0, 1024, 1024)), p); err == nil {
 		t.Fatal("accepted an empty sheet")
+	}
+}
+
+func TestPixelPortraitGridAndAlignment(t *testing.T) {
+	fixture := portraitFixture(t)
+	store := &portraitStore{dir: t.TempDir(), generate: func(_ context.Context, prompt string, _ []byte) ([]byte, error) {
+		for _, text := range []string{"indie-game pixel art", "64×64", "hue-shifted colored outlines", "no text, labels, borders or gridlines", "solid flat #FFF2E7"} {
+			if !strings.Contains(prompt, text) {
+				t.Errorf("missing %q in the pixel prompt", text)
+			}
+		}
+		return fixture, nil
+	}}
+	const side, grid = 360, 64
+	pending, err := store.prepare(t.Context(), catState{}, object{"prompt": "a hedgehog", "bg": "#FFF2E7", "style": "pixel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bg, _ := directPaint(pending.bg)
+	var idle []byte
+	var bounds image.Rectangle
+	for i, pose := range portraitPoses {
+		data, err := store.read(pending.id, pose)
+		if err != nil {
+			t.Fatal(err)
+		}
+		im, err := png.Decode(bytes.NewReader(data))
+		if err != nil || im.Bounds().Size() != image.Pt(side, side) {
+			t.Fatalf("%s: expected 360×360 PNG: %v", pose, err)
+		}
+		// Nearest-neighbor picks the source block at each destination pixel center.
+		cell := func(x int) int { return (2*x + 1) * grid / (2 * side) }
+		cells := [grid][grid]imagecolor.RGBA{}
+		rgba := image.NewRGBA(im.Bounds())
+		draw.Draw(rgba, rgba.Bounds(), im, image.Point{}, draw.Src)
+		n, sx, sy := 0, 0, 0
+		for y := range side {
+			for x := range side {
+				k := &cells[cell(y)][cell(x)]
+				c := rgba.RGBAAt(x, y)
+				if k.A != 0 && *k != c {
+					t.Fatalf("%s: color changed inside a pixel block at %d,%d", pose, x, y)
+				}
+				*k = c
+				if portraitDiff(c, bg) > 25*25 {
+					n, sx, sy = n+1, sx+x, sy+y
+				}
+			}
+		}
+		b := portraitBounds(rgba, rgba.Bounds(), bg)
+		if i == 0 {
+			bounds, idle = b, rgba.Pix
+			scene, err := prepareScene(pending.svg(), false)
+			if err != nil || !strings.Contains(scene.svg, `image-rendering="pixelated"`) {
+				t.Fatalf("missing pixelated SVG hint: %v", err)
+			}
+			box, err := scene.raster(320, 240, 40, 0, 240, bg, func(string) (image.Image, error) { return rgba, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			colors := map[imagecolor.RGBA]bool{}
+			for _, row := range cells {
+				for _, c := range row {
+					colors[c] = true
+				}
+			}
+			for y := range 240 {
+				for x := 40; x < 280; x++ {
+					if !colors[box.RGBAAt(x, y)] {
+						t.Fatalf("native renderer smoothed pixel at %d,%d", x, y)
+					}
+				}
+			}
+		} else if b != bounds || bytes.Equal(idle, rgba.Pix) {
+			t.Fatalf("%s: silhouette shifted or expression lost", pose)
+		}
+		if n == 0 || math.Abs(float64(sx)/float64(n)-179.5) > 1 || math.Abs(float64(sy)/float64(n)-179.5) > 1 {
+			t.Fatalf("%s: silhouette centroid drifted", pose)
+		}
+	}
+	if portraitPrompt(portraitSpec{}) != portraitPrompt(portraitSpec{Style: "storybook"}) {
+		t.Fatal("explicit Storybook style altered the default prompt")
 	}
 }
 
@@ -197,6 +280,12 @@ func TestPortraitPatchScopeAndNativeFrames(t *testing.T) {
 	}}
 	patch(object{"prompt": " ", "edit": true}, true)
 	patch(object{"prompt": "invalid", "typo": true}, true)
+	badStyle := toolTest(t, base, "patch", object{"device_id": id, "cat": object{
+		"portrait": object{"prompt": "an owl", "style": "vector"},
+	}}, true)
+	if got := str(badStyle["error"]); got != "cat.portrait.style: expected one of [storybook pixel]" {
+		t.Fatalf("invalid MCP style: %q", got)
+	}
 	c := patch(object{"prompt": "draw an owl", "bg": "#eaf3fc"}, false)
 	raw := str(c["face_svg"])
 	asset := activePortrait(raw)

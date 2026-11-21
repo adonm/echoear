@@ -248,7 +248,7 @@ func (n *svgNode) asGroup() *svgNode {
 
 var (
 	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text image")
-	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering aria-label data-id data-hit data-pose data-part data-pixel-runs data-sticker")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering image-rendering aria-label data-id data-hit data-pose data-part data-pixel-runs data-sticker")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
 	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
@@ -356,6 +356,8 @@ func cleanSVGAttr(k, v string) (string, bool) {
 		return v, true
 	case "shape-rendering":
 		return v, v == "crispEdges"
+	case "image-rendering":
+		return v, v == "pixelated"
 	case "data-pixel-runs":
 		return v, v == "1"
 	case "fill", "stroke", "stop-color":
@@ -1139,7 +1141,11 @@ func rasterLayers(s preparedScene, dst *image.RGBA, target rasterx.Matrix2D, pho
 				if opacity < 1 {
 					opts = &xdraw.Options{SrcMask: image.NewUniform(imagecolor.Alpha{A: uint8(255 * opacity)})}
 				}
-				xdraw.BiLinear.Transform(dst, f64.Aff3{m.A, m.C, m.E, m.B, m.D, m.F}, src, b, draw.Over, opts)
+				var interpolate xdraw.Interpolator = xdraw.BiLinear
+				if n.attr["image-rendering"] == "pixelated" {
+					interpolate = xdraw.NearestNeighbor
+				}
+				interpolate.Transform(dst, f64.Aff3{m.A, m.C, m.E, m.B, m.D, m.F}, src, b, draw.Over, opts)
 			}
 		default:
 			if (n.tag == "rect" || len(n.pixelRuns) > 0) && simple && m.B == 0 && m.C == 0 && len(n.children) == 0 && directStyle(n) {

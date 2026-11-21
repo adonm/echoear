@@ -401,7 +401,8 @@ and grids of `{id, label, sprite?, sub?, active?, variant?}` items. It wraps
 text and fits controls above Home on both displays. For interactive behavior,
 return `ui.screen(spec)` from JS `render` and handle IDs in `onTap`.
 `ui.sticker(name, {x, y, size, palette, id})` returns a Storybook SVG fragment.
-`ui.sprite(rows, {x, y, scale, palette, mirror})` still returns a crisp pixel fragment.
+`ui.sprite(rows, {x, y, scale, palette, id})` renders full rows as a crisp pixel
+fragment. The `screen` sprite block also takes full rows.
 `ui.palette` exposes the read-only palette (`.` is transparent;
 `k w p m l s y r g a b n d c o` are colors).
 Boards blend warm dawn and dusk and a cooler night using the device's Parent
@@ -435,17 +436,19 @@ Shift instantly with `patch({device_id, cat: {companion: {species: "owl",
 palette: "lavender", accessory: "scarf"}, save_profile: false}})`. Ten species
 share eight colorways: peach, mint, lavender, sage, berry, amber, sky and
 midnight. Set `eyes`, `markings` or a palette object with `base` and hex tints
-to customize. Vector faces support `face_edits`; `face_svg` and pixel `sprite`
-patches still work. Existing saved artwork is unchanged.
+to customize. Vector faces support `face_edits` and `face_svg`. Use raw `sprite`
+only for explicitly requested hand-authored pixel art, with full rows up to
+64×64. Existing saved artwork is unchanged.
 
-For bespoke art use `cat.portrait: {prompt, bg?, edit?}` instead. The dedicated
+For bespoke creatures, costumes or styles use `cat.portrait: {prompt, bg?, edit?, style?}`. The dedicated
 OpenCode service sends a billed request to `opencode/gemini-nano-banana-2.1`
 using its OpenCode Console connection. OAuth needs no separate key, and this
 request creates no OpenCode session. If `OPENCODE_API_KEY` is set in the bridge
 environment, the bridge calls Console directly instead. `edit:true` sends the
 current sheet back as reference.
-The bridge aligns four poses from one sheet and uses them for the six face
-states. Only SVG references go into the database; private PNGs under the
+The bridge aligns four poses from a 2×2 sheet and uses them for the six face
+states. `style` defaults to `"storybook"`; `"pixel"` snaps each pose to a
+64×64 grid and upscales without smoothing. Only SVG references go into the database; private PNGs under the
 local `portraits/` directory do not sync to Turso. For local, no-cost art, use
 the instant vector companion.
 The canonical `messages` table drives browser history. The v2 migration

@@ -28,19 +28,28 @@ const portraitModelID = "gemini-nano-banana-2.1"
 const portraitEndpoint = "https://opencode.ai/inference/google/v1beta/models/" + portraitModelID + ":generateContent"
 const openCodeImagePath = "/api/experimental/generate/image"
 const portraitSheetSide = 1024
+const portraitPixelSide = 64
+const portraitPixelStyle = "pixel"
+const portraitStorybookStyle = "storybook"
 const portraitMaxBytes = 8 << 20
 const portraitTimeout = 65 * time.Second
 
 var portraitPoses = [...]string{"idle", "blink", "talk", "think"}
 var portraitIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
-var portraitSchema = closedObject(object{"prompt": uiString(600), "bg": hexTintSchema, "edit": object{"type": "boolean"}}, "prompt")
+var portraitSchema = closedObject(object{
+	"prompt": uiString(600), "bg": hexTintSchema, "edit": object{"type": "boolean"},
+	"style": object{"type": "string", "enum": []string{portraitStorybookStyle, portraitPixelStyle}, "default": portraitStorybookStyle},
+}, "prompt")
 
 type portraitSpec struct {
-	Prompt, BG string
-	Edit       bool
+	Prompt, BG, Style string
+	Edit              bool
 }
 
-type pendingPortrait struct{ id, bg, base string }
+type pendingPortrait struct {
+	id, bg, base string
+	pixel        bool
+}
 
 func parsePortraitRef(raw string) (id, pose string, ok bool) {
 	ref, found := strings.CutPrefix(raw, "portrait:")
@@ -63,10 +72,16 @@ type portraitStore struct {
 }
 
 func portraitPrompt(spec portraitSpec) string {
-	prompt := `Create one square 1024×1024 Lark Storybook Illustration expression sheet, exactly four equal quadrants, no text, labels, borders or gridlines.
+	style := "Lark Storybook Illustration"
+	art := `Cozy hand-painted gouache meets soft storybook vector: crisp hue-shifted cocoa, pine, plum or navy outlines (not black), slightly warm top highlights, softly colored base shadows, simple matte pastel shapes, glossy eyes with cream catchlights.`
+	if spec.Style == portraitPixelStyle {
+		style = "indie-game pixel art"
+		art = `Use crisp 64×64-style pixel clusters with hue-shifted colored outlines, warm highlights and stepped shadows for a cozy Stardew Valley or GBA look. Keep a consistent square pixel grid at the same scale in all four poses, with no antialiasing or dithering.`
+	}
+	prompt := `Create one square 1024×1024 ` + style + ` expression sheet, exactly four equal quadrants, no text, labels, borders or gridlines.
 Top-left idle: gentle closed-mouth smile. Top-right blink: both eyes closed, same smile. Bottom-left talk: open mouth, friendly eyes. Bottom-right think: eyes glance up, thoughtful mouth.
 Draw the very same front-facing character, head and rounded shoulders, at the exact same scale, silhouette, position and line weight in every quadrant. Only the expression changes. Keep each silhouette well within its quadrant; maintain generous circular margin with nothing touching an edge.
-Cozy hand-painted gouache meets soft storybook vector: crisp hue-shifted cocoa, pine, plum or navy outlines (not black), slightly warm top highlights, softly colored base shadows, simple matte pastel shapes, glossy eyes with cream catchlights. No extra props except requested accessories, no scene, no cast shadow, no texture or gradient on the background. Use the same solid flat ` + spec.BG + ` background across the entire sheet.`
+` + art + ` No extra props except requested accessories, no scene, no cast shadow, no texture or gradient on the background. Use the same solid flat ` + spec.BG + ` background across the entire sheet.`
 	if spec.Edit {
 		prompt += "\nUse the attached sheet as a reference. Keep character identity, silhouette, colors, expression layout and placement unchanged except for the requested change."
 	}
@@ -356,6 +371,13 @@ func (p *portraitStore) create(ctx context.Context, spec portraitSpec, currentID
 	if err != nil {
 		return "", problem(502, err.Error())
 	}
+	if spec.Style == portraitPixelStyle {
+		pixels := image.NewRGBA(image.Rect(0, 0, portraitPixelSide, portraitPixelSide))
+		for _, pose := range poses {
+			xdraw.NearestNeighbor.Scale(pixels, pixels.Bounds(), pose, pose.Bounds(), draw.Src, nil)
+			xdraw.NearestNeighbor.Scale(pose, pose.Bounds(), pixels, pixels.Bounds(), draw.Src, nil)
+		}
+	}
 	if err := os.MkdirAll(p.dir, 0o700); err != nil {
 		return "", problem(502, "Cannot create portrait storage")
 	}
@@ -426,13 +448,6 @@ func (b *bridge) preparePortrait(ctx context.Context, who peer, args object, raw
 			return nil, fieldError("cat.portrait", "cannot combine with %s", field)
 		}
 	}
-	spec, err := readUIValue[portraitSpec](raw, portraitSchema, "cat.portrait")
-	if err != nil {
-		return nil, err
-	}
-	if spec.Prompt = strings.TrimSpace(spec.Prompt); spec.Prompt == "" {
-		return nil, fieldError("cat.portrait.prompt", "describe the character or edit")
-	}
 	current, err := b.readActiveCat(ctx, b.db, who)
 	if err != nil {
 		return nil, problem(502, "Cannot read current companion")
@@ -440,15 +455,26 @@ func (b *bridge) preparePortrait(ctx context.Context, who peer, args object, raw
 	if _, _, err := updateCat(current, args, b.voices); err != nil {
 		return nil, err
 	}
+	return b.portraits.prepare(ctx, current, raw)
+}
+
+func (p *portraitStore) prepare(ctx context.Context, current catState, raw any) (*pendingPortrait, error) {
+	spec, err := readUIValue[portraitSpec](raw, portraitSchema, "cat.portrait")
+	if err != nil {
+		return nil, err
+	}
+	if spec.Prompt = strings.TrimSpace(spec.Prompt); spec.Prompt == "" {
+		return nil, fieldError("cat.portrait.prompt", "describe the character or edit")
+	}
 	spec.BG = colorStringOr(spec.BG, storybookPalettes["peach"].bg)
 	if spec.Edit && str(raw.(object)["bg"]) == "" {
 		spec.BG = current.FaceBG
 	}
-	id, err := b.portraits.create(ctx, spec, activePortrait(current.FaceSVG))
+	id, err := p.create(ctx, spec, activePortrait(current.FaceSVG))
 	if err != nil {
 		return nil, err
 	}
-	return &pendingPortrait{id, spec.BG, current.FaceSVG}, nil
+	return &pendingPortrait{id: id, bg: spec.BG, base: current.FaceSVG, pixel: spec.Style == portraitPixelStyle}, nil
 }
 
 func colorStringOr(s, fallback string) string {
@@ -458,12 +484,16 @@ func colorStringOr(s, fallback string) string {
 	return fallback
 }
 
-func portraitSVG(id, bg string) string {
+func (p *pendingPortrait) svg() string {
 	var out strings.Builder
-	out.WriteString(svgStart + `<rect width="360" height="360" fill="` + bg + `"/>`)
+	out.WriteString(svgStart + `<rect width="360" height="360" fill="` + p.bg + `"/>`)
+	rendering := ""
+	if p.pixel {
+		rendering = ` image-rendering="pixelated"`
+	}
 	for i, pose := range []string{"idle", "blink", "talk", "think", "listen", "sleep"} {
 		bitmap := [...]string{"idle", "blink", "talk", "think", "idle", "blink"}[i]
-		fmt.Fprintf(&out, `<g data-pose="%s"><image href="portrait:%s:%s" width="360" height="360"/></g>`, pose, id, bitmap)
+		fmt.Fprintf(&out, `<g data-pose="%s"><image href="portrait:%s:%s" width="360" height="360"%s/></g>`, pose, p.id, bitmap, rendering)
 	}
 	out.WriteString(`</svg>`)
 	return out.String()

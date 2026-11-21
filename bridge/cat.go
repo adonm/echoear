@@ -373,7 +373,7 @@ func (b *bridge) changeCatPrepared(ctx context.Context, who peer, theme, op stri
 				return catState{}, false, err
 			}
 			next.FaceBG = portrait.bg
-			next.FaceSVG = portraitSVG(portrait.id, portrait.bg)
+			next.FaceSVG = portrait.svg()
 		}
 		// An omitted flag retains legacy auto-save; an explicit false is a
 		// temporary shift that must not overwrite a named favorite.

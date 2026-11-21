@@ -30,7 +30,6 @@ type companionSprite struct {
 	Think    map[string]string `json:"think,omitempty"`
 	Sleep    map[string]string `json:"sleep,omitempty"`
 	Palette  map[string]string `json:"palette,omitempty"`
-	Mirror   bool              `json:"mirror,omitempty"`
 	partTags bool              // Only the built-in cat knows which pixels are editable parts.
 	listen   map[string]string
 	bg       string
@@ -68,20 +67,7 @@ func spriteGrid(rows []string, p map[string]string) (int, error) {
 	return w, nil
 }
 
-func mirrorSpriteRows(rows []string) []string {
-	full := make([]string, len(rows))
-	for i, row := range rows {
-		flip := []byte(row)
-		slices.Reverse(flip)
-		full[i] = row + string(flip)
-	}
-	return full
-}
-
-func compileSprite(rows []string, palette map[string]string, x, y, scale int, mirror ...bool) (string, error) {
-	if len(mirror) > 0 && mirror[0] {
-		rows = mirrorSpriteRows(rows)
-	}
+func compileSprite(rows []string, palette map[string]string, x, y, scale int) (string, error) {
 	p, err := spriteColors(palette)
 	if err != nil {
 		return "", err
@@ -227,9 +213,6 @@ func compileCompanionSprite(spec companionSprite) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if spec.Mirror {
-		spec.Rows = mirrorSpriteRows(spec.Rows)
-	}
 	w, err := spriteGrid(spec.Rows, p)
 	if err != nil {
 		return "", err
@@ -240,17 +223,12 @@ func compileCompanionSprite(spec companionSprite) (string, error) {
 		rows := slices.Clone(spec.Rows)
 		if i != 0 {
 			if len(edits) == 0 && !spec.partTags {
-				rows = autoSpritePose(rows, pixelPoses[i], p, spec.Mirror)
+				rows = autoSpritePose(rows, pixelPoses[i], p)
 			}
 			for key, row := range edits {
 				j, err := strconv.Atoi(key)
 				if err != nil || j < 0 || j >= h || strconv.Itoa(j) != key {
 					return "", fmt.Errorf("sprite %s: invalid row index %q", pixelPoses[i], key)
-				}
-				if spec.Mirror {
-					flip := []byte(row)
-					slices.Reverse(flip)
-					row += string(flip)
 				}
 				rows[j] = row
 			}
@@ -380,21 +358,15 @@ func compileCompanionSprite(spec companionSprite) (string, error) {
 	return raw, nil
 }
 
-func autoSpritePose(rows []string, pose string, p map[string]string, mirror bool) []string {
+func autoSpritePose(rows []string, pose string, p map[string]string) []string {
 	// Prefer the existing eye and mouth region. Keep edits off the silhouette
 	// where possible; a sprite with no face still gets a small color change.
 	h, w := len(rows), len(rows[0])
 	var changed [maxSpriteSide][maxSpriteSide]bool
 	edit := func(x, y int, key byte) {
-		if mirror {
-			x = min(x, w-1-x)
-		}
 		best, col, row := 1<<30, -1, -1
 		for j, line := range rows {
 			for i := range len(line) {
-				if mirror && i >= w/2 {
-					break
-				}
 				if changed[j][i] || line[i] == '.' || p[line[i:i+1]] == p[string(key)] {
 					continue
 				}
@@ -412,23 +384,16 @@ func autoSpritePose(rows []string, pose string, p map[string]string, mirror bool
 			changed[row][col] = true
 			line := []byte(rows[row])
 			line[col] = key
-			if mirror {
-				line[w-1-col] = key
-			}
 			rows[row] = string(line)
 		}
 	}
 	switch pose {
 	case "blink":
 		edit(w/3, h/2, 'p')
-		if !mirror {
-			edit(w-1-w/3, h/2, 'p')
-		}
+		edit(w-1-w/3, h/2, 'p')
 	case "listen":
 		edit(w/3, h/2, 'w')
-		if !mirror {
-			edit(w-1-w/3, h/2, 'w')
-		}
+		edit(w-1-w/3, h/2, 'w')
 	case "think":
 		edit(w-1-w/3, h/2, 'l')
 	case "talk":
@@ -436,9 +401,7 @@ func autoSpritePose(rows []string, pose string, p map[string]string, mirror bool
 		edit(w/2, h*3/4, 'r')
 	case "sleep":
 		edit(w/3, h/2, 'p')
-		if !mirror {
-			edit(w-1-w/3, h/2, 'p')
-		}
+		edit(w-1-w/3, h/2, 'p')
 		edit(w/2, h*3/4, 'l')
 	}
 	return rows
@@ -446,61 +409,80 @@ func autoSpritePose(rows []string, pose string, p map[string]string, mirror bool
 
 var defaultStarterCatSprite = companionSprite{
 	Rows: []string{
-		"................",
-		"................",
-		"....kk..........",
-		"...kppk.........",
-		"...kowpk........",
-		"...kocwpk.......",
-		"...koccpkkkkkkkk",
-		"...koccppoppoppp",
-		"...kpccppopooopp",
-		"..kkpppppppooppp",
-		"..kpppppwwwwwwww",
-		"..kppppwwkwwwwww",
-		"..kpppwwkkkkwwww",
-		"..kppwwkkHkkkwww",
-		"..kppwwkHmskkwww",
-		"..kppwwkqqmkkwww",
-		"..kppwwkmmqkkwww",
-		"..kppwwfkkkkwwww",
-		"..kpcccwwwwwwwrr",
-		"kkbppccwwwwwwwrr",
-		".kkbppcwwwwwwwwk",
-		"..kkbppfwwwkkwwk",
-		"...kkppfwwwwkkkw",
-		"....kkppffwwwwww",
-		"......kkkkkkkkkk",
-		"................",
-		"................",
-		"................",
-		"................",
-		"................",
-		"................",
-		"................",
+		"................................",
+		"................................",
+		"....kk....................kk....",
+		"...kppk..................kppk...",
+		"...kowpk................kpwok...",
+		"...kocwpk..............kpwcok...",
+		"...koccpkkkkkkkkkkkkkkkkpccok...",
+		"...koccppoppoppppppoppoppccok...",
+		"...kpccppopoooppppooopoppccpk...",
+		"..kkpppppppooppppppoopppppppkk..",
+		"..kpppppwwwwwwwwwwwwwwwwpppppk..",
+		"..kppppwwkwwwwwwwwwwwwkwwppppk..",
+		"..kpppwwkkkkwwwwwwwwkkkkwwpppk..",
+		"..kppwwkkHkkkwwwwwwkkkHkkwwppk..",
+		"..kppwwkHmskkwwwwwwkksmHkwwppk..",
+		"..kppwwkqqmkkwwwwwwkkmqqkwwppk..",
+		"..kppwwkmmqkkwwwwwwkkqmmkwwppk..",
+		"..kppwwfkkkkwwwwwwwwkkkkfwwppk..",
+		"..kpcccwwwwwwwrrrrwwwwwwwcccpk..",
+		"kkbppccwwwwwwwrrrrwwwwwwwccppbkk",
+		".kkbppcwwwwwwwwkkwwwwwwwwcppbkk.",
+		"..kkbppfwwwkkwwkkwwkkwwwfppbkk..",
+		"...kkppfwwwwkkkwwkkkwwwwfppkk...",
+		"....kkppffwwwwwwwwwwwwffppkk....",
+		"......kkkkkkkkkkkkkkkkkkkk......",
+		"................................",
+		"................................",
+		"................................",
+		"................................",
+		"................................",
+		"................................",
+		"................................",
 	},
-	Mirror:  true,
 	Palette: map[string]string{"H": "#FFFFFF", "q": "#28756D", "f": "#E8CFBD"},
 	Blink: map[string]string{
-		"12": "..kpppwwwwwwwwww", "13": "..kppwwwwwwwwwww", "14": "..kppwwkwwwwkwww",
-		"15": "..kppwwwkkkkwwww", "16": "..kppwwffffffffw", "17": "..kppwwwwwwwwwww",
+		"12": "..kpppwwwwwwwwwwwwwwwwwwwwpppk..",
+		"13": "..kppwwwwwwwwwwwwwwwwwwwwwwppk..",
+		"14": "..kppwwkwwwwkwwwwwwkwwwwkwwppk..",
+		"15": "..kppwwwkkkkwwwwwwwwkkkkwwwppk..",
+		"16": "..kppwwffffffffwwffffffffwwppk..",
+		"17": "..kppwwwwwwwwwwwwwwwwwwwwwwppk..",
 	},
 	Talk: map[string]string{
-		"20": ".kkbppcwwwwwwkkk", "21": "..kkbppfwwwwkkkk",
-		"22": "...kkppfwwwwkrrr", "23": "....kkppffwwwkkk",
+		"20": ".kkbppcwwwwwwkkkkkkwwwwwwcppbkk.",
+		"21": "..kkbppfwwwwkkkkkkkkwwwwfppbkk..",
+		"22": "...kkppfwwwwkrrrrrrkwwwwfppkk...",
+		"23": "....kkppffwwwkkkkkkwwwffppkk....",
 	},
 	Think: map[string]string{
-		"11": "..kppppwwkkwwwww", "14": "..kppwwkkHskkwww", "15": "..kppwwkkqskkwww",
-		"20": ".kkbppcwwwwwwwww", "21": "..kkbppfwwwwwwkk", "22": "...kkppfwwwwwwww",
+		"11": "..kppppwwkkwwwwwwwwwwkkwwppppk..",
+		"14": "..kppwwkkHskkwwwwwwkksHkkwwppk..",
+		"15": "..kppwwkkqskkwwwwwwkksqkkwwppk..",
+		"20": ".kkbppcwwwwwwwwwwwwwwwwwwcppbkk.",
+		"21": "..kkbppfwwwwwwkkkkwwwwwwfppbkk..",
+		"22": "...kkppfwwwwwwwwwwwwwwwwfppkk...",
 	},
 	Sleep: map[string]string{
-		"12": "..kpppwwwwwwwwww", "13": "..kppwwwwwwwwwww", "14": "..kppwwwwwwwwwww",
-		"15": "..kppwwkwwwwkwww", "16": "..kppwwwkkkkwwww", "17": "..kppwwwffffwwww",
-		"20": ".kkbppcwwwwwwwww", "21": "..kkbppfwwwwwwkk", "22": "...kkppfwwwwwkrr", "23": "....kkppffwwwwkk",
+		"12": "..kpppwwwwwwwwwwwwwwwwwwwwpppk..",
+		"13": "..kppwwwwwwwwwwwwwwwwwwwwwwppk..",
+		"14": "..kppwwwwwwwwwwwwwwwwwwwwwwppk..",
+		"15": "..kppwwkwwwwkwwwwwwkwwwwkwwppk..",
+		"16": "..kppwwwkkkkwwwwwwwwkkkkwwwppk..",
+		"17": "..kppwwwffffwwwwwwwwffffwwwppk..",
+		"20": ".kkbppcwwwwwwwwwwwwwwwwwwcppbkk.",
+		"21": "..kkbppfwwwwwwkkkkwwwwwwfppbkk..",
+		"22": "...kkppfwwwwwkrrrrkwwwwwfppkk...",
+		"23": "....kkppffwwwwkkkkwwwwffppkk....",
 	},
 	listen: map[string]string{
-		"11": "..kppppwkkkwwwww", "12": "..kpppwwkHkkwwww",
-		"20": ".kkbppcwwwwwwwww", "21": "..kkbppfwwwwwwkk", "22": "...kkppfwwwwwwkk",
+		"11": "..kppppwkkkwwwwwwwwwwkkkwppppk..",
+		"12": "..kpppwwkHkkwwwwwwwwkkHkwwpppk..",
+		"20": ".kkbppcwwwwwwwwwwwwwwwwwwcppbkk.",
+		"21": "..kkbppfwwwwwwkkkkwwwwwwfppbkk..",
+		"22": "...kkppfwwwwwwkkkkwwwwwwfppkk...",
 	},
 	partTags: true,
 }
