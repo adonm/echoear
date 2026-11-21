@@ -5,13 +5,14 @@
 enum { MEDIA_TARGET_CAP = 64 };
 
 esp_err_t media_init(bool audio_ready);
+bool media_audio_ready(void);
 bool media_record_start(const char *target);
-void media_record_stop(void);
+void media_record_stop(bool cancelled);
 bool media_is_recording(void);
 bool media_tts_start(uint32_t audio_id);
 void media_tts_end(void);
 bool media_tts_pcm(const void *data, size_t bytes);
-bool media_call_start(uint32_t id, bool muted);
+bool media_call_start(uint32_t id, bool muted, uint8_t mic_prefix);
 void media_call_end(uint32_t id);
 void media_call_set_mute(uint32_t id, bool muted);
 bool media_call_active(void);

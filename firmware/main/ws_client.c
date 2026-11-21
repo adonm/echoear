@@ -27,7 +27,7 @@
 #include "telemetry.h"
 #include "wifi.h"
 
-enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, STATUS_MS = 5000, INPUT_CAP = 24,
+enum { TEXT_CAP = 32 * 1024, RECORD_PCM = 1, SPEAKER_PCM = 2, CALL_PCM = 4, STATUS_MS = 5000, INPUT_CAP = 24,
        CALL_BYTES = AUDIO_CALL_SAMPLES * sizeof(int16_t), CALL_SEND_MS = 90 };
 _Static_assert(FRAME_PACKET_CAP >= FRAME_HEADER_SIZE + FRAME_PIXELS * sizeof(uint16_t) &&
                (size_t)FRAME_PACKET_CAP >= TEXT_CAP,
@@ -196,11 +196,11 @@ bool ws_client_rec_pcm(uint32_t session, const int16_t *pcm, size_t samples)
     return send_ready(session, packet, bytes + 1, true);
 }
 
-void ws_client_call_pcm(uint32_t session, uint32_t id, const int16_t *pcm)
+void ws_client_call_pcm(uint32_t session, uint32_t id, const int16_t *pcm, uint8_t prefix)
 {
     if (!call_tx || !media_call_sending(id)) return;
     // The media task never takes the socket lock. New audio replaces unsent audio.
-    call_packet_t packet = { .session = session, .id = id, .queued = xTaskGetTickCount(), .wire = { RECORD_PCM } };
+    call_packet_t packet = { .session = session, .id = id, .queued = xTaskGetTickCount(), .wire = { prefix } };
     memcpy(packet.wire + 1, pcm, CALL_BYTES);
     xQueueOverwrite(call_tx, &packet);
     xTaskNotifyGive(service);
@@ -293,13 +293,14 @@ static bool send_telemetry(uint32_t session, bool hello)
     if (hello) {
         char ip[WIFI_IP_LEN];
         wifi_get_ip(ip);
+        const char *call = BOARD_HAS_CALL && media_audio_ready() ? "true" : "false";
         int len = snprintf(extra, sizeof(extra), ",\"role\":\"device\",\"device_id\":\"%s\",\"character\":\"%s\","
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
                            "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
-                           "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"drag\":%s}",
+                           "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s}",
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
                            BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
-                           BOARD_HAS_CALL ? "true" : "false", BOARD_HAS_DRAG ? "true" : "false");
+                            call, call, BOARD_HAS_DRAG ? "true" : "false");
         if (len < 0 || (size_t)len >= sizeof(extra)) return false;
     }
     char text[768];
@@ -335,7 +336,7 @@ static void dispatch(const cJSON *msg)
     if (!strcmp(op, "rec")) {
         const char *action = field(msg, "action"), *target = field(msg, "target");
         if (!strcmp(action, "stop")) {
-            media_record_stop();
+            media_record_stop(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "cancelled")));
         } else if (!strcmp(action, "start") && strlen(target) < MEDIA_TARGET_CAP && !media_record_start(target)) {
             input_t reject = { .kind = REJECT_RECORD };
             snprintf(reject.target, sizeof(reject.target), "%s", target);
@@ -366,7 +367,8 @@ static void dispatch(const cJSON *msg)
         bool muted = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "muted"));
         if (!strcmp(state, "start")) {
             tts_accepted = false;
-            if (!media_call_start(id, muted)) ws_client_call_failed(ws_client_session(), id);
+            uint8_t prefix = integer(msg, "mic_prefix", CALL_PCM, CALL_PCM) == CALL_PCM ? CALL_PCM : RECORD_PCM;
+            if (!media_call_start(id, muted, prefix)) ws_client_call_failed(ws_client_session(), id);
         } else if (!strcmp(state, "mute")) {
             media_call_set_mute(id, muted);
         } else if (!strcmp(state, "end")) {

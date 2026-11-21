@@ -89,6 +89,16 @@ esp_err_t audio_read_10ms(int16_t pcm[AUDIO_10MS])
     return ESP_OK;
 }
 
+esp_err_t audio_drain_input(void)
+{
+    int16_t pcm[FRAMES];
+    // Drop buffered RX, including any frames containing the confirmation tone.
+    for (int i = 0; i < DMA_TAIL / FRAMES; ++i) {
+        ESP_RETURN_ON_ERROR(audio_read_10ms(pcm), TAG, "Drain mic DMA");
+    }
+    return ESP_OK;
+}
+
 esp_err_t audio_write_10ms(const int16_t pcm[AUDIO_10MS])
 {
     int16_t stereo[FRAMES * CHANNELS];
@@ -162,7 +172,7 @@ static int16_t chirp(int n)
     return tone_sample(n % beat, beat, n < beat ? 659.25f : 880.0f, 4400.0f);
 }
 
-void audio_tone(audio_tone_t tone)
+void audio_tone(audio_tone_t tone, bool (*stop_requested)(const void *), const void *ctx)
 {
     const int beat = AUDIO_RATE * (tone == AUDIO_RING_TONE ? 70 : 40) / 1000;
     const int length = tone == AUDIO_HAPPY_TONE ? CHIME_FRAMES : tone == AUDIO_START_TONE ? beat : 2 * beat;
@@ -171,6 +181,7 @@ void audio_tone(audio_tone_t tone)
     // The BSP queues up to 6 × 240 frames (90 ms); send silence to play the tone
     // out before starting capture or waiting on the bridge.
     for (int offset = 0; offset < length + DMA_TAIL; offset += FRAMES) {
+        if (stop_requested && stop_requested(ctx)) return;
         for (int i = 0; i < FRAMES; ++i) {
             int n = offset + i;
             float hz = tone == AUDIO_START_TONE ? 740.0f :
@@ -192,10 +203,7 @@ esp_err_t audio_record_stream(bool (*stop_requested)(void), audio_capture_sink_t
 {
     _Static_assert(AUDIO_RECORD_CHUNK_SAMPLES % FRAMES == 0, "Chunk must contain whole VAD frames");
     int16_t mono[FRAMES];
-    // Drop the already-buffered RX frames, including any containing the start tone.
-    for (int i = 0; i < DMA_TAIL / FRAMES; ++i) {
-        ESP_RETURN_ON_ERROR(audio_read_10ms(mono), TAG, "Drain mic DMA");
-    }
+    ESP_RETURN_ON_ERROR(audio_drain_input(), TAG, "Prepare recording");
 
     size_t samples = 0, pending = 0;
     vad_t vad = { 0 };
@@ -278,22 +286,24 @@ esp_err_t audio_stream_write(const int16_t *pcm, size_t num_samples)
     return pos == num_samples ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
-esp_err_t audio_stream_end(void)
+esp_err_t audio_fade_out(int16_t last, bool (*stop_requested)(void))
 {
-    if (!played_samples || audio_playback_stopped()) {
-        return ESP_OK;
-    }
     // Fade the last sample and drain the BSP's 90 ms TX queue before yielding the codec.
-    int16_t stereo[FRAMES * CHANNELS] = { 0 };
-    if (last_sample) {
+    int16_t mono[FRAMES] = { 0 };
+    if (last && (!stop_requested || !stop_requested())) {
         for (int i = 0; i < FADE; ++i) {
-            stereo[2 * i] = stereo[2 * i + 1] = last_sample * (FADE - 1 - i) / FADE;
+            mono[i] = last * (FADE - 1 - i) / FADE;
         }
-        ESP_RETURN_ON_ERROR(write_speaker(stereo, FRAMES), TAG, "Fade speech");
-        memset(stereo, 0, sizeof(stereo));
+        ESP_RETURN_ON_ERROR(audio_write_10ms(mono), TAG, "Fade playback");
+        memset(mono, 0, sizeof(mono));
     }
-    for (int i = 0; i < DMA_TAIL && !audio_playback_stopped(); i += FRAMES) {
-        ESP_RETURN_ON_ERROR(write_speaker(stereo, FRAMES), TAG, "Drain speech");
+    for (int i = 0; i < DMA_TAIL && (!stop_requested || !stop_requested()); i += FRAMES) {
+        ESP_RETURN_ON_ERROR(audio_write_10ms(mono), TAG, "Drain playback");
     }
     return ESP_OK;
+}
+
+esp_err_t audio_stream_end(void)
+{
+    return played_samples ? audio_fade_out(last_sample, audio_playback_stopped) : ESP_OK;
 }
