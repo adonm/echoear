@@ -8,7 +8,9 @@ import {state} from "./state.js";
 
 let phone = getLocal("echoear-phone");
 if (!/^phone-[0-9a-f]{4}$/.test(phone)) {
-  phone = "phone-" + crypto.getRandomValues(new Uint16Array(1))[0].toString(16).padStart(4, "0");
+  const launch = new URL(location.href).searchParams.get("device_id");
+  phone = /^phone-[0-9a-f]{4}$/.test(launch) ? launch :
+    "phone-" + crypto.getRandomValues(new Uint16Array(1))[0].toString(16).padStart(4, "0");
   setLocal("echoear-phone", phone);
 }
 
@@ -85,7 +87,7 @@ function deviceRow(d) {
     const selected = state.app.devices.find(cat => cat.device_id === row.dataset.id);
     if (selected) {
       select(selected);
-      if (selected.kind !== "virtual" && !wide.matches) {
+      if (!wide.matches) {
         state.app.sidebar = false;
         renderSidebar();
         $("sidebar-toggle").focus();
@@ -156,6 +158,10 @@ function renderTargets(devices) {
 
 const preferredCat = devices => devices.find(d => d.kind !== "virtual" && isLive(d))
   || devices.find(d => d.kind !== "virtual") || devices.find(persisted);
+function joinPhone(d) {
+  select(d || {device_id:phone, character:"New Cat", kind:"virtual"}, true);
+}
+
 async function refreshDevices() {
   const current = state.app;
   if (!current || current.scope) return;
@@ -168,7 +174,9 @@ async function refreshDevices() {
     current.devices = devices;
     const updated = devices.find(d => d.device_id === state.view?.id);
     if (!state.view?.id || !updated && state.view.virtual && !state.view.quick && !current.tunnelBusy) {
-      select(devices.find(d => d.device_id === current.historyDevice) || preferredCat(devices));
+      const requested = devices.find(d => d.device_id === current.historyDevice);
+      if (current.historyDevice === phone) joinPhone(requested);
+      else select(requested || preferredCat(devices));
       current.historyDevice = null;
     } else if (updated) {
       state.view.device = updated;
@@ -337,7 +345,12 @@ $("join").onclick = () => {
   if (state.view?.quick) select(preferredCat(state.app.devices));
   else {
     unlockAudio();
-    select({device_id:phone, character:"New Cat", kind:"virtual"}, true);
+    joinPhone();
+    if (!wide.matches) {
+      state.app.sidebar = false;
+      renderSidebar();
+      $("sidebar-toggle").focus();
+    }
   }
 };
 

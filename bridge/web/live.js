@@ -1,12 +1,26 @@
-import {canCaptureMic, endMic, handleCall, handleTTS, micStopping, playChime, playPCM, setVolume, startMic, stopCall, unlockAudio} from "./audio.js";
+import {audioBusy, canCaptureMic, endMic, handleCall, handleTTS, micStopping, playChime, playPCM, setVolume, startMic, stopCall, unlockAudio} from "./audio.js";
 import {loadHistory, receiveChat, resetTranscript} from "./chat.js";
 import {applyVolume, refreshDevices, renderCallTarget, renderDevices, renderTargets, renderVoice, renderVolume} from "./devices.js";
 import {$, colors, isLive, nodes, say, screen, svgNS} from "./dom.js";
+import {busyMode, idleWatch} from "./idle.js";
 import {loadSaved, loadSavedCats, loadTimers} from "./library.js";
 import {clearPhotos, stagePhotos} from "./photos.js";
+import {installer} from "./pwa.js";
 import {send, state} from "./state.js";
 
 let screenHits = [];
+const occupiedCode = 4001; // wsCatOccupied
+const updateInstall = installer();
+const phoneLayout = matchMedia("(max-width: 620px), (max-width: 920px) and (orientation: portrait)");
+const idle = idleWatch({
+  isBusy: () => busyMode(state.view?.mode) || audioBusy() || state.view?.sending || state.view?.resetting || state.view?.sharingPhoto,
+  onIdle: () => pause("idle"),
+});
+
+function syncFaceSettings() {
+  $("face-settings").open = !state.view?.virtual || !phoneLayout.matches;
+}
+phoneLayout.addEventListener("change", syncFaceSettings);
 
 function updateStatus(text) {
   say("screen-status", text);
@@ -32,6 +46,7 @@ function select(d, quick = false) {
   // Virtual cats identify themselves per socket; never reuse their audio connection.
   disconnect();
   state.view = {id, device:d, virtual:d?.kind === "virtual", quick};
+  syncFaceSettings();
   setVolume(d?.volume ?? 55);
   $("text").value = "";
   $("target").value = "";
@@ -58,13 +73,21 @@ function select(d, quick = false) {
 function renderCurrent() {
   const d = state.view?.device, ready = state.ws?.readyState === WebSocket.OPEN && state.rev > 0;
   const active = ready && state.view?.virtual;
+  const paused = state.view?.paused;
   const resting = !!state.view?.parentMessage;
   const mode = d?.mode && d.mode !== "offline" ? d.mode : "";
+  $("workspace").dataset.view = state.view?.virtual ? "virtual" : "mirror";
   colors($("workspace"), d?.cat);
+  updateInstall(state.view, state.app);
   say("chat-name", d?.character || "Choose a cat");
   $("chat-mode").hidden = !d;
-  say("chat-mode", !d ? "" : state.view.virtual ? active ? (modeLabel[state.view.mode] || "Idle") : "Connecting" :
+  say("chat-mode", !d ? "" : paused === "occupied" ? "In use" : paused ? "Paused" :
+    state.view.virtual ? active ? (modeLabel[state.view.mode] || "Idle") : "Connecting" :
     isLive(d) ? mode || "Live WS" : "Offline");
+  $("reconnect-overlay").hidden = !paused;
+  say("reconnect-note", paused === "occupied" ? "This cat is open in another tab or device." :
+    paused === "lost" ? "The live connection was lost." : "Disconnected while idle. Your chat is still here.");
+  $("screen-content").inert = !ready;
   $("screen-controls").hidden = !ready;
   renderVolume();
   renderVoice(d, state.view?.voicePending);
@@ -84,6 +107,7 @@ function renderCurrent() {
   $("reset").disabled = !d || state.view.virtual && !active || !!state.view?.resetting || !!state.view?.sending;
   $("refresh").disabled = !d || state.view.quick && !active || !!state.view?.loading || !!state.view?.resetting;
   renderCallTarget();
+  idle.refresh();
 }
 
 function inCall() { return state.view?.mode === "call" || state.view?.mode === "calling"; }
@@ -98,21 +122,38 @@ function startPeerCall(target) {
   send({ev:"call",target});
 }
 
-function disconnect() {
+function disconnect({keepFace = false} = {}) {
+  idle.stop();
   clearTimeout(state.retry);
   const old = state.ws;
   state.ws = null;
   old?.close();
   endMic(true, false);
   stopCall();
-  clearScene();
+  if (keepFace) {
+    state.rev = 0;
+    state.pointer = null;
+    delete screen.dataset.interactive;
+  } else clearScene();
   state.watched = null;
 }
 
-function connect(attempt = 0) {
+function pause(reason) {
+  if (!state.view?.virtual) return;
+  state.view.paused = reason;
+  disconnect({keepFace:true});
+  say("link-state", reason === "occupied" ? "Cat in use" : "Not connected");
+  updateStatus(reason === "idle" ? "Live screen paused." : "Live screen disconnected.");
+  renderCurrent();
+  renderDevices();
+}
+
+function connect(attempt = 0, ifFree = false) {
   if (!state.app || !state.view?.id) return;
-  disconnect();
   const cat = state.view;
+  if (cat.virtual && document.hidden) return pause("idle");
+  disconnect({keepFace:cat.virtual});
+  cat.paused = "";
   cat.mode = "";
   cat.parentMessage = "";
   cat.bridgeEndpoint = false;
@@ -124,6 +165,7 @@ function connect(attempt = 0) {
   url.searchParams.set("token", state.app.token);
   const socket = new WebSocket(url);
   state.ws = socket;
+  if (cat.virtual) idle.start(document.hidden);
   socket.binaryType = "arraybuffer";
   socket.onopen = () => {
     if (state.ws !== socket) return;
@@ -131,7 +173,7 @@ function connect(attempt = 0) {
     loadSavedCats();
     const micAvailable = canCaptureMic();
     send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",
-      caps:{call:micAvailable,call_pcm:micAvailable,drag:true,bridge_endpoint:micAvailable}}
+      if_free:ifFree,caps:{call:micAvailable,call_pcm:micAvailable,drag:true,bridge_endpoint:micAvailable}}
       : {ev:"hello",role:"web"});
   };
   socket.onmessage = e => {
@@ -139,16 +181,30 @@ function connect(attempt = 0) {
     if (typeof e.data === "string") {
       try { command(JSON.parse(e.data)); } catch { updateStatus("Invalid screen update."); }
     } else if (cat.virtual) playPCM(e.data);
+    idle.refresh();
   };
-  socket.onclose = () => {
+  socket.onclose = e => {
     if (state.ws !== socket) return;
+    if (cat.virtual && e.code === occupiedCode) return pause("occupied");
+    if (cat.virtual && document.hidden) return pause("lost");
     if (state.rev) attempt = 0;
-    disconnect();
+    disconnect({keepFace:cat.virtual});
     renderCurrent();
     say("link-state", "Reconnecting…");
     updateStatus("Live screen disconnected.");
-    state.retry = setTimeout(() => connect(attempt + 1), Math.min(5000, 500 * 2 ** Math.min(attempt, 4)));
+    state.retry = setTimeout(() => connect(attempt + 1, cat.virtual), Math.min(5000, 500 * 2 ** Math.min(attempt, 4)));
   };
+}
+
+$("reconnect-cat").onclick = () => {
+  if (!state.view?.paused) return;
+  unlockAudio();
+  connect(0, true);
+  $("chat-heading").focus({preventScroll:true});
+};
+document.addEventListener("visibilitychange", () => idle.visibility(document.hidden));
+for (const event of ["pointerdown", "keydown", "wheel", "input", "click", "change"]) {
+  document.addEventListener(event, e => { if (e.isTrusted) idle.activity(); }, {capture:true, passive:true});
 }
 
 function syncWatch(live) {

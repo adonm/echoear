@@ -1,5 +1,5 @@
 import {api, initialToken, onUnauthorized, request} from "./api.js";
-import {onRecordingChanged} from "./audio.js";
+import {onAudioActivityChanged} from "./audio.js";
 import {copyField, loadVoiceCatalog, refreshDevices, refreshTunnel, renderDevices, renderSidebar} from "./devices.js";
 import {setDiagnostics} from "./diag.js";
 import {$, node, say, setLocal, wide} from "./dom.js";
@@ -24,9 +24,11 @@ function stop() {
   state.view?.loading?.abort();
   state.view = state.app = null;
   disconnect();
+  renderCurrent();
   $("workspace").hidden = true;
   $("sidebar-toggle").hidden = true;
   $("parent-link").hidden = true;
+  say("settings", "Bridge token");
   $("opencode-pairing").hidden = true;
   $("pair-links").replaceChildren();
   say("pair-note", "");
@@ -59,6 +61,7 @@ async function authorize(token) {
     $("diagnostics-toggle").hidden = !!scope;
     $("sidebar-toggle").hidden = !!scope;
     $("parent-link").hidden = !!scope;
+    say("settings", scope ? "Access" : "Bridge token");
     $("opencode-pairing").hidden = !!scope;
     $("credentials").close();
     $("token").value = "";
@@ -148,6 +151,6 @@ onUnauthorized(() => {
   setLocal("echoear-token", "");
   credentials("Your token is no longer accepted.");
 });
-onRecordingChanged(renderCurrent);
+onAudioActivityChanged(renderCurrent);
 credentials();
 if (initialToken) authorize(initialToken);

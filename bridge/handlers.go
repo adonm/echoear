@@ -521,7 +521,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 			}
 			serveAppFile(w, "parent.html", "text/html; charset=utf-8")
 			return nil, nil
-		case serveApp(w, path):
+		case b.servePhonePWA(w, r, path, nil, "") || serveApp(w, path):
 			return nil, nil
 		case path == "/ws" && b.ws != nil:
 			return nil, b.ws.serve(w, r)
@@ -540,6 +540,7 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		case path == "/api/diagnostics":
 			return b.diagnosticReport(), nil
 		case path == "/api/scope":
+			b.setPhoneCookie(w)
 			return object{"scoped": false, "auto_volume": true, "voices": voiceCatalog}, nil
 		case path == "/api/history":
 			return b.messages(r, r.URL.Query().Get("device_id"))

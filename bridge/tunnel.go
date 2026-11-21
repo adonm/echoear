@@ -349,7 +349,7 @@ func (b *bridge) scoped(v virtualClient, token string) http.Handler {
 				http.Redirect(w, r, location, http.StatusFound)
 				return
 			}
-			if path != "/app/photo-library.js" && serveApp(w, path) {
+			if b.servePhonePWA(w, r, path, &v, token) || path != "/app/photo-library.js" && serveApp(w, path) {
 				return
 			}
 		}

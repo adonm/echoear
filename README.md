@@ -205,6 +205,30 @@ conversation as the LAN dashboard, with mic, screen, voice notes, and calls to
 online EchoEars. The per-cat token does not open the LAN dashboard, admin routes, or
 other cats' chats. Treat the link as a password and use **Close Tunnel** to revoke it.
 
+### Install a Phone Cat
+
+Open the cat's HTTPS share link, or select a Virtual Cat in `/app` on a trusted
+HTTPS LAN origin (or localhost). In **Devices**, **Join as Phone Cat** selects a
+browser-local cat instead; the shortcut opens that identity again. Ordinary LAN
+HTTP shows the same phone layout but can't install the app or use the mic.
+
+- **Android (Chrome):** tap **Install cat**, or use the browser menu's
+  **Install app** / **Add to Home screen**.
+- **iPhone/iPad (Safari):** tap **Share → Add to Home Screen**, then **Add**.
+- **Desktop (Chrome/Edge):** click **Install cat** or the install icon in the address bar.
+
+The shortcut opens the cat in a standalone window. A share-link install
+retains only that cat's private access and stops working when the link is
+revoked. A LAN install may ask for your bridge token if the browser uses
+separate storage. The app shell can load offline; live chat, history, audio,
+and photos still need the bridge.
+
+On phones, the live face sits above chat and the composer. A virtual cat goes
+offline after 45 seconds in the background or five minutes without interaction.
+Ringing, calls, recording, thinking, and playback finish first. Tap
+**Tap to reconnect** to unlock audio and resume; reconnecting won't take over
+a cat already open elsewhere.
+
 ### Ente Photos
 
 The optional LAN-only **Photo Library** uses your hosted Ente Photos account. It syncs

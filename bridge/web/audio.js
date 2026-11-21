@@ -84,6 +84,7 @@ function playPCM(raw) {
     speaking.delete(source);
     source.disconnect();
     ackIfDone();
+    if (!speaking.size) audioActivityChanged?.();
   };
 }
 function ackIfDone() {
@@ -144,9 +145,10 @@ function playChime(kind) {
 }
 
 let mic, workletLoaded;
-let recordingChanged;
-function onRecordingChanged(handler) { recordingChanged = handler; }
+let audioActivityChanged;
+function onAudioActivityChanged(handler) { audioActivityChanged = handler; }
 function micStopping() { return !!mic?.stopping; }
+function audioBusy() { return !!mic || !!call || speaking.size > 0; }
 function canCaptureMic() {
   return window.isSecureContext && typeof navigator.mediaDevices?.getUserMedia === "function" && !!window.AudioWorkletNode;
 }
@@ -183,6 +185,7 @@ async function startMic(target, inCall = null, endpoint = "") {
   mic = rec;
   if (!inCall) {
     recordUI(true);
+    audioActivityChanged?.();
     if (rec.bridgeEndpoint) say("chat-note", "Opening microphone…");
   }
   try {
@@ -258,7 +261,7 @@ function endMic(cancelled, tell = true, flushed = false, fromBridge = false) {
     return;
   }
   recordUI(false);
-  recordingChanged?.();
+  audioActivityChanged?.();
   if (tell) {
     cancelled ||= !rec.node;
     send({ev:"rec_end",cancelled,target:rec.target});
@@ -310,5 +313,5 @@ $("talk").onclick = () => requestMic($("target").value);
 $("mic-send").onclick = () => endMic(false);
 $("cancel").onclick = () => endMic(true);
 
-export {canCaptureMic, endMic, handleCall, handleTTS, micStopping, onRecordingChanged, playChime, playPCM,
+export {audioBusy, canCaptureMic, endMic, handleCall, handleTTS, micStopping, onAudioActivityChanged, playChime, playPCM,
   setVolume, startMic, stopCall, unlockAudio, volume};

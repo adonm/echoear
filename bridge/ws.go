@@ -8,10 +8,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const wsConnections = 64
+const wsCatOccupied = 4001
 
 type wsEvent struct {
 	Event     string  `json:"ev"`
@@ -38,6 +40,7 @@ type wsEvent struct {
 	Call      uint32  `json:"call"`
 	Cancelled bool    `json:"cancelled"`
 	Enabled   *bool   `json:"enabled"`
+	IfFree    bool    `json:"if_free"` // A reconnect must not replace a live virtual cat.
 	wsStatus
 }
 
@@ -45,6 +48,7 @@ type wsClient struct {
 	wire       *websocket
 	ctx        context.Context
 	cancel     context.CancelFunc
+	closeCode  atomic.Uint32
 	out        chan wsFrame
 	outMu      sync.Mutex
 	drained    chan struct{}
@@ -193,7 +197,16 @@ func (c *wsClient) write() {
 			}
 		}
 	}
-	_ = c.wire.write(wsCloseFrame(1001))
+	code := uint16(c.closeCode.Load())
+	if code == 0 {
+		code = 1001
+	}
+	_ = c.wire.write(wsCloseFrame(code))
+}
+
+func (c *wsClient) stop(code uint16) {
+	c.closeCode.Store(uint32(code))
+	c.cancel()
 }
 
 func (c *wsClient) enqueue(f wsFrame) bool {

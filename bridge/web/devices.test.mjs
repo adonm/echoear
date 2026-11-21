@@ -1,16 +1,26 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
 
-test("renders the selected live device after the dashboard modules load", async () => {
+test("renders the selected live device after the dashboard modules load", async t => {
   function element(tag) {
     return {
       tag, dataset:{}, style:{setProperty() {}}, attrs:{}, children:[], listeners:{},
       addEventListener(name, handler) { this.listeners[name] = handler; },
       setPointerCapture() {},
       getScreenCTM: () => ({inverse() {}}),
+      getAttribute(name) { return this.attrs[name] ?? null; },
+      hasAttribute(name) { return Object.hasOwn(this.attrs, name); },
       setAttribute(name, value) { this.attrs[name] = value; },
       removeAttribute(name) { delete this.attrs[name]; },
       replaceChildren(...children) { this.children = children; },
+      insertBefore(child, next) {
+        child.parent = this;
+        this.children.splice(next ? this.children.indexOf(next) : this.children.length, 0, child);
+      },
+      replaceWith(child) {
+        child.parent = this.parent;
+        this.parent.children.splice(this.parent.children.indexOf(this), 1, child);
+      },
       querySelector(tag) { return this.children.find(child => child.tag === tag); },
       querySelectorAll(tag) { return this.children.filter(child => child.tag === tag); },
       append(...children) {
@@ -32,6 +42,8 @@ test("renders the selected live device after the dashboard modules load", async 
   Object.assign(globalThis, {
     document: {
       createElement: element,
+      querySelector: () => element("meta"),
+      addEventListener() {},
       getElementById(id) {
         if (!els.has(id)) els.set(id, element(id));
         return els.get(id);
@@ -42,7 +54,7 @@ test("renders the selected live device after the dashboard modules load", async 
     location: {href:"https://echoear.test/app"},
     Option: class {},
     WebSocket: {OPEN:1},
-    window: {isSecureContext:true, AudioWorkletNode:class {}},
+    window: {isSecureContext:true, AudioWorkletNode:class {}, addEventListener() {}},
     DOMPoint: class {
       constructor(x, y) { Object.assign(this, {x,y}); }
       matrixTransform() { return this; }
@@ -91,4 +103,32 @@ test("renders the selected live device after the dashboard modules load", async 
   stage.pointerdown(gesture);
   stage.pointerup(gesture);
   assert.deepEqual(activation, ["resume", "call", "resume", "up", "tap"]);
+
+  await t.test("reconnect restores history without duplicating live or replayed messages", async () => {
+    const {loadHistory, receiveChat} = await import("./chat.js");
+    const entry = (id, second, text) => ({id, role:"cat", text, timestamp:`2026-11-21T10:30:0${second}Z`});
+    const old = entry("old", 1, "Before pause"), missed = entry("missed", 2, "While paused");
+    const live = entry("live", 3, "After reconnect");
+    const mockFetch = (entries) => new Response(JSON.stringify({messages:entries, has_more:false}));
+    const originalFetch = globalThis.fetch;
+    try {
+      state.app.token = "fixture";
+      state.view.device = {character:"Cake"};
+      globalThis.fetch = async () => mockFetch([old]);
+      await loadHistory();
+      const bubbles = () => els.get("messages").children.filter(node => node.dataset.entry);
+      const before = bubbles()[0];
+      let deliver;
+      globalThis.fetch = () => new Promise(resolve => { deliver = resolve; });
+      const replay = loadHistory({replace:false});
+      receiveChat(live);
+      deliver(mockFetch([old, missed, {...live, text:"Stale entry"}]));
+      await replay;
+      assert.equal(bubbles()[0], before);
+      assert.deepEqual(bubbles().map(node => node.dataset.entry), ["old", "missed", "live"]);
+      assert.equal(bubbles().at(-1).children.at(-1).textContent, "After reconnect");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
