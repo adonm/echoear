@@ -39,6 +39,8 @@ type e2eModel struct {
 	mcpAudit    []string
 	photo       map[string]bool
 	build       chan struct{}
+	followUp    chan struct{}
+	events      chan ocEvent
 	cost        float64
 	usage       map[ocModel]int
 	tools       map[string]int
@@ -54,7 +56,8 @@ type e2eSession struct {
 func startE2EModel(t *testing.T, s *e2eSuite, home string) *e2eModel {
 	t.Helper()
 	m := &e2eModel{client: s.client, settings: openCodeSettings("echoear"), sessions: map[string]*e2eSession{},
-		photo: map[string]bool{}, build: make(chan struct{}), usage: map[ocModel]int{}, tools: map[string]int{}}
+		photo: map[string]bool{}, build: make(chan struct{}), followUp: make(chan struct{}),
+		events: make(chan ocEvent, 64), usage: map[ocModel]int{}, tools: map[string]int{}}
 	m.settings.Model = ocModel{Provider: "test", ID: "deterministic"}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { m.stub(w, r, s) })
 	if s.real {
@@ -432,6 +435,21 @@ func (m *e2eModel) stub(w http.ResponseWriter, r *http.Request, s *e2eSuite) {
 	case "GET /api/info":
 		writeStubJSON(w, object{})
 		return
+	case "GET /api/event":
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		_, _ = io.WriteString(w, ": connected\n\n")
+		f.Flush()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case event := <-m.events:
+				data, _ := json.Marshal(event)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+				f.Flush()
+			}
+		}
 	case "GET /api/session":
 		writeStubJSON(w, []object{})
 		return
@@ -499,7 +517,7 @@ func (m *e2eModel) stub(w http.ResponseWriter, r *http.Request, s *e2eSuite) {
 		m.mu.Unlock()
 		// Respond to admission before doing tool work, matching the real API.
 		writeStubJSON(w, object{"id": "user-" + key})
-		go m.finishStub(s, session, key, in.Text, done)
+		go m.finishStub(s, session, id, key, in.Text, done)
 	case "POST /wait":
 		done := session.wait
 		m.mu.Unlock()
@@ -534,7 +552,7 @@ func (m *e2eModel) stub(w http.ResponseWriter, r *http.Request, s *e2eSuite) {
 	}
 }
 
-func (m *e2eModel) finishStub(s *e2eSuite, session *e2eSession, key, text string, done chan struct{}) {
+func (m *e2eModel) finishStub(s *e2eSuite, session *e2eSession, id, key, text string, done chan struct{}) {
 	reply := e2eModelReply
 	switch {
 	case session.state["agent"] == builderAgent:
@@ -543,6 +561,8 @@ func (m *e2eModel) finishStub(s *e2eSuite, session *e2eSession, key, text string
 	case strings.Contains(text, "Virtual test hold"):
 		// The test cancels this through the actual WS gesture while /wait is blocked.
 		return
+	case strings.Contains(text, "Virtual test queued follow-up"):
+		<-m.followUp
 	case strings.Contains(text, e2ePhotoPrompt):
 		if token := m.rememberPhoto(text); token != "" {
 			match := e2ePhotoDevice.FindStringSubmatch(text)
@@ -556,6 +576,12 @@ func (m *e2eModel) finishStub(s *e2eSuite, session *e2eSession, key, text string
 		"finish": "stop", "content": []object{{"type": "text", "text": reply}}})
 	m.mu.Unlock()
 	close(done)
+	if session.state["agent"] != builderAgent {
+		m.events <- ocEvent{Type: "session.text.delta", Data: ocEventData{
+			SessionID: id, AssistantMessageID: "assistant-" + key, Delta: reply + " ",
+		}}
+	}
+	m.events <- ocEvent{Type: "session.execution.succeeded", Data: ocEventData{SessionID: id}}
 }
 
 var e2ePhotoDevice = regexp.MustCompile(`\(([a-z0-9-]+)\) ·`)

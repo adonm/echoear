@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -39,6 +40,7 @@ func TestVirtualE2E(t *testing.T) {
 		t.Run("Product", func(t *testing.T) {
 			t.Parallel() // Keep idle/call sockets reading throughout the real timeouts.
 			t.Run("VoiceTypedAndStop", s.voiceTypedStop)
+			t.Run("GradedEndpointAndQueuedVoice", s.gradedEndpointAndQueuedVoice)
 			t.Run("VoCatMenus", func(t *testing.T) { s.menus(t, "esp-vocat", "MenusRound") })
 			t.Run("Box3Menus", func(t *testing.T) { s.menus(t, "esp-box-3", "MenusRect") })
 			t.Run("RawFramebuffer", s.rawFramebuffer)
@@ -93,7 +95,13 @@ func (c *e2eCat) note(t *testing.T, pcm []byte, target string) time.Time {
 
 func (c *e2eCat) playback(t *testing.T, start time.Time) []byte {
 	t.Helper()
-	var first time.Duration
+	pcm, _ := c.measuredPlayback(t, start)
+	return pcm
+}
+
+func (c *e2eCat) measuredPlayback(t *testing.T, start time.Time) ([]byte, time.Time) {
+	t.Helper()
+	var first time.Time
 	var pcm []byte
 	var audio int
 	end := c.expect(t, "complete TTS playback", func(f wsFrame) bool {
@@ -107,8 +115,8 @@ func (c *e2eCat) playback(t *testing.T, start time.Time) []byte {
 			if audio <= 0 {
 				t.Fatal("PCM arrived before a numbered TTS start")
 			}
-			if first == 0 {
-				first = time.Since(start)
+			if first.IsZero() {
+				first = time.Now()
 			}
 			pcm = append(pcm, f.data[1:]...)
 		}
@@ -117,9 +125,97 @@ func (c *e2eCat) playback(t *testing.T, start time.Time) []byte {
 	if !livePCMOK(pcm) || e2eNumber(testObject(t, end.data)["audio"]) != audio {
 		t.Fatal("playback did not finish with matching audio ID and non-silent samples")
 	}
-	t.Logf("input end → first PCM %s (%d ms total audio)", first.Round(time.Millisecond), len(pcm)/(sampleRate*2/1000))
+	t.Logf("input end → first PCM %s (%d ms total audio)", first.Sub(start).Round(time.Millisecond), len(pcm)/(sampleRate*2/1000))
 	c.ack(t, end)
-	return pcm
+	return pcm, first
+}
+
+func (c *e2eCat) capture(t *testing.T, pcm []byte) time.Time {
+	t.Helper()
+	c.json(t, object{"ev": "rec_start"})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		const tick = 40 * time.Millisecond
+		const size = sampleRate * 2 / 25
+		mic := append(slices.Clone(pcm), make([]byte, size*150)...)
+		for offset := 0; offset+size <= len(mic); offset += size {
+			timer := time.NewTimer(time.Until(start.Add(time.Duration(offset/size+1) * tick)))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				done <- nil
+				return
+			case <-timer.C:
+			}
+			_ = c.conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+			_, err := c.conn.Write(maskedFrame(wsBinary, true, append([]byte{micPrefix}, mic[offset:offset+size]...)))
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	stop := c.op(t, "rec", "action", `"stop"`)
+	if testObject(t, stop.data)["cancelled"] == true {
+		t.Fatal("Silero discarded the speech fixture")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal("paced microphone write failed:", err)
+	}
+	end := start.Add(pcmDuration(len(pcm)))
+	if time.Now().Before(end) {
+		t.Fatal("bridge stopped before the entire fixture was spoken")
+	}
+	c.json(t, object{"ev": "rec_end"})
+	return end
+}
+
+func e2eEndpointWait(t *testing.T, turn diagTurn, want time.Duration) {
+	t.Helper()
+	if turn.STT == nil || turn.Endpoint == nil {
+		t.Fatal("missing native STT or endpoint timings")
+	}
+	wait := time.Duration(*turn.Endpoint * float64(time.Millisecond))
+	if wait < want-40*time.Millisecond || wait > want+260*time.Millisecond {
+		t.Fatalf("endpoint wait %s, want %s", wait, want)
+	}
+}
+
+func (s *e2eSuite) turnStages(t *testing.T, c *e2eCat, first time.Time) diagTurn {
+	t.Helper()
+	var report struct {
+		Turns []diagTurn `json:"recent_turns"`
+	}
+	if err := json.Unmarshal(s.request(t, "GET", "/api/diagnostics", nil, 200), &report); err != nil {
+		t.Fatal("cannot decode turn timings")
+	}
+	for _, r := range report.Turns {
+		if r.Device != c.id {
+			continue
+		}
+		if r.FirstPCM == nil || r.Gate == nil || r.PromptPrep == nil || r.PromptSubmit == nil ||
+			r.FirstSentence == nil || r.TTS == nil || r.TTSQueue == nil || r.TTSInfer == nil {
+			t.Fatal("missing prompt or playback timing")
+		}
+		asMS := func(v *float64) string {
+			if v == nil {
+				return "-"
+			}
+			return fmt.Sprintf("%.2f", *v)
+		}
+		ws := milliseconds(first.Sub(time.UnixMilli(r.TS))) - *r.FirstPCM
+		t.Logf("stages (ms): endpoint=%s STT=%s gate=%.2f prepare=%.2f submit=%.2f first_text=%s first_sentence=%.2f Kokoro_queue=%.2f infer=%.2f TTS_first=%.2f turn_to_WS_enqueue=%.2f enqueue_to_receive≈%.2f",
+			asMS(r.Endpoint), asMS(r.STT), *r.Gate, *r.PromptPrep, *r.PromptSubmit, asMS(r.First),
+			*r.FirstSentence, *r.TTSQueue, *r.TTSInfer, *r.TTS, *r.FirstPCM, ws)
+		return r
+	}
+	t.Fatal("missing device turn timing")
+	return diagTurn{}
 }
 
 func (s *e2eSuite) voiceTypedStop(t *testing.T) {
@@ -129,8 +225,9 @@ func (s *e2eSuite) voiceTypedStop(t *testing.T) {
 		c.mirrorOn(t, s)
 		pcm := s.synth(t, e2eVoiceQuestion)
 		c.tap(t, "cat-ring")
-		c.op(t, "rec", "action", `"start"`)
-		c.playback(t, c.note(t, pcm, ""))
+		c.op(t, "rec", "action", `"start"`, "endpoint", `"bridge"`)
+		_, first := c.measuredPlayback(t, c.capture(t, pcm))
+		e2eEndpointWait(t, s.turnStages(t, c, first), tunedEndpoint.complete)
 		rows := s.history(t, c.id, "")
 		if len(rows) != 2 || rows[0].Source != "voice" || !strings.Contains(strings.ToLower(rows[0].Text), "sky blue") ||
 			rows[1].Role != "cat" || strings.TrimSpace(rows[1].Text) == "" {
@@ -146,11 +243,21 @@ func (s *e2eSuite) voiceTypedStop(t *testing.T) {
 		c.timeout = 40 * time.Second
 		start := time.Now()
 		c.json(t, object{"ev": "text", "text": "Say hello in one short sentence, without tools."})
-		c.playback(t, start)
+		_, first := c.measuredPlayback(t, start)
+		stage := s.turnStages(t, c, first)
+		if !s.real {
+			if stage.First == nil {
+				t.Fatal("stub first text did not traverse the event feed")
+			}
+			if d := first.Sub(start); d >= time.Second {
+				t.Errorf("stub typed turn took %s to reach first PCM; want under 1 s", d.Round(time.Millisecond))
+			}
+		}
 		rows := s.history(t, c.id, "")
 		if len(rows) != 2 || rows[0].Source != "typed" || !strings.HasPrefix(rows[0].Text, "Say hello") || rows[1].Role != "cat" {
 			t.Fatal("typed /app turn did not write both canonical messages")
 		}
+		t.Run("PhoneIdleReconnect", func(t *testing.T) { s.phoneIdleReconnect(t, c, rows) })
 	})
 	t.Run("ThinkingStopAndStaleTap", func(t *testing.T) {
 		if s.real {
@@ -179,19 +286,15 @@ func (s *e2eSuite) voiceTypedStop(t *testing.T) {
 		}
 	})
 	t.Run("SpeakingStop", func(t *testing.T) {
-		if s.real {
-			t.Skip("speaking Stop uses the deterministic utterance in --live")
-		}
 		c := s.board(t, "esp-box-3", "StopSpeak")
 		c.mirrorOn(t, s)
 		c.timeout = 40 * time.Second
-		c.json(t, object{"ev": "text", "text": "Say one sentence about cats, without tools."})
-		c.op(t, "tts", "state", `"start"`)
+		c.json(t, object{"ev": "text", "text": "Say two short sentences about cats, without tools."})
+		start := c.op(t, "tts", "state", `"start"`)
 		c.expect(t, "spoken PCM", isPlayback)
-		// The speaker still owns buffered audio until tts_ack. Test while it is
-		// speaking without depending on where the paced stream paused.
-		c.op(t, "tts", "state", `"end"`)
-		c.scene(t, `aria-label=\"Stop\"`)
+		c.sceneWhere(t, "speaking Stop", func(f wsFrame) bool {
+			return bytes.Contains(f.data, []byte(`aria-label=\"Stop\"`)) && !bytes.Contains(f.data, []byte("Thinking"))
+		})
 		c.input(t, "tap", 180, 160, c.revision)
 		c.write(t, maskedFrame(wsPing, true, []byte("face-speaking")))
 		c.expect(t, "face tap does not act while speaking", func(f wsFrame) bool {
@@ -201,8 +304,88 @@ func (s *e2eSuite) voiceTypedStop(t *testing.T) {
 			return f.op == wsPong && string(f.data) == "face-speaking"
 		})
 		c.tap(t, "stop")
-		c.op(t, "tts", "state", `"abort"`)
+		audio := fmt.Sprint(testObject(t, start.data)["audio"])
+		c.op(t, "tts", "state", `"abort"`, "audio", audio)
 		c.scene(t, `data-id=\"menu\"`)
+	})
+}
+
+func (s *e2eSuite) phoneIdleReconnect(t *testing.T, c *e2eCat, rows []chatEntry) {
+	watcher := testConnectWS(t, s.base, s.token, true)
+	watcher.json(t, object{"ev": "hello", "role": "web"})
+	watcher.until(t, hasWS("peers", c.id))
+	join := func() *testWS {
+		ws := testConnectWS(t, s.base, s.token, true)
+		ws.json(t, object{"ev": "hello", "role": "web", "device_id": c.id, "if_free": true,
+			"caps": object{"bridge_endpoint": true}})
+		return ws
+	}
+	closeOp := func(f wsFrame) bool { return f.op == wsClose }
+	if f := join().until(t, closeOp); !bytes.Equal(f.data, wsCloseFrame(wsCatOccupied).data) {
+		t.Fatal("tap-to-reconnect displaced a connected cat")
+	}
+	// idle.js unit tests exercise the hidden/inactive clocks. Emulate the
+	// browser's normal idle close and explicit IfFree hello on the live wire.
+	close := wsCloseFrame(1000)
+	c.write(t, maskedFrame(wsClose, true, close.data))
+	if f := c.until(t, closeOp); !bytes.Equal(f.data, close.data) {
+		t.Fatal("normal idle close did not complete a WebSocket handshake")
+	}
+	watcher.until(t, func(f wsFrame) bool { return hasWS("peers", "")(f) && !bytes.Contains(f.data, []byte(c.id)) })
+	ws := join()
+	ws.until(t, hasWS("svg", "cat-ring"))
+	ws.until(t, hasWS("capabilities", `"bridge_endpoint":true`))
+	watcher.until(t, hasWS("peers", c.id))
+	if after := s.history(t, c.id, ""); !slices.EqualFunc(rows, after, func(a, b chatEntry) bool { return a.ID == b.ID && a.Text == b.Text }) {
+		t.Fatal("idle disconnect/reconnect did not preserve canonical chat")
+	}
+}
+
+func (s *e2eSuite) gradedEndpointAndQueuedVoice(t *testing.T) {
+	if s.real {
+		t.Skip("covered with real Silero, Parakeet and Kokoro in --live without extra model prompts")
+	}
+	t.Run("QuickBox3", func(t *testing.T) {
+		c := s.board(t, "esp-box-3", "Quick")
+		c.mirrorOn(t, s)
+		pcm := s.synth(t, "Why does Jupiter have stripes?")
+		c.tap(t, "cat-ring")
+		c.op(t, "rec", "action", `"start"`, "endpoint", `"bridge"`)
+		_, first := c.measuredPlayback(t, c.capture(t, pcm))
+		e2eEndpointWait(t, s.turnStages(t, c, first), tunedEndpoint.quick)
+	})
+	t.Run("PatientPhoneFollowUp", func(t *testing.T) {
+		release := syncOnceClose(s.model.followUp)
+		defer release()
+		c := s.browser(t, "FollowUp")
+		c.timeout = 20 * time.Second
+		c.op(t, "capabilities", "bridge_endpoint", "true")
+		pcm := s.synth(t, "Once upon a time there was a little frog, and then")
+		pcm = append(pcm, make([]byte, sampleRate*2*32/10)...)
+		pcm = append(pcm, s.synth(t, "it made a house under a purple mushroom.")...)
+		c.json(t, object{"ev": "text", "text": "Virtual test queued follow-up"})
+		c.scene(t, "rec-continue")
+		c.tap(t, "rec-continue")
+		c.op(t, "rec", "action", `"start"`, "endpoint", `"bridge"`)
+		end := c.capture(t, pcm)
+		c.syncFrames(t)
+		if rows := s.history(t, c.id, ""); len(rows) != 1 || rows[0].Source != "typed" {
+			t.Fatal("follow-up was admitted during the active typed turn")
+		}
+		release()
+		c.op(t, "tts", "state", `"start"`)
+		c.expect(t, "original reply PCM", isPlayback)
+		firstEnd := c.op(t, "tts", "state", `"end"`)
+		if rows := s.history(t, c.id, ""); len(rows) != 2 || rows[1].Role != "cat" {
+			t.Fatal("follow-up did not wait for the original reply's playback acknowledgement")
+		}
+		c.ack(t, firstEnd)
+		_, first := c.measuredPlayback(t, end)
+		e2eEndpointWait(t, s.turnStages(t, c, first), tunedEndpoint.patient)
+		if rows := s.history(t, c.id, ""); len(rows) != 4 || rows[2].Source != "voice" ||
+			!strings.Contains(strings.ToLower(rows[2].Text), "purple mushroom") || rows[3].Role != "cat" {
+			t.Fatal("queued voice did not preserve both clauses and complete after the first turn")
+		}
 	})
 }
 
@@ -390,6 +573,7 @@ func (s *e2eSuite) calls(t *testing.T) {
 			relay(a, b, pcm) // Mute does not silence downlink.
 			b.tap(t, "call-mute")
 			b.op(t, "call", "muted", "false")
+			b.scene(t, `aria-label=\"Mute\"`)
 			relay(b, a, bytes.Repeat([]byte{5, 100}, callPCMBytes/2))
 			b.tap(t, "call-hangup")
 			e2eEndCall(t, a, b, "hung up")
@@ -534,6 +718,21 @@ func (s *e2eSuite) photosAndScope(t *testing.T) {
 		scope := s.scope(t, c.id)
 		get := func(path string, code int) []byte { return e2eRequest(t, scope, "GET", path, "", nil, code) }
 		get("/app", 200)
+		worker := get("/app/sw.js", 200)
+		if !bytes.Contains(worker, []byte("echoear-shell-scoped-")) || bytes.Contains(worker, []byte("photo-library.js")) {
+			t.Fatal("scoped app did not serve the restricted offline shell")
+		}
+		manifest := testObject(t, get(phonePWAPath+"manifest.webmanifest?token="+url.QueryEscape(scope.token), 200))
+		icons, _ := manifest["icons"].([]any)
+		if manifest["display"] != "standalone" || manifest["orientation"] != "portrait" || len(icons) != 3 {
+			t.Fatal("scoped Phone Cat did not serve an installable portrait manifest")
+		}
+		for _, icon := range icons {
+			raw := get(str(icon.(object)["src"]), 200)
+			if !bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) {
+				t.Fatal("scoped manifest icon is not a PNG")
+			}
+		}
 		info := testObject(t, get("/api/scope", 200))
 		if info["device_id"] != c.id || info["scoped"] != true {
 			t.Fatal("scoped listener resolved the wrong virtual cat")

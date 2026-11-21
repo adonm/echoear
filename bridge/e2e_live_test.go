@@ -65,6 +65,9 @@ func startE2E(t *testing.T, real bool) *e2eSuite {
 			t.Fatal(err)
 		}
 	}
+	if err := checkEndpointModel(filepath.Join(local, "stt-models", sileroModel)); err != nil {
+		t.Fatal(err)
+	}
 	repo, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +89,7 @@ func startE2E(t *testing.T, real bool) *e2eSuite {
 		"ECHOEAR_DEFER_MCP_COMPACTION=1",
 	}
 	prefs := e2eInstallation(t, home, false)
-	for _, key := range []string{"TTS_MODEL_DIR", "GGML_VK_VISIBLE_DEVICES", "ECHOEAR_SILERO_VAD_MODEL"} {
+	for _, key := range []string{"TTS_MODEL_DIR", "GGML_VK_VISIBLE_DEVICES"} {
 		if v := env(key, prefs[key]); v != "" {
 			cmd.Env = append(cmd.Env, key+"="+v)
 		}
@@ -165,7 +168,7 @@ func e2eInstallation(t *testing.T, home string, required bool) map[string]string
 				continue
 			}
 			fallthrough
-		case "TTS_MODEL_DIR", "GGML_VK_VISIBLE_DEVICES", "ECHOEAR_SILERO_VAD_MODEL":
+		case "TTS_MODEL_DIR", "GGML_VK_VISIBLE_DEVICES":
 			values[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
 		}
 	}
@@ -342,28 +345,30 @@ func (c *e2eCat) updateScene(t *testing.T, f wsFrame) {
 
 func (c *e2eCat) scene(t *testing.T, text ...string) string {
 	t.Helper()
-	match := func(f wsFrame) bool {
-		if !hasWS("svg", "")(f) {
-			return false
-		}
+	return c.sceneWhere(t, strings.Join(text, ", "), func(f wsFrame) bool {
 		for _, part := range text {
 			if !bytes.Contains(f.data, []byte(part)) {
 				return false
 			}
 		}
 		return true
-	}
+	})
+}
+
+func (c *e2eCat) sceneWhere(t *testing.T, label string, filter func(wsFrame) bool) string {
+	t.Helper()
+	match := func(f wsFrame) bool { return hasWS("svg", "")(f) && filter(f) }
 	if c.mirror != nil {
 		defer func() {
 			if t.Failed() {
-				t.Logf("%s: wanted mirror scene %q", c.name, text)
+				t.Logf("%s: wanted mirror scene %q", c.name, label)
 			}
 		}()
 		f := c.mirror.until(t, match)
 		c.updateScene(t, f)
 		c.syncTo(t, uint16(e2eNumber(testObject(t, f.data)["rev"])))
 	} else {
-		c.expect(t, strings.Join(text, ", "), match)
+		c.expect(t, label, match)
 	}
 	return c.svg
 }
