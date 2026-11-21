@@ -187,10 +187,10 @@ var mcpTools = func() []object {
 	rename["anyOf"] = []object{{"required": []string{"to"}}, {"required": []string{"title"}}}
 	jsonObject := object{"type": "object", "additionalProperties": true}
 	return []object{
-		tool("state", "Read keyed device, cat, saved app, timer, and JSON memory snapshots. Use app_name to read one saved app's kind, tick settings, full code, SVG, and persistent state. With device_id, always includes me.device, me.cat, and me.active_app. Use include for specific slices or recent messages and diagnostics.",
+		tool("state", "Read live state by slice. device_id adds me.device, me.cat and me.active_app; app_name adds full saved app source, settings and state.",
 			schema(object{"device_id": text, "include": array(enum(stateSlices...)), "memory_scopes": array(text),
 				"app_name": text, "include_code": flag, "messages_limit": object{"type": "integer", "minimum": 1, "maximum": 30, "default": 10}})),
-		tool("patch", "Change device controls, cat appearance, persistent JSON memory, a timer, or saved apps. Memory and saved app batches each commit atomically. Saved app deletes run before renames; missing deletes are ignored. Stop running apps before changing or deleting their slugs. Renames update armed timers; cancel them before deleting an app they use. Cat edits default to update; timer creation accepts in_seconds or at.",
+		tool("patch", "Change devices, cats, timers, memory or saved apps. Memory and app batches are atomic. Stop running apps before changing slugs. Deletes run before renames and ignore missing slugs; renames update timers. Cancel timers before deleting their app. Cat defaults to update; create timers with in_seconds or at.",
 			schema(object{"device_id": text,
 				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": voice}),
 				"cat": schema(object{"op": enum("update", "load", "reset_blank", "delete_saved"), "name": text, "face_bg": text, "mark_color": text, "accent_color": text,
@@ -200,10 +200,10 @@ var mcpTools = func() []object {
 				"memory": object{"anyOf": []object{memory, array(memory)}},
 				"apps":   schema(object{"delete": array(text), "rename": array(rename)}),
 				"timer":  schema(object{"op": enum("set", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),
-		tool("app", "Display SVG, launch/load/save/delete an app or drawing, exit to the cat, or shallow-patch one running JS app without restarting. One shared state renders separately for each player.",
+		tool("app", "Display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
-		tool("emit", "Start a live two-way call, send a spoken intercom and card, play a melody, or play a sound effect. Use exact device IDs; calls cannot target all.",
+		tool("emit", "Call, send a spoken intercom and card, or play notes or effects. Use exact device IDs; calls cannot target all.",
 			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"),
 				"call":  schema(object{"from": text}, "from"),
 				"notes": notes, "sfx": enum(chimes...), "chime": enum(chimes...)}, "to")),

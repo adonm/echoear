@@ -107,7 +107,7 @@ func liveConfig(t *testing.T, home string) map[string]string {
 		out[key] = env(key, value)
 	}
 	for _, key := range []string{"ECHOEAR_BRIDGE_TOKEN", "ECHOEAR_BRIDGE_PORT", "ECHOEAR_OPENCODE_AGENT",
-		"ECHOEAR_OPENCODE_MODEL", "ECHOEAR_OPENCODE_URL", "ECHOEAR_OPENCODE_PASSWORD", "ECHOEAR_OPENCODE_DIR",
+		"ECHOEAR_OPENCODE_URL", "ECHOEAR_OPENCODE_PASSWORD", "ECHOEAR_OPENCODE_DIR",
 		"TTS_MODEL_DIR"} {
 		out[key] = env(key, out[key])
 	}
@@ -228,7 +228,7 @@ func liveIsolated(t *testing.T, home, data string, conf map[string]string, token
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+root, "ECHOEAR_BRIDGE_TOKEN="+token, "ECHOEAR_BRIDGE_HOST=127.0.0.1",
 		"ECHOEAR_BRIDGE_PORT=0", "ECHOEAR_DB_PATH="+filepath.Join(state, "echoear.db"),
 		"ECHOEAR_TURSO_URL=", "ECHOEAR_TURSO_AUTH_TOKEN=", "ECHOEAR_OTA_DIR="+root, "ECHOEAR_REPO_DIR=..",
-		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"], "ECHOEAR_OPENCODE_MODEL="+conf["ECHOEAR_OPENCODE_MODEL"],
+		"ECHOEAR_OPENCODE_AGENT="+conf["ECHOEAR_OPENCODE_AGENT"],
 		"ECHOEAR_OPENCODE_URL="+conf["ECHOEAR_OPENCODE_URL"], "ECHOEAR_OPENCODE_PASSWORD="+conf["ECHOEAR_OPENCODE_PASSWORD"],
 		"ECHOEAR_OPENCODE_DIR="+liveOpenCodeDir(home, conf), "ECHOEAR_OPENCODE_PAIR_PORT=0",
 		"TTS_MODEL_DIR="+conf["TTS_MODEL_DIR"])
@@ -287,17 +287,15 @@ func TestLive(t *testing.T) {
 	if conf["ECHOEAR_OPENCODE_AGENT"] == "" {
 		conf["ECHOEAR_OPENCODE_AGENT"] = "echoear"
 	}
-	if conf["ECHOEAR_OPENCODE_MODEL"] == "" {
-		conf["ECHOEAR_OPENCODE_MODEL"] = defaultOpenCodeModel
-	}
-	settings, err := openCodeSettings(conf["ECHOEAR_OPENCODE_AGENT"], conf["ECHOEAR_OPENCODE_MODEL"])
-	if err != nil {
-		t.Fatal(err)
-	}
+	settings := openCodeSettings(conf["ECHOEAR_OPENCODE_AGENT"])
 	client := pooledClient()
 	client.Timeout = 115 * time.Second
 	defer client.CloseIdleConnections()
 	oc := liveOpenCode(t, client, home, conf)
+	settings, err = (&openCode{upstream: oc, project: liveOpenCodeDir(home, conf), settings: settings}).configuredSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	port := conf["ECHOEAR_BRIDGE_PORT"]
 	if port == "" {
 		port = "8765"

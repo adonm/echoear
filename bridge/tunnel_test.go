@@ -97,10 +97,8 @@ func TestVirtualClientsPersistenceAndDeviceMerge(t *testing.T) {
 
 func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	r := &mockTunnel{}
-	settings, err := openCodeSettings("echoear", "unit/test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	settings := openCodeSettings("echoear")
+	settings.Model = ocModel{"unit", "test", ""}
 	var creates atomic.Int32
 	prompts := make(chan string, 3)
 	oc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

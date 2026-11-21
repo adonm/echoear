@@ -371,6 +371,29 @@ func echoEarTitle(device, character string) string {
 	return "EchoEar: " + device
 }
 
+func (o *openCode) configuredSettings(ctx context.Context) (ocSettings, error) {
+	settings := o.settings
+	if settings.Agent == "" || settings.Model != (ocModel{}) {
+		return settings, nil
+	}
+	query := url.Values{"location[directory]": {o.project}}
+	agent, err := ocData[struct {
+		ID    string
+		Model ocModel
+	}](ctx, o.upstream, http.MethodGet, "/api/agent/"+url.PathEscape(settings.Agent)+"?"+query.Encode(), nil)
+	if err != nil {
+		return ocSettings{}, err
+	}
+	if agent.ID != settings.Agent {
+		return ocSettings{}, o.invalid()
+	}
+	if agent.Model.Provider == "" || agent.Model.ID == "" {
+		return ocSettings{}, problem(502, "Set the EchoEar agent model in the OpenCode configuration")
+	}
+	settings.Model = agent.Model
+	return settings, nil
+}
+
 func (o *openCode) ensureSession(ctx context.Context, device, character string) (string, error) {
 	sid, err := o.get(device)
 	if err != nil {
@@ -380,10 +403,19 @@ func (o *openCode) ensureSession(ctx context.Context, device, character string) 
 		ID string `json:"id"`
 		ocSettings
 	}
-	settings := o.settings
+	var settings ocSettings
 	if sid != "" {
 		path := "/api/session/" + sid
+		// Both reads precede any writes. Keep the live session permission check,
+		// but fetch the user-owned model selection alongside it.
+		var configuredErr error
+		loadSettings := sync.WaitGroup{}
+		loadSettings.Go(func() { settings, configuredErr = o.configuredSettings(ctx) })
 		current, err := ocData[session](ctx, o.upstream, http.MethodGet, path, nil)
+		loadSettings.Wait()
+		if configuredErr != nil {
+			return "", configuredErr
+		}
 		if err == nil {
 			if current.ID != sid {
 				return "", o.invalid()
@@ -408,6 +440,11 @@ func (o *openCode) ensureSession(ctx context.Context, device, character string) 
 		}
 		var status *upstreamStatus
 		if !errors.As(err, &status) || status.code != 404 {
+			return "", err
+		}
+	} else {
+		settings, err = o.configuredSettings(ctx)
+		if err != nil {
 			return "", err
 		}
 	}

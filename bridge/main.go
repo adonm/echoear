@@ -23,22 +23,15 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-const defaultOpenCodeModel = "opencode/gemini-4-hydrogen#low"
-
-var modelRE = regexp.MustCompile(`^([^/]+)/([^#]+)(?:#(.+))?$`)
 var tokenRE = regexp.MustCompile(`^[!-~]+$`)
 
-func openCodeSettings(agent, spec string) (ocSettings, error) {
-	m := modelRE.FindStringSubmatch(spec)
-	if m == nil {
-		return ocSettings{}, errors.New("ECHOEAR_OPENCODE_MODEL must be provider/model or provider/model#variant")
-	}
-	s := ocSettings{agent, ocModel{m[1], m[2], m[3]}, []ocPermission{{"*", "*", "deny"}}}
+func openCodeSettings(agent string) ocSettings {
+	s := ocSettings{Agent: agent, Permissions: []ocPermission{{"*", "*", "deny"}}}
 	if agent == "echoear" {
 		s.Permissions = append(s.Permissions, ocPermission{"websearch", "*", "allow"},
 			ocPermission{"echoear_*", "*", "allow"}, ocPermission{"execute", "*", "allow"})
 	}
-	return s, nil
+	return s
 }
 
 func run() error {
@@ -47,10 +40,7 @@ func run() error {
 	if !tokenRE.MatchString(token) {
 		return errors.New("set ECHOEAR_BRIDGE_TOKEN to a nonempty ASCII token without whitespace")
 	}
-	settings, err := openCodeSettings(env("ECHOEAR_OPENCODE_AGENT", "echoear"), env("ECHOEAR_OPENCODE_MODEL", defaultOpenCodeModel))
-	if err != nil {
-		return err
-	}
+	settings := openCodeSettings(env("ECHOEAR_OPENCODE_AGENT", "echoear"))
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err

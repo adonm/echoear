@@ -8,14 +8,15 @@ const rateLimit = { status: 429, type: "provider.rate-limit" }
 const base = { sessionID: "ses_smoke", agent: "echoear", kind: "primary", model: gemini }
 const user = { id: "msg_user", type: "user", metadata: { echoEarSource: "typed" } }
 
-async function setup(initial = [user]) {
+async function setup(initial = [user], primary = gemini, fallback = "opencode/claude-haiku-5-5") {
   const hooks = new Map()
   const rows = [...initial]
   const settled = Promise.withResolvers()
   await plugin.setup({
+    agent: { get: async () => ({ model: primary }) },
+    options: { fallback },
     session: {
-      hook: (name, callback, options) => {
-        assert.deepEqual(options, { providerID: "opencode" })
+      hook: (name, callback) => {
         hooks.set(name, callback)
       },
       context: async () => rows,
@@ -46,6 +47,27 @@ async function setup(initial = [user]) {
     },
   }
 }
+
+test("routes a configured primary to a fallback with a nested model ID and variant", async () => {
+  const primary = { providerID: "somewhere", id: "fast", variant: "tiny" }
+  const fallback = { providerID: "somewhere", id: "family/backup", variant: "small" }
+  const h = await setup([user], primary, "somewhere/family/backup#small")
+  await h.response(429)
+  assert.deepEqual(await h.retry(rateLimit), { retry: true, delay: 2000 }) // Unselected model.
+  await h.response(429, { model: primary })
+  assert.deepEqual(await h.retry(rateLimit, { model: primary }), { retry: true, delay: 0 })
+  assert.deepEqual(await h.resolve({ model: primary }), fallback)
+  assert.deepEqual(await h.retry(rateLimit, { model: fallback }), { retry: false })
+})
+
+test("identical references and different providers do not retry as a fallback", async () => {
+  for (const fallback of ["opencode/gemini-4-hydrogen#low", "external/haiku"]) {
+    const h = await setup([user], gemini, fallback)
+    await h.response(429)
+    assert.deepEqual(await h.retry(rateLimit), { retry: true, delay: 2000 })
+    assert.deepEqual(await h.resolve(), gemini)
+  }
+})
 
 test("healthy Gemini stays primary without touching the prompt", async () => {
   const h = await setup()

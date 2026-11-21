@@ -80,25 +80,25 @@ func TestLiveEchoEarCodeMode(t *testing.T) {
 		}
 	}
 	if config["ECHOEAR_OPENCODE_URL"] != "" {
-		type plugin struct{ Source struct{ Type string } }
+		type plugin struct {
+			ID     string
+			Source struct{ Type string }
+		}
 		plugins, err := ocData[[]plugin](t.Context(), api, http.MethodGet, "/api/plugin", nil)
-		if err != nil || len(mcp) != 1 || slices.ContainsFunc(plugins, func(p plugin) bool { return p.Source.Type != "builtin" }) {
-			t.Fatalf("expected only EchoEar MCP and bundled plugins: %v", err)
+		if err != nil || len(mcp) != 1 || slices.ContainsFunc(plugins, func(p plugin) bool { return p.Source.Type != "builtin" && p.ID != "echoear.model-fallback" }) {
+			t.Fatalf("expected only EchoEar MCP and EchoEar or bundled plugins: %v", err)
 		}
 	}
-	model := config["ECHOEAR_OPENCODE_MODEL"]
-	if model == "" {
-		model = defaultOpenCodeModel
-	}
-	settings, err := openCodeSettings("echoear", model)
-	if err != nil {
-		t.Fatal(err)
-	}
+	settings := openCodeSettings("echoear")
 	root, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	prefix := "echoear-live-mcp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	liveSessions(t, api, prefix)
 	o := newOpenCode(root, api, testDB(t, ":memory:", ""), liveOpenCodeDir(home, config), settings)
+	settings, err = o.configuredSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	prompt := turnPrompt(peer{DeviceID: id, Character: character}, false, "typed",
 		"Run a live screen and controls check. Use Code Mode execute to call tools.echoear.state({device_id:'"+id+
 			"',include:['devices']}), tools.echoear.patch({device_id:'"+id+"',device:{sleep:false}}), tools.echoear.emit({to:'"+id+

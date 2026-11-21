@@ -37,6 +37,49 @@ func expectValue[T comparable](t *testing.T, result <-chan T, want T) {
 	}
 }
 
+func TestReconcileSessionUsesCurrentAgentModel(t *testing.T) {
+	const device, sid = "echoear-model-test", "ses-existing"
+	models := []ocModel{{"a", "first", "low"}, {"b", "second", "small"}}
+	changed := make(chan ocModel, len(models))
+	current := make(chan ocModel, 1)
+	current <- models[0]
+	o := testOpenCode(t, t.Context(), t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agent/echoear":
+			if r.URL.Query().Get("location[directory]") == "" {
+				t.Error("model lookup must use the session location")
+			}
+			model := <-current
+			current <- model
+			sendJSON(w, 200, object{"data": object{"id": "echoear", "model": model}})
+		case "/api/session/" + sid:
+			sendJSON(w, 200, object{"data": object{"id": sid, "agent": "echoear", "model": ocModel{"old", "model", ""}}})
+		case "/api/session/" + sid + "/model":
+			var in struct{ Model ocModel }
+			if json.NewDecoder(r.Body).Decode(&in) != nil {
+				t.Error("invalid model update")
+			}
+			changed <- in.Model
+			sendJSON(w, 200, object{})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	o.settings.Agent = "echoear"
+	if err := o.save(device, sid); err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range models {
+		<-current
+		current <- model
+		got, err := o.ensureSession(t.Context(), device, "Cat")
+		if err != nil || got != sid {
+			t.Fatalf("did not preserve session %q: %q, %v", sid, got, err)
+		}
+		expectValue(t, changed, model)
+	}
+}
+
 func TestOpenCodeAdmitsPromptBeforeEventStreamConnects(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

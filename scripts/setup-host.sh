@@ -98,14 +98,12 @@ link_file() {
     ln -s -- "$source" "$destination"
 }
 link_file "$REPO_DIR/agents/echoear.md" "$oc_root/config/opencode/agents/echoear.md"
-install -m 600 -- "$REPO_DIR/config/opencode/echoear-fallback.js" \
-    "$oc_root/config/opencode/plugins/echoear-model-router.js"
+python3 "$REPO_DIR/scripts/setup-opencode-config.py" "$oc_root/config/opencode" "$bridge_bin" "$env_file"
 if [[ -f "$data_home/opencode/auth.json" ]]; then
     link_file "$data_home/opencode/auth.json" "$oc_root/data/opencode/auth.json"
 fi
 
-python3 - "$env_file" "$oc_root" "$bridge_bin" <<'PY'
-import json
+python3 - "$env_file" <<'PY'
 import os
 import re
 import secrets
@@ -113,15 +111,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-env_file, root, bridge = sys.argv[1:]
-config = Path(root, "config/opencode/opencode.jsonc")
-config.write_text(json.dumps({
-    "$schema": "https://opencode.ai/config.json",
-    "default_agent": "echoear",
-    "mcp": {"servers": {"echoear": {"type": "local", "command": [bridge, "mcp"]}}},
-}, indent=2) + "\n")
-
-path = Path(env_file)
+path = Path(sys.argv[1])
 old = path.read_text() if path.exists() else (
     "ECHOEAR_BRIDGE_HOST=0.0.0.0\nECHOEAR_BRIDGE_PORT=8765\n"
     f"ECHOEAR_BRIDGE_TOKEN={secrets.token_hex(32)}\n"
@@ -238,36 +228,48 @@ env_file, root, opencode = sys.argv[1:]
 settings = dict(re.findall(r"^\s*(ECHOEAR_OPENCODE_\w+)\s*=([^\n]*)", Path(env_file).read_text(), re.M))
 url = settings["ECHOEAR_OPENCODE_URL"]
 password = settings["ECHOEAR_OPENCODE_PASSWORD"]
-model = settings.get("ECHOEAR_OPENCODE_MODEL", "opencode/gemini-4-hydrogen#low").strip().strip("'\"")
-provider = model.split("/", 1)[0]
-if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", provider):
-    sys.exit("Invalid provider in ECHOEAR_OPENCODE_MODEL")
-
 auth = base64.b64encode(f"opencode:{password}".encode()).decode()
-request = urllib.request.Request(f"{url}/api/info", headers={"Authorization": f"Basic {auth}"})
 client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+def get(path):
+    request = urllib.request.Request(f"{url}{path}", headers={"Authorization": f"Basic {auth}"})
+    with client.open(request, timeout=1) as response:
+        return json.load(response)
+
 deadline = time.monotonic() + 10
 while True:
     try:
-        with client.open(request, timeout=1):
-            break
+        get("/api/info")
+        break
     except OSError:
         if time.monotonic() >= deadline:
             sys.exit("Dedicated OpenCode API did not become ready with Basic auth")
         time.sleep(0.2)
 
-marker = Path(root, "state", f"imported-provider-{provider}")
-if not marker.exists():
-    try:
-        credentials = subprocess.run([opencode, "auth", "export", provider], check=True,
-                                     capture_output=True, timeout=20).stdout
-        if json.loads(credentials):
-            subprocess.run([opencode, "--server", url, "auth", "import"], input=credentials,
-                           env={**os.environ, "OPENCODE_SERVER_PASSWORD": password}, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-            marker.touch()
-    except (OSError, ValueError, subprocess.SubprocessError):
-        sys.exit("Could not import the configured provider's OpenCode credentials")
+try:
+    primary = get("/api/agent/echoear")["data"]["model"]["providerID"]
+    router = next(p for entry in get("/api/config")
+                  if entry.get("path") == str(Path(root, "config/opencode/opencode.jsonc"))
+                  for p in entry["info"]["plugins"]
+                  if isinstance(p, dict) and p.get("package") == "./echoear-model-router")
+    fallback = router["options"]["fallback"].split("/", 1)[0]
+except (OSError, KeyError, StopIteration, TypeError, ValueError):
+    sys.exit("Could not read the EchoEar model settings from the dedicated OpenCode config")
+for provider in sorted({primary, fallback}):
+    if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", provider):
+        sys.exit("Invalid EchoEar model provider")
+    marker = Path(root, "state", f"imported-provider-{provider}")
+    if not marker.exists():
+        try:
+            credentials = subprocess.run([opencode, "auth", "export", provider], check=True,
+                                         capture_output=True, timeout=20).stdout
+            if json.loads(credentials):
+                subprocess.run([opencode, "--server", url, "auth", "import"], input=credentials,
+                               env={**os.environ, "OPENCODE_SERVER_PASSWORD": password}, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+                marker.touch()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            sys.exit("Could not import the configured providers' OpenCode credentials")
 PY
 
 printf '%s\n' 'Default voices: Heart (af_heart); Mint uses Fable (bm_fable).'
