@@ -16,6 +16,7 @@ import (
 )
 
 const mcpSchemaMeta = "mcp_schema_hash"
+const mcpRefreshMeta = "mcp_contract_refresh_progress"
 const mcpRuntimeContract = "2" // Bump when runtime semantics change without a schema or prompt edit.
 
 func hashMCPSchema(tools []object, instructions, runtime, prompt string) string {
@@ -69,6 +70,61 @@ func (o *openCode) compactActiveSessions(ctx context.Context, device string) (co
 	return result, errors.Join(failures...)
 }
 
+type schemaSessionRefresh struct {
+	Session, Item string
+	Done          bool
+}
+
+type schemaRefreshProgress struct {
+	Hash        string
+	Reconnected bool
+	Sessions    map[string]schemaSessionRefresh
+}
+
+type diagSchemaRefresh struct {
+	State    string     `json:"state"`
+	Attempts int        `json:"attempts"`
+	Pending  *int       `json:"pending_sessions,omitempty"`
+	RetryAt  *time.Time `json:"next_retry_at,omitempty"`
+}
+
+func (b *bridge) refreshPending(n int) {
+	b.diag.mu.Lock()
+	b.diag.refresh.Pending = &n
+	b.diag.mu.Unlock()
+}
+
+func (b *bridge) runSchemaUpgrade(ctx context.Context, delay, maxDelay time.Duration) {
+	for attempt := 1; ctx.Err() == nil; attempt++ {
+		b.diag.mu.Lock()
+		b.diag.refresh.State, b.diag.refresh.Attempts, b.diag.refresh.RetryAt = "running", attempt, nil
+		b.diag.mu.Unlock()
+		err := b.syncSchemaUpgrade(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			b.diag.mu.Lock()
+			b.diag.refresh.State = "current"
+			b.diag.mu.Unlock()
+			return
+		}
+		log.Printf("EchoEar MCP schema upgrade pending: %v", err)
+		next := time.Now().Add(delay).UTC()
+		b.diag.mu.Lock()
+		b.diag.refresh.State, b.diag.refresh.RetryAt = "waiting", &next
+		b.diag.mu.Unlock()
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		delay = min(2*delay, maxDelay)
+	}
+}
+
 func (b *bridge) syncSchemaUpgrade(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -82,26 +138,117 @@ func (b *bridge) syncSchemaUpgrade(ctx context.Context) error {
 	}
 	current := hashMCPSchema(mcpTools, mcpInstructions, mcpRuntimeContract, string(prompt))
 	previous, err := b.db.getMeta(ctx, mcpSchemaMeta)
-	if err != nil || previous == current {
-		return err
-	}
-	if err := b.oc.waitForStartup(ctx); err != nil {
-		return err
-	}
-	reconnect, stop := context.WithTimeout(ctx, 15*time.Second)
-	err = b.oc.ReconnectMCP(reconnect, "echoear")
-	stop()
-	if err != nil && ctx.Err() == nil {
-		log.Printf("EchoEar MCP reconnect (best effort): %v", err)
-	}
-	result, err := b.oc.compactActiveSessions(ctx, "")
 	if err != nil {
 		return err
 	}
-	if err := b.db.setMeta(ctx, mcpSchemaMeta, current); err != nil {
+	if previous == current {
+		b.refreshPending(0)
+		return nil
+	}
+	raw, err := b.db.getMeta(ctx, mcpRefreshMeta)
+	if err != nil {
 		return err
 	}
-	log.Printf("EchoEar MCP schema upgraded: compacted=%v skipped=%v", result.Compacted, result.Skipped)
+	var progress schemaRefreshProgress
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &progress); err != nil {
+			return errors.New("invalid stored MCP contract refresh progress")
+		}
+	}
+	if progress.Hash != current {
+		progress = schemaRefreshProgress{Hash: current}
+	}
+	if progress.Sessions == nil {
+		progress.Sessions = make(map[string]schemaSessionRefresh)
+	}
+	save := func() error {
+		raw, err := json.Marshal(progress)
+		if err != nil {
+			return err
+		}
+		return b.db.setMeta(ctx, mcpRefreshMeta, string(raw))
+	}
+	mapped, err := b.oc.store.allContext(ctx)
+	if err != nil {
+		return err
+	}
+	var remaining []string
+	for _, id := range slices.Sorted(maps.Keys(mapped)) {
+		if sid := mapped[id]; sid != "" && (progress.Sessions[id].Session != sid || !progress.Sessions[id].Done) {
+			remaining = append(remaining, id)
+		}
+	}
+	b.refreshPending(len(remaining))
+	if err := b.oc.waitForStartup(ctx); err != nil {
+		return err
+	}
+	if !progress.Reconnected {
+		reconnect, stop := context.WithTimeout(ctx, 15*time.Second)
+		err = b.oc.ReconnectMCP(reconnect, "echoear")
+		stop()
+		if err != nil {
+			return err
+		}
+		progress.Reconnected = true
+		if err := save(); err != nil {
+			return err
+		}
+	}
+	var failures []error
+	var compacted, skipped []string
+	pending := len(remaining)
+	for _, id := range remaining {
+		if ctx.Err() != nil {
+			return errors.Join(append(failures, ctx.Err())...)
+		}
+		sid := mapped[id]
+		s := progress.Sessions[id]
+		if s.Session != sid {
+			s = schemaSessionRefresh{Session: sid}
+		}
+		checkpoint := func(item string) error {
+			s.Item = item
+			progress.Sessions[id] = s
+			return save()
+		}
+		ok, err := b.oc.compactSession(ctx, id, sid, s.Item, checkpoint)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", id, err))
+			continue
+		}
+		s.Done, s.Item = true, ""
+		progress.Sessions[id] = s
+		if err := save(); err != nil {
+			return err
+		}
+		pending--
+		b.refreshPending(pending)
+		if ok {
+			compacted = append(compacted, id)
+		} else {
+			skipped = append(skipped, id)
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	// Retire the checkpoints together with the contract hash.
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		mcpSchemaMeta, current); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key=?`, mcpRefreshMeta); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	log.Printf("EchoEar MCP schema upgraded: compacted=%v skipped=%v", compacted, skipped)
 	return nil
 }
 

@@ -122,6 +122,7 @@ type diagnostics struct {
 	metrics [diagMetricCount]diagRing[float64]
 	turns   diagRing[*diagTurn]
 	system  diagSystem
+	refresh diagSchemaRefresh
 }
 
 type turnTrace struct {
@@ -253,6 +254,7 @@ type diagReport struct {
 	Turns     []diagTurn             `json:"recent_turns"`
 	Devices   []diagDevice           `json:"devices"`
 	SVGCache  diagCache              `json:"svg_cache"`
+	Refresh   diagSchemaRefresh      `json:"mcp_contract_refresh"`
 	diagSystem
 }
 
@@ -266,6 +268,10 @@ func (b *bridge) diagnosticReport() diagReport {
 	out.SVGCache.Hits, out.SVGCache.Misses = screens.stats()
 	b.diag.mu.Lock()
 	out.diagSystem = b.diag.system
+	out.Refresh = b.diag.refresh
+	if out.Refresh.State == "" {
+		out.Refresh.State = "not_started"
+	}
 	for i, name := range diagMetricNames {
 		out.Latency[name] = summarize(b.diag.metrics[i])
 	}

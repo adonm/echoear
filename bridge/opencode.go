@@ -294,6 +294,10 @@ func (o *openCode) ReconnectMCP(ctx context.Context, name string) error {
 
 // CompactSession returns false without an error for an ineligible or stale session.
 func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool, error) {
+	return o.compactSession(ctx, device, sid, "", nil)
+}
+
+func (o *openCode) compactSession(ctx context.Context, device, sid, itemID string, checkpoint func(string) error) (bool, error) {
 	if sid == "" {
 		return false, nil
 	}
@@ -326,15 +330,23 @@ func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool
 	if session.ID != sid {
 		return false, o.invalid()
 	}
-	item, err := ocData[struct{ ID, SessionID, Type string }](ctx, o.upstream, http.MethodPost, path+"/compact", object{"delivery": "queue"})
-	if isMissing(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if item.ID == "" || item.SessionID != sid || item.Type != "compaction" {
-		return false, o.invalid()
+	if itemID == "" {
+		item, err := ocData[struct{ ID, SessionID, Type string }](ctx, o.upstream, http.MethodPost, path+"/compact", object{"delivery": "queue"})
+		if isMissing(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if item.ID == "" || item.SessionID != sid || item.Type != "compaction" {
+			return false, o.invalid()
+		}
+		itemID = item.ID
+		if checkpoint != nil {
+			if err := checkpoint(itemID); err != nil {
+				return false, err
+			}
+		}
 	}
 	// Admission is not completion. Keep the gate until the result is projected.
 	err = o.jsonCall(ctx, http.MethodPost, "/api/experimental/session/"+sid+"/wait", nil, nil)
@@ -347,11 +359,24 @@ func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool
 	message, err := ocData[struct {
 		ID, Type, Status string
 		Error            struct{ Type, Message string }
-	}](ctx, o.upstream, http.MethodGet, path+"/message/"+url.PathEscape(item.ID), nil)
+	}](ctx, o.upstream, http.MethodGet, path+"/message/"+url.PathEscape(itemID), nil)
+	if isMissing(err) && checkpoint != nil {
+		// A server restart may lose an admitted item before projecting a
+		// message. Do not issue another while the first is still queued.
+		var inbox struct {
+			Data   []struct{ ID string }
+			Cursor struct{ Next string }
+		}
+		inboxErr := o.jsonCall(ctx, http.MethodGet, path+"/inbox", nil, &inbox)
+		if inboxErr == nil && inbox.Data != nil && inbox.Cursor.Next == "" &&
+			!slices.ContainsFunc(inbox.Data, func(i struct{ ID string }) bool { return i.ID == itemID }) {
+			return false, errors.Join(err, checkpoint(""))
+		}
+	}
 	if err != nil {
 		return false, err
 	}
-	if message.ID != item.ID || message.Type != "compaction" {
+	if message.ID != itemID || message.Type != "compaction" {
 		return false, o.invalid()
 	}
 	// OpenCode reports this when the session has no history beyond its last compaction.
@@ -359,7 +384,11 @@ func (o *openCode) CompactSession(ctx context.Context, device, sid string) (bool
 		return false, nil
 	}
 	if message.Status != "completed" {
-		return false, problem(502, "OpenCode did not complete session compaction")
+		err := problem(502, "OpenCode did not complete session compaction")
+		if message.Status == "failed" && checkpoint != nil {
+			return false, errors.Join(err, checkpoint(""))
+		}
+		return false, err
 	}
 	return true, nil
 }

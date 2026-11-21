@@ -148,6 +148,10 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	calls = nil
 	mu.Unlock()
 	fail.Store(false)
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b = open(testDB(t, dbPath, ""))
 	if err := b.syncSchemaUpgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -160,19 +164,91 @@ func TestSchemaUpgradeCompactsActiveSessions(t *testing.T) {
 	}
 	want := []string{
 		"GET /api/info",
-		"POST /api/experimental/mcp/echoear/connect",
 		"GET /api/session/ses-cake", "POST /api/session/ses-cake/compact",
 		"POST /api/experimental/session/ses-cake/wait", "GET /api/session/ses-cake/message/msg-compaction",
-		"GET /api/session/ses-mint", "POST /api/session/ses-mint/compact",
-		"POST /api/experimental/session/ses-mint/wait", "GET /api/session/ses-mint/message/msg-compaction",
-		"GET /api/session/ses-fresh", "POST /api/session/ses-fresh/compact",
-		"POST /api/experimental/session/ses-fresh/wait", "GET /api/session/ses-fresh/message/msg-compaction",
-		"GET /api/session/ses-stale",
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if !slices.Equal(calls, want) {
 		t.Fatalf("OpenCode calls = %v; want %v", calls, want)
+	}
+}
+
+func TestContractRefreshRetriesAdmittedItemAndReportsState(t *testing.T) {
+	var enqueued, waits atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/info":
+			sendJSON(w, 200, object{})
+		case "/api/experimental/mcp/echoear/connect":
+			w.WriteHeader(204)
+		case "/api/session/ses-cake":
+			sendJSON(w, 200, object{"data": object{"id": "ses-cake"}})
+		case "/api/session/ses-cake/compact":
+			enqueued.Add(1)
+			sendJSON(w, 200, object{"data": object{"id": "msg-compaction", "sessionID": "ses-cake", "type": "compaction"}})
+		case "/api/experimental/session/ses-cake/wait":
+			if waits.Add(1) == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			w.WriteHeader(204)
+		case "/api/session/ses-cake/message/msg-compaction":
+			sendJSON(w, 200, object{"data": object{"id": "msg-compaction", "type": "compaction", "status": "completed"}})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer api.Close()
+	ctx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	db := testDB(t, ":memory:", "")
+	b := &bridge{db: db, token: "unit", oc: newOpenCode(ctx, upstream{"OpenCode", api.Client(), fixedEndpoint{base: api.URL}},
+		db, "", ocSettings{})}
+	if err := b.oc.save("Cake", "ses-cake"); err != nil {
+		t.Fatal(err)
+	}
+	lan := httptest.NewServer(b)
+	defer lan.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.runSchemaUpgrade(ctx, 500*time.Millisecond, time.Second)
+	}()
+	defer func() { stop(); <-done }()
+	diag := func() diagSchemaRefresh {
+		t.Helper()
+		raw := testRequest(t, http.MethodGet, lan.URL+"/api/diagnostics", "unit", nil, 200)
+		var report diagReport
+		if err := json.Unmarshal(raw, &report); err != nil {
+			t.Fatal(err)
+		}
+		return report.Refresh
+	}
+	for {
+		got := diag()
+		if got.State == "waiting" {
+			if got.Attempts != 1 || got.Pending == nil || *got.Pending != 1 || got.RetryAt == nil {
+				t.Fatalf("waiting state lacks retry details: %+v", got)
+			}
+			break
+		}
+		if got.State == "current" || ctx.Err() != nil {
+			t.Fatalf("retry never reported pending: %+v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("retry did not settle")
+	}
+	got := diag()
+	if got.State != "current" || got.Attempts != 2 || got.Pending == nil || *got.Pending != 0 || got.RetryAt != nil {
+		t.Fatalf("wrong settled diagnostic state: %+v", got)
+	}
+	if enqueued.Load() != 1 || waits.Load() != 2 {
+		t.Fatal("retry duplicated an already admitted compaction")
 	}
 }
 

@@ -204,9 +204,7 @@ func run() error {
 	schemaDone := make(chan struct{})
 	go func() {
 		defer close(schemaDone)
-		if err := b.syncSchemaUpgrade(root); err != nil && root.Err() == nil {
-			log.Printf("EchoEar MCP schema upgrade pending: %v", err)
-		}
+		b.runSchemaUpgrade(root, 5*time.Second, 5*time.Minute)
 	}()
 	defer func() { finish(); <-schemaDone }()
 	select {

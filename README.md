@@ -377,7 +377,7 @@ synthesizing sentences while OpenCode streams its reply over SSE. Firmware
 | --- | --- |
 | `GET /health` | Hex, OpenCode, and TTS readiness |
 | `GET /ws`, `GET /app` | WebSocket hub and embedded browser UI |
-| `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, Kokoro readiness, and bridge and host resource usage |
+| `GET /api/diagnostics` | LAN-only device telemetry, WebSocket RTT, pipeline timings, Kokoro readiness, bridge and host resource usage, and MCP contract refresh state (`mcp_contract_refresh`) |
 | `GET /api/devices` | Remembered devices with `device_id`, `character`, `cat`, `voice`, and current `ws_connected`; hardware also includes `ip`, `port`, and `last_seen` |
 | `GET /api/scope` | Current scope and ordered `voices` catalog |
 | `POST /api/virtual-clients` | `{}` creates a blank cat; optional legacy `character` and `theme` seed a designed cat |
