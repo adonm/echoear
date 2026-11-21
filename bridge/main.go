@@ -52,6 +52,29 @@ func run() error {
 	data := env("XDG_DATA_HOME", filepath.Join(home, ".local/share"))
 	state := env("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
 	local := filepath.Join(data, "echoear")
+	var hex hexClient
+	var parakeet *parakeetSTT
+	switch env("ECHOEAR_STT", "hex") {
+	case "hex":
+		hex = hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: filepath.Join(data, "hex/local-api.json"), read: hexEndpoint}},
+			&fileCache[string]{path: filepath.Join(data, "hex/settings.json"), read: hexQuery}}
+		defer hex.client.CloseIdleConnections()
+	case "parakeet":
+		path := filepath.Join(local, "stt-models", parakeetModel)
+		if err := checkParakeetModel(path); err != nil {
+			return err
+		}
+		parakeet, err = openParakeet(path)
+		if err != nil {
+			return err
+		}
+		defer parakeet.close()
+		if _, err := parakeet.transcribe(context.Background(), make([]byte, sampleRate*2)); err != nil {
+			return err
+		}
+	default:
+		return errors.New("ECHOEAR_STT must be hex or parakeet")
+	}
 	var endpointConfig *endpointSettings
 	if path := os.Getenv("ECHOEAR_SILERO_VAD_MODEL"); path != "" {
 		if err := checkEndpointModel(path); err != nil {
@@ -124,14 +147,12 @@ func run() error {
 		defer func() { finish(); <-done }()
 	}
 	oc := newOpenCode(root, ocAPI, db, ocDir, settings)
-	hex := hexClient{upstream{"Hex", pooledClient(), &fileCache[endpoint]{path: filepath.Join(data, "hex/local-api.json"), read: hexEndpoint}},
-		&fileCache[string]{path: filepath.Join(data, "hex/settings.json"), read: hexQuery}}
 	modelDir := ttsModelDir(local)
 	worker := newSynthWorker(root, func() (speechEngine, error) {
 		return openKokoro(modelDir, min(kokoroThreads, runtime.GOMAXPROCS(0)))
 	})
 	b := &bridge{root: root, token: token, parentToken: parentToken, db: db, peers: peers{deviceStore(db)},
-		hex: hex, endpoint: endpointConfig, oc: oc, pairPort: pairPort, worker: worker,
+		hex: hex, parakeet: parakeet, endpoint: endpointConfig, oc: oc, pairPort: pairPort, worker: worker,
 		agentPath: filepath.Join(project, "agents/echoear.md"),
 		voices:    deviceVoiceStore(db, fallbackVoice),
 		virtual:   virtualStore(db), history: &chatHistory{db},
@@ -228,7 +249,6 @@ func run() error {
 	b.ws.shutdown()
 	<-worker.done
 	oc.client.CloseIdleConnections()
-	hex.client.CloseIdleConnections()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
