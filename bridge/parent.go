@@ -76,8 +76,10 @@ func parentScene(reason parentReason) sceneView {
 	case parentLimit:
 		sub = "Let's play again tomorrow."
 	}
-	return sceneView{bg: menuBG, title: title, art: `<path d="M193 93a27 27 0 1 0 22 37 27 27 0 0 1-22-37z" fill="#FFD68B"/>` +
-		svgLabel(180, 183, 27, title, menuInk) + svgLabel(180, 220, 17, sub, menuMuted)}
+	return sceneView{bg: menuBG, title: title,
+		art: svgRect(52, 76, 256, 166, uiCardRadius, menuCard, menuBorder, 2) +
+			`<path d="M193 93a27 27 0 1 0 22 37 27 27 0 0 1-22-37z" fill="` + menuWarning + `"/>` +
+			svgLabel(180, 183, 27, title, menuInk) + svgLabel(180, 220, 17, sub, menuMuted)}
 }
 
 // parentRuntime, like device activity, is owned by the hub lock.

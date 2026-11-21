@@ -74,18 +74,18 @@ func uiWrap(text string, width float64, size int, bold bool, limit int) []string
 	return lines
 }
 
-type uiPalette struct{ bg, card, ink, accent string }
+type uiPalette struct{ bg, card, ink, accent, border string }
 
 func uiColors(theme string) uiPalette {
 	switch theme {
 	case "night":
-		return uiPalette{"#141825", "#242B3F", "#F2F4FB", "#ACB9ED"}
+		return uiPalette{menuBG, menuCard, menuInk, menuPrimary, menuBorder}
 	case "mint":
-		return uiPalette{"#17463F", "#E9FFF5", "#163A33", "#27826E"}
+		return uiPalette{"#16342C", "#F0FAF5", "#1E312A", "#226850", "#88A69A"}
 	case "sky":
-		return uiPalette{"#254C69", "#EDF7FF", "#192E48", "#437DA0"}
+		return uiPalette{"#23344C", "#F3F7FD", "#1D2F47", "#355F99", "#92A0B6"}
 	default: // warm
-		return uiPalette{"#6F423D", "#FFFAEE", "#392429", "#A45B48"}
+		return uiPalette{menuBG, "#FFFAF5", "#292130", "#813F35", "#978391"}
 	}
 }
 
@@ -123,7 +123,7 @@ func uiLabel(x, y, size, width int, text, ink string, bold bool) string {
 
 func uiButton(b bounds, id, label, sub string, p uiPalette) string {
 	x, y, w, h := b.x, b.y, b.w, b.h
-	art := svgRect(x, y, w, h, h/2, p.card, p.accent, 2)
+	art := svgRect(x, y, w, h, uiButtonRadius, p.card, p.accent, 2)
 	if sub == "" {
 		art += uiLabel(x+w/2, y+h/2+6, 17, w-16, label, p.ink, true)
 	} else {
@@ -140,9 +140,9 @@ type uiPage struct {
 }
 
 func (p uiPage) svg(index, count, size int, colors uiPalette) string {
-	s := sceneView{bg: colors.bg, art: svgRect(42, 88, 276, 202, 22, colors.card, "none", 0)}
+	s := sceneView{bg: colors.bg, art: svgRect(42, 88, 276, 202, uiCardRadius, colors.card, colors.border, 2)}
 	counter := fmt.Sprintf("%d/%d", index+1, count)
-	s.art += uiText(180, 68, fitLabel(counter, 16, 40), counter, "#FFFFFF", "middle", true)
+	s.art += uiText(180, 68, fitLabel(counter, 16, 40), counter, menuInk, "middle", true)
 	// All four corners still fit the round screen after 8 px of touch padding.
 	if index > 0 {
 		s.art += uiButton(bounds{90, 42, 68, 40}, "prev", "Prev", "", colors)
@@ -277,7 +277,7 @@ func installAppUI(vm *goja.Runtime, tapChime func()) {
 	_ = ui.Set("choices", func(c goja.FunctionCall) goja.Value {
 		opts := c.Argument(0)
 		p := uiColors(field(opts, "theme"))
-		s := sceneView{bg: p.bg, art: svgRect(48, 68, 264, 222, 22, p.card, "none", 0)}
+		s := sceneView{bg: p.bg, art: svgRect(48, 68, 264, 222, uiCardRadius, p.card, p.border, 2)}
 		s.art += uiLabel(180, 88, 13, 176, field(opts, "badge"), p.ink, true)
 		s.art += uiLabel(180, 111, 22, 232, field(opts, "title"), p.ink, true)
 		s.art += uiLabel(180, 284, 13, 200, field(opts, "footer"), p.ink, false)

@@ -159,5 +159,12 @@ func (a *appInstance) installTemplate() (string, error) {
 	_ = a.vm.Set("templateData", v)
 	_ = a.vm.Set("templateName", a.spec.Template)
 	_ = a.vm.Set("templateTitle", a.spec.Title)
+	palettes := make(map[string][]string, 4)
+	for _, theme := range []string{"warm", "night", "mint", "sky"} {
+		p := uiColors(theme)
+		palettes[theme] = []string{p.bg, p.card, p.ink, p.accent, p.border}
+	}
+	_ = a.vm.Set("templatePalettes", palettes)
+	_ = a.vm.Set("templateRadii", []int{uiButtonRadius, uiCardRadius})
 	return appTemplatesJS, nil
 }

@@ -13,9 +13,20 @@ import (
 const svgStart = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 360">`
 
 const (
-	menuBG    = "#151826"
-	menuInk   = "#F2F4FB"
-	menuMuted = "#BFC9DD"
+	// Match the web shell's Oat dark tokens without changing cat artwork.
+	menuBG         = "#191620"
+	menuInk        = "#FAEFF6"
+	menuCard       = "#241F2D"
+	menuMuted      = "#C9B9CD"
+	menuSecondary  = "#3A2C44"
+	menuBorder     = "#8D7994"
+	menuPrimary    = "#FFC1A8"
+	menuPrimaryInk = "#38221E"
+	menuDanger     = "#FFAFC2"
+	menuSuccess    = "#9AE5C3"
+	menuWarning    = "#FFD08E"
+	uiButtonRadius = 12
+	uiCardRadius   = 16
 )
 
 var uiIcons = map[string]string{
@@ -41,11 +52,15 @@ type bounds struct{ x, y, w, h int }
 type palette struct{ bg, ink string }
 
 var (
-	navPalette    = palette{"#262E43", menuInk}
-	dangerPalette = palette{"#8C3045", "#FFFFFF"}
-	answerPalette = palette{"#54E6A9", "#0A2821"}
-	volumePalette = palette{"#203144", "#A6DCFF"}
-	voicePalette  = palette{"#322741", "#E2C5FF"}
+	navPalette     = palette{menuCard, menuInk}
+	dangerPalette  = palette{menuCard, menuDanger}
+	answerPalette  = palette{menuSuccess, "#172923"}
+	primaryPalette = palette{menuPrimary, menuPrimaryInk}
+	volumePalette  = palette{menuSecondary, menuInk}
+	voicePalette   = palette{menuSecondary, menuInk}
+	successPalette = palette{menuCard, menuSuccess}
+	warningPalette = palette{menuCard, menuWarning}
+	accentPalette  = palette{menuCard, menuPrimary}
 )
 
 type tile struct {
@@ -61,10 +76,10 @@ func actionTile(id, label, icon string, colors palette) tile {
 func (s *sceneView) control(b bounds, t tile) {
 	x, y, w, h := b.x, b.y, b.w, b.h
 	bg, fg, text, sub, icon := t.colors.bg, t.colors.ink, t.label, t.detail, t.icon
-	r, tx, ty, size := h/2, x+w/2, y+h/2+6, 16
+	r, tx, ty, size := min(uiButtonRadius, h/2), x+w/2, y+h/2+6, 16
 	ix, iy, is := x+w/2-10, y+h/2-10, 20
 	if h == 78 {
-		r, iy, ty, size = 18, y+13, y+57, 18
+		r, iy, ty, size = uiCardRadius, y+13, y+57, 18
 		if sub != "" {
 			iy, ty = y+9, y+47
 		}
@@ -79,7 +94,11 @@ func (s *sceneView) control(b bounds, t tile) {
 		size = 18
 		ix, tx = x+w/2-(runeLen(text)*size/2+26)/2, tx+12
 	}
-	art := svgRect(x, y, w, h, r, bg, fg, 2)
+	border := fg
+	if (bg == menuCard || bg == menuSecondary) && fg == menuInk {
+		border = menuBorder
+	}
+	art := svgRect(x, y, w, h, r, bg, border, 2)
 	if path := uiIcons[icon]; path != "" {
 		scale := float64(is) / 24
 		art += fmt.Sprintf(`<path d="%s" transform="translate(%d %d) scale(%.4f %.4f)" fill="none" stroke="%s" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`, path, ix, iy, scale, scale, fg)
@@ -108,7 +127,7 @@ func (s *sceneView) stopControl(taps int) {
 	if taps > 0 {
 		label = fmt.Sprintf("Tap %d×", 3-taps)
 	}
-	s.control(bounds{120, 292, 120, 46}, actionTile("stop", label, "stop", palette{"#32263C", "#FFE3E8"}))
+	s.control(bounds{120, 292, 120, 46}, actionTile("stop", label, "stop", dangerPalette))
 }
 
 func menuHeader(title string) sceneView {
@@ -166,20 +185,20 @@ func menuHome(voice string, auto bool, level int, scoped, calling bool, page int
 	}
 	var choices []tile
 	if calling {
-		choices = append(choices, link("call", "Call", "", "call", palette{"#193833", "#80F1C5"}))
+		choices = append(choices, link("call", "Call", "", "call", successPalette))
 	}
-	choices = append(choices, link("intercom", "Talk to…", "", "intercom", palette{"#372530", "#FFADAC"}))
+	choices = append(choices, link("intercom", "Talk to…", "", "intercom", accentPalette))
 	if !scoped {
-		choices = append(choices, link(drawerGames, "Games", "", "games", palette{"#342943", "#FFD68B"}))
+		choices = append(choices, link(drawerGames, "Games", "", "games", warningPalette))
 	}
 	choices = append(choices, link(drawerHistory, "History", "", "history", volumePalette))
 	if !scoped {
-		choices = append(choices, link(drawerMemories, "Memories", "", "memories", palette{"#372530", "#FFADAC"}))
+		choices = append(choices, link(drawerMemories, "Memories", "", "memories", accentPalette))
 	}
 	choices = append(choices, link("voice", "Voice", voiceName(voice), "voice", voicePalette),
 		link("volume", "Volume", volumeLabel(auto, level), "volume", volumePalette))
 	if !scoped {
-		choices = append(choices, link("stats", "Stats", "", "stats", palette{"#193833", "#80F1C5"}))
+		choices = append(choices, link("stats", "Stats", "", "stats", successPalette))
 	}
 	return tileGrid("Menu", choices, page)
 }
@@ -218,7 +237,7 @@ func menuList(title, empty string, rows []menuRow, page int) sceneView {
 		index := strconv.Itoa(start + i)
 		label, preview := menuClip(row.label, 30), menuClip(row.text, 29)
 		s.button("menu-row-"+index, label, sceneAction{"menu-detail", index}, 52, y, 256, 43,
-			svgRect(52, y, 256, 43, 21, navPalette.bg, "#526079", 2)+
+			svgRect(52, y, 256, 43, uiButtonRadius, menuCard, menuBorder, 2)+
 				svgLabel(180, y+18, fitLabel(label, 17, 232), label, menuInk)+
 				svgText(180, y+35, 14, preview, menuMuted, `font-family="monospace"`))
 	}
@@ -232,7 +251,7 @@ func menuList(title, empty string, rows []menuRow, page int) sceneView {
 func menuDetail(title string, row menuRow) sceneView {
 	s := menuHeader(title)
 	label := menuClip(row.label, 32)
-	s.art += svgRect(48, 85, 264, 178, 22, navPalette.bg, "#526079", 2) +
+	s.art += svgRect(48, 85, 264, 178, uiCardRadius, menuCard, menuBorder, 2) +
 		svgLabel(180, 111, fitLabel(label, 21, 232), label, menuInk)
 	for i, line := range wrapCardLines(row.text, 25, 8) {
 		s.art += svgText(180, 134+i*17, 15, line, menuInk, `font-family="monospace"`)
@@ -244,15 +263,15 @@ func menuDetail(title string, row menuRow) sceneView {
 
 func volumeScene(auto bool, level int) sceneView {
 	s := menuScene("Volume")
-	s.art += svgLabel(180, 125, 31, volumeLabel(auto, level), menuInk) + svgRect(71, 145, 218, 12, 6, "#323D52", "none", 0)
+	s.art += svgLabel(180, 125, 31, volumeLabel(auto, level), menuInk) + svgRect(71, 145, 218, 12, 6, menuSecondary, "none", 0)
 	if level > 0 {
-		s.art += svgRect(71, 145, max(1, 218*level/100), 12, 6, "#7BD3FF", "none", 0)
+		s.art += svgRect(71, 145, max(1, 218*level/100), 12, 6, menuPrimary, "none", 0)
 	}
 	s.control(bounds{91, 174, 68, 56}, actionTile("vol-minus", "−", "minus", volumePalette))
 	s.control(bounds{201, 174, 68, 56}, actionTile("vol-plus", "+", "plus", volumePalette))
 	icon, tint := "", menuMuted
 	if auto {
-		icon, tint = "check", "#A6DCFF"
+		icon, tint = "check", menuSuccess
 	}
 	s.control(bounds{116, 238, 128, 46}, actionTile("vol-auto", "Auto", icon, palette{volumePalette.bg, tint}))
 	return s
@@ -261,9 +280,9 @@ func volumeScene(auto bool, level int) sceneView {
 func voiceScene(current string, page int) sceneView {
 	choices := make([]tile, 0, len(voiceCatalog))
 	for _, voice := range voiceCatalog {
-		icon, tint := "voice", "#E2C5FF"
+		icon, tint := "voice", menuInk
 		if current == voice.ID {
-			icon, tint = "check", "#FFD68B"
+			icon, tint = "check", menuWarning
 		}
 		choices = append(choices, tile{id: "voice-" + strings.ToLower(voice.Name), label: voice.Name, icon: icon,
 			action: sceneAction{"voice-select", voice.ID}, colors: palette{voicePalette.bg, tint}})
@@ -347,7 +366,7 @@ func menuPeerInk(tint string) string {
 
 func (h *wsHub) statsScene(d *wsDevice) sceneView {
 	s := menuScene("Stats")
-	s.art += svgRect(38, 93, 284, 185, 18, "#0E111B", "none", 0)
+	s.art += svgRect(38, 93, 284, 185, uiCardRadius, menuCard, menuBorder, 2)
 	device := d.diagDevice()
 	h.b.diag.mu.Lock()
 	sys := h.b.diag.system
@@ -412,7 +431,7 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 	for i, row := range rows {
 		tint := menuInk
 		if i == 0 {
-			tint = "#80F1C5"
+			tint = menuSuccess
 		}
 		s.art += svgText(180, 121+i*27, min(15, 438/max(1, runeLen(row))), row, tint, `font-family="monospace"`)
 	}

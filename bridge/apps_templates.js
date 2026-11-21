@@ -4,13 +4,8 @@ app = (() => {
   const d = {...templateData, ...content};
   const title = content?.title || templateTitle;
   const theme = d.theme || "warm";
-  const palettes = {
-    warm: ["#6F423D", "#FFFAEE", "#392429", "#A45B48"],
-    mint: ["#17463F", "#E9FFF5", "#163A33", "#27826E"],
-    night: ["#141825", "#242B3F", "#F2F4FB", "#ACB9ED"],
-    sky: ["#254C69", "#EDF7FF", "#192E48", "#437DA0"],
-  };
-  const [bg, paper, ink, accent] = palettes[theme];
+  const [bg, paper, ink, accent, border] = templatePalettes[theme];
+  const [buttonRadius, cardRadius] = templateRadii;
   const defaults = ["#E54962", "#FFB82E", "#127D79", "#465DD1"];
   const assert = (ok, msg) => { if (!ok) throw new TypeError(msg); };
   const count = (a, lo, hi) => Array.isArray(a) && a.length >= lo && a.length <= hi;
@@ -22,12 +17,12 @@ app = (() => {
     assert(count(c, 2, 4) && c.every(color), "colors requires 2–4 #RRGGBB colors");
     return c;
   };
-  const rect = (x,y,w,h,r,c) => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${r}" fill="${c}"/>`;
+  const rect = (x,y,w,h,r,c,stroke="none") => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${r}" fill="${c}" stroke="${stroke}" stroke-width="2"/>`;
   const dot = (x,y,r,c) => `<circle cx="${x}" cy="${y}" r="${r}" fill="${c}"/>`;
   const txt = (x,y,value,size=18) => `<text x="${x}" y="${y}" fill="${ink}" text-anchor="middle" font-size="${size}" font-weight="bold">${ui.esc(Array.from(String(value)).slice(0, 20).join(""))}</text>`;
   const hit = (id,x,y,w,h,art) => `<g data-id="${id}" data-hit="${x},${y},${w},${h}">${art}</g>`;
-  const button = (id,x,y,w,h,value,c=paper) => hit(id,x,y,w,h,rect(x,y,w,h,12,c)+txt(x+w/2,y+h/2+6,value,16));
-  const screen = art => `<svg viewBox="0 0 360 360">${rect(0,0,360,360,0,bg)}${rect(49,55,262,235,22,paper)}${txt(180,78,title)}${art}</svg>`;
+  const button = (id,x,y,w,h,value,c=paper) => hit(id,x,y,w,h,rect(x,y,w,h,buttonRadius,c,border)+txt(x+w/2,y+h/2+6,value,16));
+  const screen = art => `<svg viewBox="0 0 360 360">${rect(0,0,360,360,0,bg)}${rect(49,55,262,235,cardRadius,paper,border)}${txt(180,78,title)}${art}</svg>`;
   const choice = (id, label) => ({id, label: String(label)});
   const menu = (badge, prompt, choices, footer="") => ui.choices({title, theme, badge, prompt, choices, footer});
   const tap = () => chime("tap");
@@ -249,7 +244,7 @@ app = (() => {
           const t = Math.PI*j/4, dx = Math.round(Math.cos(t)*21), dy = Math.round(Math.sin(t)*21);
           return dot(x+dx,y+dy,4,c[i])+dot(x+dx/2,y+dy/2,2,c[i]);
         }).join("")).join("");
-        return screen(txt(180,273,"Tap for fireworks",14)+hit("sky",68,95,224,145,rect(68,95,224,145,14,"#141825")+art));
+        return screen(txt(180,273,"Tap for fireworks",14)+hit("sky",68,95,224,145,rect(68,95,224,145,cardRadius,templatePalettes.night[0])+art));
       },
       onTap(s,_,id,x,y) {
         if (id !== "sky") return;

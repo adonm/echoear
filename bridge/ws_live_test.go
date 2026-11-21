@@ -71,7 +71,7 @@ func TestLiveWebSocket(t *testing.T) {
 	}
 	from.json(t, object{"ev": "status", "battery_pct": 48, "battery_mv": 3840, "charging": false, "volume": 80, "rssi": -43})
 	battery, _, _ := decodeDisplay(t, from.until(t, isDisplay))
-	viewer.until(t, hasWS("svg", "#39D1A0"))
+	viewer.until(t, hasWS("svg", menuSuccess))
 	if battery.Dx() > 50 || battery.Dy() > 25 {
 		t.Fatalf("battery update did not use a dirty rectangle: %v", battery)
 	}

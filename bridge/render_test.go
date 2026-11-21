@@ -178,9 +178,9 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 			reg("battery", cat.FaceBG, 226, 39, 40, 21, 23, 10),
 		}
 		if i < 3 {
-			bg, icon := "#202538", "menu"
+			bg, icon := navPalette.bg, "menu"
 			if i == 2 {
-				bg, icon = "#32263C", "stop"
+				bg, icon = dangerPalette.bg, "stop"
 			}
 			r = append(r, reg(icon+" icon", bg, 148, 307, 22, 17, 8, 7),
 				reg(icon+" label", bg, 172, 306, 45, 22, 22, 8))
@@ -193,29 +193,29 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 	menu := func(name string, s sceneView, regions ...region) {
 		regions = append(regions, reg("title", menuBG, 95, 51, 170, 29, 42, 14))
 		if s.actions["menu-prev"].kind != "" || s.actions["menu-next"].kind != "" {
-			regions = append(regions, reg("back label", "#262E43", 149, 287, 62, 22, 23, 8))
+			regions = append(regions, reg("back label", navPalette.bg, 149, 287, 62, 22, 23, 8))
 		} else {
-			regions = append(regions, reg("back icon", "#262E43", 148, 306, 22, 18, 8, 8),
-				reg("back label", "#262E43", 171, 305, 49, 22, 23, 8))
+			regions = append(regions, reg("back icon", navPalette.bg, 148, 306, 22, 18, 8, 8),
+				reg("back label", navPalette.bg, 171, 305, 49, 22, 23, 8))
 		}
 		scenes = append(scenes, scene{name, s.svg(""), regions})
 	}
 	menu("home page 1", menuHome(heartVoice, true, 55, false, false, 0),
-		reg("intercom icon", "#372530", 103, 98, 22, 21, 13, 13),
-		reg("intercom label", "#372530", 67, 126, 94, 22, 44, 9),
-		reg("games icon", "#342943", 235, 98, 22, 21, 13, 8),
-		reg("games label", "#342943", 199, 126, 94, 22, 40, 9),
-		reg("history label", "#203144", 67, 221, 94, 22, 40, 9),
-		reg("memories label", "#372530", 199, 221, 94, 22, 50, 9))
+		reg("intercom icon", accentPalette.bg, 103, 98, 22, 21, 13, 13),
+		reg("intercom label", accentPalette.bg, 67, 126, 94, 22, 44, 9),
+		reg("games icon", warningPalette.bg, 235, 98, 22, 21, 13, 8),
+		reg("games label", warningPalette.bg, 199, 126, 94, 22, 40, 9),
+		reg("history label", volumePalette.bg, 67, 221, 94, 22, 40, 9),
+		reg("memories label", accentPalette.bg, 199, 221, 94, 22, 50, 9))
 	menu("home page 2", menuHome(heartVoice, true, 55, false, false, 1),
-		reg("volume icon", "#203144", 235, 94, 22, 21, 13, 10),
-		reg("volume label", "#203144", 199, 118, 94, 18, 45, 9),
-		reg("volume subtitle", "#203144", 199, 140, 94, 15, 32, 6),
-		reg("voice icon", "#322741", 104, 94, 22, 21, 13, 8),
-		reg("voice label", "#322741", 68, 118, 94, 18, 34, 9),
-		reg("voice subtitle", "#322741", 68, 140, 94, 15, 22, 6),
-		reg("stats icon", "#193833", 102, 193, 22, 21, 13, 10),
-		reg("stats label", "#193833", 66, 221, 94, 22, 32, 9))
+		reg("volume icon", volumePalette.bg, 235, 94, 22, 21, 13, 10),
+		reg("volume label", volumePalette.bg, 199, 118, 94, 18, 45, 9),
+		reg("volume subtitle", volumePalette.bg, 199, 140, 94, 15, 32, 6),
+		reg("voice icon", voicePalette.bg, 104, 94, 22, 21, 13, 8),
+		reg("voice label", voicePalette.bg, 68, 118, 94, 18, 34, 9),
+		reg("voice subtitle", voicePalette.bg, 68, 140, 94, 15, 22, 6),
+		reg("stats icon", successPalette.bg, 102, 193, 22, 21, 13, 10),
+		reg("stats label", successPalette.bg, 66, 221, 94, 22, 32, 9))
 	game := tile{id: "game-0", label: "Puzzle", detail: "Saved app", icon: "games", colors: navPalette}
 	menu("games", gamesScene([]tile{game}, 0, ""),
 		reg("game icon", navPalette.bg, 103, 94, 22, 21, 13, 8),
@@ -238,16 +238,16 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 	menu("volume", volumeScene(true, 55),
 		reg("level", menuBG, 76, 98, 208, 31, 105, 17),
 		reg("volume track", menuBG, 70, 144, 220, 15, 185, 7),
-		reg("minus", "#203144", 110, 194, 30, 16, 15, 2),
-		reg("plus", "#203144", 220, 188, 30, 28, 15, 13),
-		reg("auto icon", "#203144", 148, 252, 22, 18, 10, 8),
-		reg("auto label", "#203144", 171, 251, 48, 22, 24, 8))
+		reg("minus", volumePalette.bg, 110, 194, 30, 16, 15, 2),
+		reg("plus", volumePalette.bg, 220, 188, 30, 28, 15, 13),
+		reg("auto icon", volumePalette.bg, 148, 252, 22, 18, 10, 8),
+		reg("auto label", volumePalette.bg, 171, 251, 48, 22, 24, 8))
 	var choiceRegions []region
 	for i := range 4 {
 		x, y := 57+132*(i%2), 86+95*(i/2)
 		choiceRegions = append(choiceRegions,
-			reg(voiceCatalog[i].Name+" icon", "#322741", x+46, y+12, 22, 23, 11, 8),
-			reg(voiceCatalog[i].Name+" label", "#322741", x+10, y+36, 94, 24, 26, 9))
+			reg(voiceCatalog[i].Name+" icon", voicePalette.bg, x+46, y+12, 22, 23, 11, 8),
+			reg(voiceCatalog[i].Name+" label", voicePalette.bg, x+10, y+36, 94, 24, 26, 9))
 	}
 	menu("voice", voiceScene(heartVoice, 0), choiceRegions...)
 	var choices []menuPeer
@@ -261,11 +261,11 @@ func TestSystemScreenPixelRegions(t *testing.T) {
 		}
 	}
 	menu("intercom", peerScene(choices, 1, false), append(choiceRegions,
-		reg("previous label", "#262E43", 89, 286, 40, 20, 23, 7),
-		reg("next label", "#262E43", 231, 286, 40, 20, 23, 7))...)
+		reg("previous label", navPalette.bg, 89, 286, 40, 20, 23, 7),
+		reg("next label", navPalette.bg, 231, 286, 40, 20, 23, 7))...)
 	var rows []region
 	for i := range 6 {
-		rows = append(rows, reg("stats row "+strconv.Itoa(i+1), "#0E111B", 55, 106+27*i, 250, 18, 90, 6))
+		rows = append(rows, reg("stats row "+strconv.Itoa(i+1), menuCard, 55, 106+27*i, 250, 18, 90, 6))
 	}
 	hub := &wsHub{b: &bridge{}}
 	menu("stats", hub.statsScene(&wsDevice{client: &wsClient{role: "device"}, cat: cat, board: "esp-vocat", firmware: "0.9.1", vol: 55}), rows...)

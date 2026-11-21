@@ -208,7 +208,7 @@ func TestMenuVoicePicker(t *testing.T) {
 	for _, voice := range []int{1, 2, 3, 0} {
 		choice := voiceCatalog[voice]
 		web.json(t, object{"ev": "tap", "id": "voice-" + strings.ToLower(choice.Name)})
-		web.until(t, hasWS("svg", "#FFD68B"))
+		web.until(t, hasWS("svg", menuWarning))
 		if reloaded := deviceVoiceStore(b.db, heartVoice); reloaded.get(id, "cake") != choice.ID {
 			t.Errorf("voice picker did not persist %s", choice.ID)
 		}

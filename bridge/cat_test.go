@@ -375,7 +375,7 @@ func TestFaceSVGPoseFilterAndChrome(t *testing.T) {
 		if !strings.Contains(svg, "#AAAAAA") || strings.Contains(svg, `data-id="fake"`) {
 			t.Fatal("shared art lost or gained a hit target", svg)
 		}
-		if tc.pose.mood == "listening" && !strings.Contains(svg, "#FF6978") {
+		if tc.pose.mood == "listening" && !strings.Contains(svg, menuDanger) {
 			t.Fatal("listening halo missing")
 		}
 	}
