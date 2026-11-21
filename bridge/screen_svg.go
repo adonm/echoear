@@ -530,8 +530,8 @@ func defaultFaceArtwork(faceBG, markColor, accentColor string, configured, tagge
 }
 
 func parseFaceSVG(raw string) (*svgNode, error) {
-	if len(raw) > 16<<10 {
-		return nil, fmt.Errorf("face_svg exceeds 16 KB")
+	if len(raw) > maxSVG {
+		return nil, fmt.Errorf("face_svg exceeds 64 KB")
 	}
 	root, err := parseSVG(raw)
 	if err != nil {
@@ -555,11 +555,11 @@ func sanitizeFaceSVG(raw string) (string, error) {
 		return "", problem(400, err.Error())
 	}
 	clean := encodeSVG(root, "  ")
-	if len(clean) > 16<<10 {
+	if len(clean) > maxSVG {
 		clean = svgString(root)
 	}
-	if len(clean) > 16<<10 {
-		return "", problem(400, "face_svg exceeds 16 KB after sanitizing")
+	if len(clean) > maxSVG {
+		return "", problem(400, "face_svg exceeds 64 KB after sanitizing")
 	}
 	// Validate all poses together with chrome, including the compositor's depth
 	// and node overhead, so no accepted face can crowd out the system controls.

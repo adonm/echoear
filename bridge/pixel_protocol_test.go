@@ -11,7 +11,8 @@ func TestMCPCompanionSprite(t *testing.T) {
 	const id = "echoear-pixel-test"
 	board := testConnectWS(t, base, "unit", false)
 	board.helloV2(t, id, "")
-	spec := object{"rows": defaultStarterCatSprite.Rows, "palette": object{"p": "#DC9944", "X": "#FFFFFF"}}
+	spec := object{"rows": defaultStarterCatSprite.Rows, "mirror": true,
+		"palette": object{"p": "#DC9944", "H": "#FFFFFF", "q": "#28756D", "f": "#E8CFBD"}}
 	patch := func(cat object, fail bool) object {
 		return toolTest(t, base, "patch", object{"device_id": id, "cat": cat}, fail)
 	}
@@ -125,6 +126,8 @@ func TestJSDeclarativeScreen(t *testing.T) {
 		if (ui.palette.p !== "#F5B895") throw Error("changed palette");
 		const sprite = ui.sprite(["XX",".X"], {x:3,y:6,scale:3,palette:{X:"#010203"}});
 		if (!sprite.includes('width="6"') || !sprite.includes('fill="#010203"')) throw Error("sprite");
+		const mirror = ui.sprite(["k.","pk"], {scale:3,mirror:true,id:"test"});
+		if (!mirror.includes('data-hit="0,0,12,6"') || !mirror.includes('x="9"')) throw Error("mirror");
 		for (const id of ["lark-exit","echoear-exit"]) {
 			try { ui.choices({choices:[{id,label:"no"}]}); throw Error("accepted reserved id"); }
 			catch (e) { if (!e.message.includes("reserved")) throw e; }

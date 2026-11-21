@@ -219,6 +219,7 @@ type svgNode struct {
 	tag, text string
 	attr      map[string]string
 	children  []*svgNode
+	pixelRuns []image.Rectangle
 }
 
 func (n *svgNode) asGroup() *svgNode {
@@ -230,7 +231,7 @@ func (n *svgNode) asGroup() *svgNode {
 
 var (
 	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text image")
-	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering aria-label data-id data-hit data-pose data-part")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering aria-label data-id data-hit data-pose data-part data-pixel-runs")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
 	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
@@ -338,6 +339,8 @@ func cleanSVGAttr(k, v string) (string, bool) {
 		return v, true
 	case "shape-rendering":
 		return v, v == "crispEdges"
+	case "data-pixel-runs":
+		return v, v == "1"
 	case "fill", "stroke", "stop-color":
 		if k != "stop-color" && strings.EqualFold(v, "transparent") {
 			return "none", true
@@ -432,10 +435,20 @@ func parseSVG(raw string) (*svgNode, error) {
 				continue
 			}
 			n := &svgNode{tag: tag, attr: map[string]string{}}
+			pixelPath := tag == "path" && slices.ContainsFunc(t.Attr, func(a xml.Attr) bool {
+				return a.Name.Space == "" && a.Name.Local == "data-pixel-runs" && strings.TrimSpace(a.Value) == "1"
+			})
 			for _, a := range t.Attr {
 				k, v := a.Name.Local, strings.TrimSpace(a.Value)
 				if a.Name.Space != "" {
 					continue
+				}
+				if k == "d" && pixelPath {
+					if runs, ok := parsePixelRuns(v); ok {
+						n.attr[k], n.pixelRuns = v, runs
+						continue
+					}
+					n.pixelRuns = nil
 				}
 				if tag == "image" && k == "href" {
 					if id, ok := strings.CutPrefix(v, "photo:"); ok && photoID.MatchString(id) {
@@ -885,6 +898,10 @@ func directStyle(n *svgNode) bool {
 		switch k {
 		case "x", "y", "width", "height", "viewBox", "xmlns", "transform", "shape-rendering",
 			"aria-label", "data-id", "data-hit", "data-echoear-hit", "data-pose", "data-part":
+		case "d", "data-pixel-runs":
+			if len(n.pixelRuns) == 0 {
+				return false
+			}
 		case "fill":
 			if strings.HasPrefix(v, "url(") {
 				return false
@@ -937,53 +954,53 @@ func canSplitPaintServers(root *svgNode) bool {
 	return true
 }
 
-func directRect(n *svgNode, m rasterx.Matrix2D, crisp bool) (image.Rectangle, imagecolor.RGBA, bool) {
-	if m.B != 0 || m.C != 0 || len(n.children) != 0 {
-		return image.Rectangle{}, imagecolor.RGBA{}, false
-	}
-	fill := n.attr["fill"]
+func directPaint(fill string) (imagecolor.RGBA, bool) {
 	var c imagecolor.RGBA
 	if len(fill) == 7 && fill[0] == '#' {
 		rgb, err := strconv.ParseUint(fill[1:], 16, 24)
 		if err != nil {
-			return image.Rectangle{}, c, false
+			return c, false
 		}
 		c = imagecolor.RGBA{uint8(rgb >> 16), uint8(rgb >> 8), uint8(rgb), 255}
 	} else {
 		paint, err := oksvg.ParseSVGColor(fill)
 		if err != nil || paint == nil {
-			return image.Rectangle{}, c, false
+			return c, false
 		}
 		r, g, b, a := paint.RGBA()
 		if a != 0xffff {
-			return image.Rectangle{}, c, false
+			return c, false
 		}
 		c = imagecolor.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 255}
 	}
+	return c, true
+}
+
+func directRect(n *svgNode, m rasterx.Matrix2D, crisp bool) (image.Rectangle, bool) {
 	var xywh [4]float64
 	for i, name := range [...]string{"x", "y", "width", "height"} {
 		raw := n.attr[name]
 		if strings.HasSuffix(raw, "%") {
-			return image.Rectangle{}, imagecolor.RGBA{}, false
+			return image.Rectangle{}, false
 		}
 		xywh[i] = svgNum(raw)
 	}
 	x, y, w, h := xywh[0], xywh[1], xywh[2], xywh[3]
 	if w <= 0 || h <= 0 {
-		return image.Rectangle{}, imagecolor.RGBA{}, false
+		return image.Rectangle{}, false
 	}
 	x1, y1 := m.Transform(x, y)
 	x2, y2 := m.Transform(x+w, y+h)
 	if !crisp {
 		for _, v := range [...]float64{x1, y1, x2, y2} {
 			if math.Abs(v-math.Round(v)) > 1e-9 {
-				return image.Rectangle{}, c, false
+				return image.Rectangle{}, false
 			}
 		}
 	}
 	// Opt-in pixel sprites snap both sides to the same shared grid at
 	// fractional display scales. Legacy SVG retains its antialiasing.
-	return image.Rect(int(math.Round(x1)), int(math.Round(y1)), int(math.Round(x2)), int(math.Round(y2))), c, true
+	return image.Rect(int(math.Round(x1)), int(math.Round(y1)), int(math.Round(x2)), int(math.Round(y2))), true
 }
 
 func fillRect(dst *image.RGBA, r image.Rectangle, c imagecolor.RGBA) {
@@ -1092,14 +1109,30 @@ func rasterLayers(s preparedScene, dst *image.RGBA, target rasterx.Matrix2D, pho
 				xdraw.BiLinear.Transform(dst, f64.Aff3{m.A, m.C, m.E, m.B, m.D, m.F}, src, b, draw.Over, opts)
 			}
 		default:
-			if n.tag == "rect" && simple && directStyle(n) {
-				if r, c, ok := directRect(n, m, crisp); ok {
-					if err := flush(); err != nil {
-						return err
+			if (n.tag == "rect" || len(n.pixelRuns) > 0) && simple && m.B == 0 && m.C == 0 && len(n.children) == 0 && directStyle(n) {
+				if c, ok := directPaint(n.attr["fill"]); ok {
+					if r, ok := directRect(n, m, crisp); n.tag == "rect" && ok {
+						if err := flush(); err != nil {
+							return err
+						}
+						split = true
+						fillRect(dst, r, c)
+						return nil
+					} else if crisp && len(n.pixelRuns) > 0 {
+						if err := flush(); err != nil {
+							return err
+						}
+						split = true
+						var xs, ys [maxSpriteSide + 1]int
+						for i := range xs {
+							xs[i] = int(math.Round(m.A*float64(i) + m.E))
+							ys[i] = int(math.Round(m.D*float64(i) + m.F))
+						}
+						for _, r := range n.pixelRuns {
+							fillRect(dst, image.Rect(xs[r.Min.X], ys[r.Min.Y], xs[r.Max.X], ys[r.Max.Y]), c)
+						}
+						return nil
 					}
-					split = true
-					fillRect(dst, r, c)
-					return nil
 				}
 			}
 			parent := layer

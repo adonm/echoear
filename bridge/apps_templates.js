@@ -158,7 +158,7 @@ app = (() => {
     return {
       init: () => ({...initial,...storeGet("pet")}),
       render(s) {
-        let art = txt(180,101,s.note,14)+pixel("bean",180,150,5,c)
+        let art = txt(180,101,s.note,14)+pixel("bean",180,150,3,c)
           +pixel("spark",127,147,2,ui.palette.a)+pixel("spark",235,133,2,ui.palette.l);
         ["Full","Joy","Energy"].forEach((k,i) => {
           const x = 101+i*79;

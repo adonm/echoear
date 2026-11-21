@@ -14,7 +14,7 @@ var (
 	uiColorSchema = object{"type": "string", "pattern": `^(?:#[0-9a-fA-F]{6}|[kwpmlsyrgabndco])$`}
 	uiIDSchema    = object{"type": "string", "pattern": svgID.String()}
 	uiVariant     = object{"type": "string", "enum": []string{"default", "primary", "secondary", "outline", "ghost", "success", "danger"}}
-	uiSpriteOpts  = closedObject(object{"x": uiInt(-1024, 1024), "y": uiInt(-1024, 1024), "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema})
+	uiSpriteOpts  = closedObject(object{"x": uiInt(-1024, 1024), "y": uiInt(-1024, 1024), "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema, "mirror": object{"type": "boolean"}})
 )
 
 var declarativeScreenSchema = func() object {
@@ -26,7 +26,7 @@ var declarativeScreenSchema = func() object {
 		"title": uiString(96), "badge": uiString(64), "bg": uiColorSchema, "accent": uiColorSchema,
 		"actions": uiArray(action, 0, 3),
 		"body": uiArray(object{"oneOf": []object{
-			closedObject(object{"type": tag("sprite"), "rows": pixelRowsSchema, "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema}, "type", "rows"),
+			closedObject(object{"type": tag("sprite"), "rows": pixelRowsSchema, "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema, "mirror": flags}, "type", "rows"),
 			closedObject(object{"type": tag("text"), "text": uiString(512), "size": uiInt(10, 40), "bold": flags, "muted": flags}, "type", "text"),
 			closedObject(object{"type": tag("meter"), "label": uiString(80), "value": object{"type": "number"},
 				"max": object{"type": "number"}, "color": uiColorSchema}, "type", "label", "value", "max"),
@@ -39,6 +39,7 @@ type uiSpriteOptions struct {
 	X, Y, Scale int
 	Palette     map[string]string
 	ID          string
+	Mirror      bool
 }
 
 type declarativeScreen struct {
@@ -50,7 +51,7 @@ type declarativeScreen struct {
 type screenBlock struct {
 	Type, ID, Text, Label, Color string
 	Size, Scale, Cols            int
-	Bold, Muted                  bool
+	Bold, Muted, Mirror          bool
 	Value, Max                   float64
 	Rows                         []string
 	Palette                      map[string]string
@@ -187,13 +188,20 @@ func (s declarativeScreen) svg() (string, error) {
 			switch b.Type {
 			case "sprite":
 				scale := b.Scale
-				if scale == 0 {
-					scale = max(1, 84/max(len(b.Rows), len(b.Rows[0])))
+				cols := len(b.Rows[0])
+				if b.Mirror {
+					cols *= 2
 				}
-				scale = min(max(1, scale*density/100), screenContentWidth/len(b.Rows[0]), (bottom-top)/len(b.Rows))
-				w, h := len(b.Rows[0])*scale, len(b.Rows)*scale
+				if scale == 0 {
+					scale = max(1, 96/max(len(b.Rows), cols))
+				}
+				scale = min(max(1, scale*density/100), screenContentWidth/cols, (bottom-top)/len(b.Rows))
+				if max(cols, len(b.Rows)) > 16 {
+					scale = min(scale, 12)
+				}
+				w, h := cols*scale, len(b.Rows)*scale
 				x := 180 - w/2
-				art, err := compileSprite(b.Rows, b.Palette, x, 0, scale)
+				art, err := compileSprite(b.Rows, b.Palette, x, 0, scale, b.Mirror)
 				if err != nil {
 					return "", err
 				}
@@ -233,6 +241,11 @@ func (s declarativeScreen) svg() (string, error) {
 				n := b.Cols
 				if n == 0 {
 					n = min(3, len(b.Items))
+				}
+				for _, item := range b.Items {
+					if len(item.Sprite) != 0 {
+						n = min(n, (screenContentWidth+16)/(len(item.Sprite[0])+24))
+					}
 				}
 				n = min(n, len(b.Items))
 				w := (screenContentWidth - 16*(n-1)) / n

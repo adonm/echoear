@@ -260,11 +260,18 @@ var templateSprites = func() map[string][]string {
 		"pencil":   "......rp .....rpp ....ppa. ...ppa.. ..ppa... .ppa.... bca..... k.......",
 		"timer":    "..pppp.. ...pp... .pppppp. .pwwwwp. .pwpwwp. .pwppwp. .pwwwwp. ..pppp..",
 		"burst":    "p...p...p .p.....p. ....w.... ...wpw... p.wpppw.p ...wpw... ....w.... .p.....p. p...p...p",
-		"bean":     "................ ....kk....kk.... ...kpck..kcpk... ...kpck..kcpk... ...kpckkkkcpk... ...kpppllpppk... ..kppplwwlpppk.. ..kppwwwwwwppk.. ..kpwkkwwkkwpk.. ..kpwkmwwmkwpk.. ..kcwwwrrwwwck.. ...kcwwkkwwck... ....kkwwwwkk.... ......kkkk...... ..m..........m.. ................",
 	}
 	rows := make(map[string][]string, len(art))
 	for name, grid := range art {
 		rows[name] = strings.Fields(grid)
 	}
+	rows["bean"] = mirrorSpriteRows(strings.Fields(`
+		................ ................ ................ ......kk........ .....kppk....... .....kpck.......
+		.....kpcck...... .....kpcck...... .....kpcck...... .....kpcck...... .....kpcckkkkkkk ....kpccpppppppp
+		...kppcpppppllll ...kppppplwwwwww ..kpppplwwwwwwww ..kppplwkkkkwwww ..kpppwwkwkkkwww ..kpppwwksmkkwww
+		..kpppwwkmmkkwww ..kpppwwwkkkwwww ..kpcccwwwwwwwwr ...kpccwwwwwwwrr ...kpppwwwwwwwwk ....kpppwwwkwkkw
+		.....kkppwwwkkww ......kkppwwwwww ........kkkkkkkk ................ ....m........... ....m...........
+		..mmmmm......... ....m...........
+	`))
 	return rows
 }()

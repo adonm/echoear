@@ -221,11 +221,15 @@ func installAppUI(vm *goja.Runtime, tapChime func()) {
 		if isExitNode(opts.ID) {
 			panic(vm.NewTypeError("ui.sprite control ID is reserved"))
 		}
-		art, err := compileSprite(rows, opts.Palette, opts.X, opts.Y, opts.Scale)
+		art, err := compileSprite(rows, opts.Palette, opts.X, opts.Y, opts.Scale, opts.Mirror)
 		if err != nil {
 			panic(vm.NewTypeError("%s", err))
 		}
-		return vm.ToValue(screenHit(bounds{opts.X, opts.Y, len(rows[0]) * opts.Scale, len(rows) * opts.Scale}, opts.ID, opts.ID, art))
+		width := len(rows[0]) * opts.Scale
+		if opts.Mirror {
+			width *= 2
+		}
+		return vm.ToValue(screenHit(bounds{opts.X, opts.Y, width, len(rows) * opts.Scale}, opts.ID, opts.ID, art))
 	})
 	_ = ui.Set("screen", func(c goja.FunctionCall) goja.Value {
 		spec, err := readUIValue[declarativeScreen](decode(c.Argument(0), "screen"), declarativeScreenSchema, "screen")

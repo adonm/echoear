@@ -106,7 +106,7 @@ func catChrome(cat catState, pose catPose) sceneView {
 			svgLabel(180, 262, 14, strconv.Itoa(pose.volume)+"%", menuInk)
 	}
 	if !cat.Configured && pose.mood == "idle" && !pose.meter {
-		s.art += svgLabel(180, 267, 14, "Say hi to meet me!", "#475569")
+		s.art += svgLabel(180, 277, 14, "Say hi to meet me!", "#475569")
 	}
 	switch pose.mood {
 	case "", "idle":

@@ -2,8 +2,14 @@ package main
 
 import (
 	"fmt"
+	"image"
+	imagecolor "image/color"
+	"image/draw"
 	"strings"
 	"testing"
+
+	"github.com/srwiley/oksvg"
+	"github.com/srwiley/rasterx"
 )
 
 func BenchmarkRenderPixelScene(b *testing.B) {
@@ -24,5 +30,43 @@ func BenchmarkRenderPixelScene(b *testing.B) {
 		if _, err := buildScreenUncached(raw, true, roundScreen); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkRenderDenseSprite(b *testing.B) {
+	for _, size := range []int{32, 64} {
+		scale := 9
+		if size == 64 {
+			scale = 3
+		}
+		origin := (360 - size*scale) / 2
+		art, err := compileSprite(denseSpriteRows(size), nil, origin, origin, scale)
+		if err != nil {
+			b.Fatal(err)
+		}
+		scene, err := prepareScene(svgStart+art+"</svg>", false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("%dx%d/direct", size, size), func(b *testing.B) {
+			for range b.N {
+				if _, err := scene.raster(360, 360, 0, 0, 360, imagecolor.Black, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("%dx%d/vector", size, size), func(b *testing.B) {
+			for range b.N {
+				img := image.NewRGBA(image.Rect(0, 0, 360, 360))
+				draw.Draw(img, img.Bounds(), image.NewUniform(imagecolor.Black), image.Point{}, draw.Src)
+				scan := screenScanner{rasterx.NewScannerGV(360, 360, img, img.Bounds()), img}
+				icon, err := oksvg.ReadIconStream(strings.NewReader(scene.svg), oksvg.StrictErrorMode)
+				if err != nil {
+					b.Fatal(err)
+				}
+				icon.SetTarget(0, 0, 360, 360)
+				icon.Draw(rasterx.NewDasher(360, 360, scan), 1)
+			}
+		})
 	}
 }

@@ -12,16 +12,78 @@ import (
 	"github.com/srwiley/rasterx"
 )
 
+func denseSpriteRows(size int) []string {
+	rows := make([]string, size)
+	for y := range rows {
+		rows[y] = strings.Repeat([]string{"kw", "wk"}[y%2], size/2)
+	}
+	return rows
+}
+
+func TestDenseSpriteRasterAndMirror(t *testing.T) {
+	for _, size := range []int{32, 64} {
+		rows := denseSpriteRows(size)
+		for y := range rows {
+			rows[y] = rows[y][:size/2]
+		}
+		scale := 9
+		if size == 64 {
+			scale = 3
+		}
+		origin := (screenSize - size*scale) / 2
+		art, err := compileSprite(rows, nil, origin, origin, scale, true)
+		if err != nil || strings.Count(art, "<path ") != 2 || len(art) >= maxSVG {
+			t.Fatalf("%d: want two compact color paths: %d bytes, %v", size, len(art), err)
+		}
+		scene, err := prepareScene(svgStart+art+"</svg>", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tile := scene.root.children[0]
+		if len(tile.children) != 2 || len(tile.children[0].pixelRuns)+len(tile.children[1].pixelRuns) < size*size-size {
+			t.Fatal("dense path did not qualify for direct painting")
+		}
+		for _, g := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
+			side := g.height
+			img, err := scene.raster(g.width, g.height, float64(g.width-side)/2, 0, side, imagecolor.Black, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cell := scale * side / screenSize
+			left, top := (g.width-size*cell)/2, (g.height-size*cell)/2
+			for y := range size {
+				for x := range size {
+					key := rows[y][min(x, size-1-x):][:1]
+					want, _ := directPaint(larkPalette[key])
+					for _, p := range []image.Point{{left + x*cell, top + y*cell}, {left + (x+1)*cell - 1, top + (y+1)*cell - 1}} {
+						if got := img.RGBAAt(p.X, p.Y); got != want {
+							t.Fatalf("%d on %v: cell %d,%d at %v = %v, want %v", size, g, x, y, p, got, want)
+						}
+					}
+				}
+			}
+		}
+	}
+	face, err := compileCompanionSprite(companionSprite{Rows: denseSpriteRows(64)})
+	if err != nil {
+		t.Fatalf("64×64 companion: %v", err)
+	}
+	if _, err := sanitizeFaceSVG(face); err != nil {
+		t.Fatalf("64×64 persisted companion: %v", err)
+	}
+	for _, d := range []string{"", "M1 2C0 0 3 3 4 4Z", "M1 2h2v1h-1Z", "M63 2h2v1h-2Z", "M1 2h2v1h-2Zm1 0h1v1h-1Z"} {
+		if _, ok := parsePixelRuns(d); ok {
+			t.Errorf("noncanonical or overlapping path %q qualified", d)
+		}
+	}
+}
+
 func TestSpriteRuns(t *testing.T) {
 	art, err := compileSprite([]string{"ppXX", ".kk."}, map[string]string{"X": "#f5b895"}, 6, 9, 3)
 	if err != nil || strings.Count(art, "<rect ") != 2 ||
 		!strings.Contains(art, `<rect x="6" y="9" width="12" height="3" fill="#F5B895"/>`) ||
 		!strings.Contains(art, `shape-rendering="crispEdges"`) {
 		t.Fatalf("%s: %v", art, err)
-	}
-	checkerboard := make([]string, 24)
-	for i := range checkerboard {
-		checkerboard[i] = strings.Repeat("kw", 12)
 	}
 	for _, spec := range []companionSprite{
 		{Rows: []string{"pp"}},
@@ -30,7 +92,8 @@ func TestSpriteRuns(t *testing.T) {
 		{Rows: []string{"pp", "pp"}, Palette: map[string]string{"p": "red"}},
 		{Rows: []string{"pp", "pp"}, Blink: map[string]string{"01": "kk"}},
 		{Rows: []string{"pp", "pp"}, Talk: map[string]string{"0": "k"}},
-		{Rows: checkerboard},
+		{Rows: []string{strings.Repeat("k", 65), strings.Repeat("k", 65)}},
+		{Rows: []string{strings.Repeat("k", 33), strings.Repeat("k", 33)}, Mirror: true},
 	} {
 		if _, err := compileCompanionSprite(spec); err == nil {
 			t.Errorf("accepted malformed sprite %+v", spec)

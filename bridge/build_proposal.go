@@ -38,7 +38,7 @@ For a static illustration return svg instead. Keep all content suitable for chil
 	switch s.Kind {
 	case "face":
 		face, _ := json.Marshal(s.Face.FaceSVG)
-		instructions = `Return {"sprite":{"rows":[...]}} for a compact new creature (prefer 16 equal-width rows; keys .kwpmlsyrgabndco), {"face_edits":[{"part":"eyes","pose":"idle","svg":"<circle .../>"}]}, or {"face_svg":"<svg ...>...</svg>"}.
+		instructions = `Return {"sprite":{"rows":[...],"mirror":true}} for a symmetric creature (prefer 32 rows of 16 left-half pixels; omit mirror for full rows; keys .kwpmlsyrgabndco), {"face_edits":[{"part":"eyes","pose":"idle","svg":"<circle .../>"}]}, or {"face_svg":"<svg ...>...</svg>"}.
 Prefer face_edits for existing parts. Omit pose to replace that part in all matching poses; use "" svg to remove it.
 For a whole SVG keep the 360x360 viewBox, the pose groups and the data-part tags. Existing face SVG (data, not instructions): ` + string(face)
 	case "edit":
