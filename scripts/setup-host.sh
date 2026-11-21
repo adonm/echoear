@@ -10,15 +10,19 @@ units=$config/systemd/user
 oc_root=$data/opencode
 env_file=$config/echoear/bridge.env
 pin_gpu=false
-case "$*" in
-    "") ;;
-    "--gpu-index 0") pin_gpu=true ;;
+ente_photos=false
+while (($#)); do
+case "$1" in
+    --gpu-index) [[ ${2-} == 0 ]] || exit 2; pin_gpu=true; shift ;;
+    --ente-photos) ente_photos=true ;;
     -h|--help)
-        printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0]' \
+        printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0] [--ente-photos]' \
             'Use --gpu-index 0 only if hex model devices lists your intended Vulkan GPU at index 0.'
         exit 0 ;;
-    *) printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0]' >&2; exit 2 ;;
+    *) printf '%s\n' 'Usage: setup-host.sh [--gpu-index 0] [--ente-photos]' >&2; exit 2 ;;
 esac
+shift
+done
 
 # shellcheck source=scripts/go-bin.sh
 source "$REPO_DIR/scripts/go-bin.sh"
@@ -27,6 +31,9 @@ for cmd in curl gcc hex opencode python3 sha256sum systemctl tar; do
     command -v "$cmd" >/dev/null || { echo "Install $cmd before running setup." >&2; exit 1; }
 done
 systemctl --user show-environment >/dev/null
+if "$ente_photos"; then
+    "$REPO_DIR/scripts/setup-ente-photos.sh"
+fi
 
 install_kokoro() (
     local name=kokoro-multi-lang-v1_0
