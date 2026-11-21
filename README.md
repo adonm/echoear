@@ -81,9 +81,17 @@ chat history, faster face rendering, and separate turn and hardware diagnostics.
    environment or `bridge.env`. The board confirms the new image after display
    initialization and Wi-Fi DHCP; the script checks the running partition.
 
-5. Run `./scripts/check.sh` for Go vet, race tests, and host VAD, frame decoder,
-   and graphics tests (strict GCC with ASan/UBSan, both display sizes).
-   Add `--live` to exercise the running services; ShellCheck runs if installed.
+5. Run `./scripts/check.sh` for ShellCheck (if installed), Node tests, Go vet
+   and race tests, strict GCC/ASan/UBSan host tests for both board layouts,
+   and tracked-file hygiene. GitHub Actions runs this offline without Kokoro
+   weights; it does not build ESP-IDF images. Build those locally with the
+   commands above (`BOARD=vocat` and `BOARD=box3`).
+
+   Add `--live` to check the deployed web/OTA endpoints and run WebSocket
+   and voice/chat tests against a fresh bridge binary with a temporary database,
+   real Hex/Kokoro, and a deterministic model stub. No device is flashed, and
+   this check does not use model quota. See [evals and real-model smoke](docs/evals.md)
+   for optional tests against the configured model.
 
 ## Controls, voice notes, and calls
 
