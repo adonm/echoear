@@ -26,6 +26,7 @@ function stop() {
   disconnect();
   renderCurrent();
   $("workspace").hidden = true;
+  $("lan-actions").hidden = true;
   $("sidebar-toggle").hidden = true;
   $("parent-link").hidden = true;
   say("settings", "Bridge token");
@@ -58,6 +59,7 @@ async function authorize(token) {
     state.timerTick = setInterval(tickTimers, 1000);
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
+    $("lan-actions").hidden = !!scope;
     $("diagnostics-toggle").hidden = !!scope;
     $("sidebar-toggle").hidden = !!scope;
     $("parent-link").hidden = !!scope;
@@ -121,7 +123,7 @@ $("pair-opencode").onclick = async e => {
       field.spellcheck = false;
       field.setAttribute("aria-label", `${label} pairing link`);
       const actions = node("div", "row wrap");
-      const copy = node("button", "quiet", "Copy");
+      const copy = node("button", "outline", "Copy");
       copy.type = "button";
       copy.onclick = async () => {
         const copied = await copyField(field);
@@ -129,7 +131,7 @@ $("pair-opencode").onclick = async e => {
           say("pair-note", copied ? "Pairing link copied." : "Copy the selected link with your keyboard.");
         }
       };
-      const open = node("a", "button quiet", "Open ↗");
+      const open = node("a", "button outline", "Open ↗");
       open.href = target.href;
       open.target = "_blank";
       open.rel = "noopener noreferrer";

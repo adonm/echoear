@@ -4,7 +4,7 @@ import {test} from "node:test";
 test("renders the selected live device after the dashboard modules load", async t => {
   function element(tag) {
     return {
-      tag, dataset:{}, style:{setProperty() {}}, attrs:{}, children:[], listeners:{},
+      tag, dataset:{}, style:{setProperty() {}, removeProperty() {}}, attrs:{}, children:[], listeners:{},
       addEventListener(name, handler) { this.listeners[name] = handler; },
       setPointerCapture() {},
       getScreenCTM: () => ({inverse() {}}),
@@ -43,6 +43,7 @@ test("renders the selected live device after the dashboard modules load", async 
     document: {
       createElement: element,
       querySelector: () => element("meta"),
+      querySelectorAll: () => [element("meta")],
       addEventListener() {},
       getElementById(id) {
         if (!els.has(id)) els.set(id, element(id));
@@ -55,6 +56,7 @@ test("renders the selected live device after the dashboard modules load", async 
     Option: class {},
     WebSocket: {OPEN:1},
     window: {isSecureContext:true, AudioWorkletNode:class {}, addEventListener() {}},
+    ResizeObserver: class { observe() {} },
     DOMPoint: class {
       constructor(x, y) { Object.assign(this, {x,y}); }
       matrixTransform() { return this; }

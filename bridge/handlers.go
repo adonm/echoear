@@ -465,10 +465,10 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 	ctx := r.Context()
 	switch {
 	case path == "/api/parent":
-		return b.parentAPI(r, "")
+		return b.routeParent(w, r, "")
 	case strings.HasSuffix(path, "/parent"):
 		if id, ok := deviceSettingID(path, "parent"); ok {
-			return b.parentAPI(r, id)
+			return b.routeParent(w, r, id)
 		}
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/library/thumbnail/"):
 		return nil, b.libraryThumbnail(w, r, strings.TrimPrefix(path, "/api/library/thumbnail/"))

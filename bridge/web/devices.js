@@ -73,11 +73,11 @@ function deviceRow(d) {
   row.dataset.id = d.device_id;
   const button = node("button", "device");
   button.type = "button";
-  const call = node("button", "quiet peer-call", "Call");
+  const call = node("button", "outline peer-call", "Call");
   call.type = "button";
   call.onclick = () => startPeerCall(row.dataset.id);
-  const name = node("span", "device-name"), status = node("span", "pill device-state");
-  const meta = node("span", "device-meta"), badge = node("span", "pill tunnel-badge", "HTTPS Tunnel");
+  const name = node("span", "device-name"), status = node("span", "badge device-state");
+  const meta = node("span", "device-meta"), badge = node("span", "badge outline", "HTTPS Tunnel");
   const dot = node("span", "cat-dot");
   dot.setAttribute("aria-hidden", "true");
   button.append(dot, name, status, meta, badge);
@@ -114,8 +114,8 @@ function renderDevices() {
       call.disabled = !canStartCall();
       call.setAttribute("aria-label", `Call ${d.character}`);
       if (name.textContent !== d.character) name.textContent = d.character;
-      status.dataset.status = isLive(d) ? "live" : d.online ? "http" : "off";
-      status.textContent = isLive(d) ? "Live WS" : "Offline";
+      status.setAttribute("data-variant", isLive(d) ? "success" : d.online ? "warning" : "secondary");
+      status.textContent = isLive(d) ? "Live WS" : d.online ? "HTTP only" : "Offline";
       meta.textContent = virtual ? "" : [
         isLive(d) ? d.mode : "",
         Number.isFinite(d.battery_pct) ? `Battery ${d.battery_pct}%` : "",

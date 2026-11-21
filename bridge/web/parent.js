@@ -1,119 +1,95 @@
 const $ = id => document.getElementById(id);
-const note = text => { $("parent-note").textContent = text; };
-const auth = $("parent-auth"), controls = $("parent-controls"), picker = $("parent-device");
-let access, devices = [], pending = false;
+const auth = $("parent-auth"), controls = $("parent-controls"), status = $("parent-note");
+const note = text => { status.textContent = text; };
+let access, pending = false;
 
 try { $("bridge-token").value = localStorage.getItem("echoear-token") || ""; } catch {}
 
-async function request(path, body) {
-  const {bridge, parent} = access;
-  const headers = {"X-EchoEar-Token": bridge, "X-EchoEar-Parent-Token": parent};
-  const options = {headers, cache:"no-store"};
-  if (body) {
-    headers["Content-Type"] = "application/json";
-    Object.assign(options, {method:"POST", body:JSON.stringify(body)});
+async function request(path, fields) {
+  const headers = {"X-EchoEar-Token": access.bridge, "X-EchoEar-Parent-Token": access.parent, Accept:"text/html"};
+  const method = fields ? "POST" : "GET";
+  const failed = (text = "") => {
+    try { return JSON.parse(text).error; } catch { return "Cannot reach parent controls."; }
+  };
+  const active = document.activeElement;
+  const id = controls.contains(active) ? active.id : "";
+  if (window.htmx) {
+    const abort = new AbortController();
+    let error = "Cannot reach parent controls.";
+    status.addEventListener("htmx:after:request", e => {
+      if (e.detail.ctx.response.status === 200) error = "";
+      else {
+        error = failed(e.detail.ctx.text);
+        e.preventDefault();
+      }
+    }, {signal:abort.signal});
+    try {
+      // A source containing both forms would serialize fields from both.
+      await window.htmx.ajax(method, path, {source:status, target:controls, values:fields, headers,
+        swap:"innerHTML settle:0"});
+      if (error) throw new Error(error);
+    } finally { abort.abort(); }
+  } else {
+    // Keep LAN administration available without an internet connection.
+    const response = await fetch(path, {headers:{...headers, "HX-Request":"true"}, cache:"no-store",
+      method, body:fields && new URLSearchParams(fields)});
+    const text = await response.text();
+    if (!response.ok) throw new Error(failed(text));
+    const fragment = new DOMParser().parseFromString(text, "text/html");
+    controls.replaceChildren(...fragment.body.childNodes);
   }
-  const res = await fetch(path, options);
-  const result = await res.json();
-  if (!res.ok) throw new Error(result.error || "The bridge could not complete the request.");
-  return result;
+  if (id && document.activeElement === document.body) $(id)?.focus();
 }
 
-function showDevice() {
-  const cat = devices.find(d => d.device_id === picker.value);
-  $("parent-selected").hidden = !cat;
-  $("no-devices").hidden = !!devices.length;
-  picker.disabled = !cat;
-  if (!cat) return;
-  const s = cat.settings, secs = cat.used_seconds;
-  const labels = {quiet_hours:"Quiet hours", daily_limit:"Daily time used", paused:"Paused", unavailable:"Controls unavailable"};
-  $("parent-status").textContent = labels[cat.reason] || "Available";
-  $("parent-usage").textContent = `${Math.floor(secs / 60)} min ${secs % 60} sec used${s.daily_minutes ? ` of ${s.daily_minutes} min` : ""} · ${cat.day} (${s.timezone})`;
-  const recent = Object.entries({"Talk turns":"talk_turns", "App launches":"app_launches", "Calls":"calls", "Intercom notes":"intercom", "Timer cards":"timer_cards"});
-  $("parent-activity").replaceChildren(...recent.flatMap(([label, key]) => {
-    const term = document.createElement("dt"), count = document.createElement("dd");
-    term.textContent = label;
-    count.textContent = cat.recent[key];
-    return [term, count];
-  }));
-  $("parent-history").href = `/app?device_id=${encodeURIComponent(cat.device_id)}#chat`;
-  $("parent-timezone").value = s.timezone;
-  $("parent-start").value = s.quiet_start;
-  $("parent-end").value = s.quiet_end;
-  $("parent-budget").value = s.daily_minutes;
-  const paused = s.pause_until_ms > Date.now();
-  const until = paused ? s.pause_until_ms : s.override_until_ms;
-  $("parent-until").textContent = until > Date.now() ?
-    `${paused ? "Paused" : "Overridden"} until ${new Date(until).toLocaleString([], {timeZone:s.timezone})} (${s.timezone}).` : "";
+function overview(id = "") {
+  return request(`/api/parent${id ? `?device_id=${encodeURIComponent(id)}` : ""}`);
 }
 
-async function refresh() {
-  const previous = picker.value;
-  ({devices} = await request("/api/parent"));
-  picker.replaceChildren(...devices.map(d => new Option(`${d.character} (${d.device_id})`, d.device_id)));
-  if (devices.some(d => d.device_id === previous)) picker.value = previous;
-  showDevice();
-}
-
-async function work(f, success) {
+async function work(action, success) {
   if (pending) return;
   pending = true;
   note("");
   try {
-    await f();
+    await action();
     note(success);
   } catch (err) {
-    note(err.message || "Cannot reach the bridge.");
-  } finally {
-    pending = false;
-  }
+    note(err.message || "Cannot reach parent controls.");
+  } finally { pending = false; }
 }
 
 auth.onsubmit = e => {
   e.preventDefault();
   work(async () => {
-    access = {bridge:$("bridge-token").value, parent:$("parent-token").value};
+    access = {bridge:$("bridge-token").value.trim(), parent:$("parent-token").value.trim()};
     $("parent-token").value = "";
-    try { await refresh(); } catch (err) { access = null; throw err; }
+    try { await overview(); }
+    catch (err) { access = null; $("parent-token").focus(); throw err; }
     auth.hidden = true;
     controls.hidden = false;
-    (picker.disabled ? $("parent-refresh") : picker).focus();
-  }, "Parent controls opened.");
+    ($("parent-device").disabled ? $("parent-refresh") : $("parent-device")).focus();
+  }, "");
 };
 
-picker.onchange = showDevice;
-$("parent-refresh").onclick = () => work(refresh, "Usage refreshed.");
-$("parent-signout").onclick = () => {
-  if (pending) return;
-  access = null;
-  devices = [];
-  picker.replaceChildren();
-  controls.hidden = true;
-  auth.hidden = false;
-  note("Signed out of parent controls.");
-  $("parent-token").focus();
+controls.onchange = e => {
+  if (e.target.id === "parent-device") work(() => overview(e.target.value), "");
 };
-
-function save(body, success) {
-  const id = picker.value;
-  if (!id) return;
-  work(async () => {
-    const updated = await request(`/api/devices/${encodeURIComponent(id)}/parent`, body);
-    const cat = devices.find(d => d.device_id === id);
-    Object.assign(cat, updated);
-    showDevice();
-  }, success);
-}
-
-$("parent-settings").onsubmit = e => {
+controls.onclick = e => {
+  if (e.target.id === "parent-refresh") work(() => overview($("parent-device").value), "Usage refreshed.");
+  if (e.target.id === "parent-signout" && !pending) {
+    access = null;
+    controls.hidden = true;
+    controls.replaceChildren();
+    auth.hidden = false;
+    note("Signed out of parent controls.");
+    $("parent-token").focus();
+  }
+};
+controls.onsubmit = e => {
   e.preventDefault();
-  save({action:"settings", timezone:$("parent-timezone").value.trim(), quiet_start:$("parent-start").value,
-    quiet_end:$("parent-end").value, daily_minutes:$("parent-budget").valueAsNumber}, "Rules saved.");
-};
-$("parent-actions").onsubmit = e => {
-  e.preventDefault();
-  const action = e.submitter?.value;
-  if (!action) return;
-  save(action === "end_override" ? {action} : {action, minutes:$("parent-minutes").valueAsNumber},
-    {end_override:"Override ended.", pause:"Cat paused.", unlock:"Cat unlocked."}[action]);
+  const id = $("parent-device").value;
+  const action = e.target.id === "parent-settings" ? "settings" : e.submitter?.value;
+  if (!id || !action) return;
+  const fields = action === "end_override" ? {} : Object.fromEntries(new FormData(e.target));
+  work(() => request(`/api/devices/${encodeURIComponent(id)}/parent`, {action, ...fields}),
+    {settings:"Rules saved.", end_override:"Override ended.", pause:"Cat paused.", unlock:"Cat unlocked."}[action]);
 };

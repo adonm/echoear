@@ -1,4 +1,5 @@
-// The bridge prepends the content-addressed cache name and static shell paths.
+// The bridge versions this same-origin shell by its contents. Oat can use the
+// browser's HTTP cache; native controls still work if the CDN is unreachable.
 self.addEventListener("install", event => {
   const files = SHELL.map(path => new Request(new URL(path, self.location.href), {redirect:"error", cache:"reload"}));
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(files)));

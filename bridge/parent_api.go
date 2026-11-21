@@ -68,7 +68,11 @@ func (b *bridge) parentAPI(r *http.Request, id string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	args, err := jsonBody(r)
+	readArgs := jsonBody
+	if parentFragmentRequest(r) {
+		readArgs = parentForm
+	}
+	args, err := readArgs(r)
 	if err != nil {
 		return nil, err
 	}

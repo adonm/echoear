@@ -9,7 +9,7 @@ const dayFormat = new Intl.DateTimeFormat(undefined, {dateStyle:"medium"});
 const timeFormat = new Intl.DateTimeFormat(undefined, {hour:"2-digit", minute:"2-digit", hourCycle:"h23"});
 function bubble(entry) {
   if (entry.role === "card" || entry.role === "system") {
-    const item = node("li", "pill chat-divider", entry.text);
+    const item = node("li", "badge outline chat-divider", entry.text);
     item.dataset.entry = entry.id;
     return item;
   }
@@ -22,8 +22,8 @@ function bubble(entry) {
   const label = role === "intercom" ? recipient ? `${sender} → ${recipient}` : `From ${sender}` : sender;
   const header = node("div", "row wrap bubble-head");
   header.append(node("strong", "", label));
-  if (role === "intercom") header.append(node("span", "pill", "Intercom"));
-  else if (role === "user") header.append(node("span", "pill", {voice:"Voice", tap:"Tap"}[entry.source] || "Text"));
+  if (role === "intercom") header.append(node("span", "badge outline", "Intercom"));
+  else if (role === "user") header.append(node("span", "badge outline", {voice:"Voice", tap:"Tap"}[entry.source] || "Text"));
   const when = new Date(entry.timestamp);
   if (Number.isFinite(when.valueOf())) {
     const time = node("time", "", timeFormat.format(when));
@@ -35,6 +35,13 @@ function bubble(entry) {
 }
 
 const chat = transcript($("messages"), bubble, day => node("li", "day", day), day => dayFormat.format(day));
+const transcriptPane = $("transcript");
+const nearLatest = () => transcriptPane.scrollHeight - transcriptPane.clientHeight - transcriptPane.scrollTop <= 80;
+let following = true;
+transcriptPane.addEventListener("scroll", () => { following = nearLatest(); });
+new ResizeObserver(() => {
+  if (following) transcriptPane.scrollTop = transcriptPane.scrollHeight;
+}).observe(transcriptPane);
 
 function transcriptStatus() {
   $("empty-chat").hidden = chat.size !== 0;
@@ -46,8 +53,8 @@ function transcriptStatus() {
 }
 
 function updateTranscript(update, keepPosition = false) {
-  const scroll = $("transcript"), top = scroll.scrollTop;
-  const follow = !keepPosition && scroll.scrollHeight - scroll.clientHeight - top <= 80;
+  const scroll = transcriptPane, top = scroll.scrollTop;
+  const follow = !keepPosition && nearLatest();
   const anchor = follow ? null : chat.anchor(top);
   const offset = anchor?.node.offsetTop;
   const id = anchor?.entry.id;
@@ -58,11 +65,13 @@ function updateTranscript(update, keepPosition = false) {
     const replacement = id && chat.node(id);
     scroll.scrollTop = replacement ? top + replacement.offsetTop - offset : top;
   }
+  following = nearLatest();
 }
 
 function resetTranscript() {
   chat.clear();
-  $("transcript").scrollTop = 0;
+  transcriptPane.scrollTop = 0;
+  following = true;
   transcriptStatus();
 }
 
@@ -158,6 +167,9 @@ $("reset").onclick = async () => {
   }
 };
 
+$("send").addEventListener("pointerdown", e => {
+  if (e.button === 0 && document.activeElement === $("text")) e.preventDefault();
+});
 $("prompt").onsubmit = async e => {
   e.preventDefault();
   const cat = state.view, current = state.app, input = $("text"), text = input.value.trim();

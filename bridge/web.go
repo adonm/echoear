@@ -9,6 +9,11 @@ import (
 //go:embed web/*.html web/style.css web/*.js
 var webFiles embed.FS
 
+const (
+	oatCDN  = "https://unpkg.com/@knadh/oat@1.1.0/oat.min."
+	htmxCDN = "https://unpkg.com/htmx.org@4.0.2/dist/htmx.min.js"
+)
+
 func serveApp(w http.ResponseWriter, path string) bool {
 	var name, mime string
 	switch path {
@@ -35,7 +40,11 @@ func serveAppFile(w http.ResponseWriter, name, mime string) bool {
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; manifest-src 'self'; worker-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	scripts := "'self' " + oatCDN + "js"
+	if name == "parent.html" {
+		scripts += " " + htmxCDN
+	}
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src "+scripts+"; style-src 'self' "+oatCDN+"css; img-src 'self' data: blob:; manifest-src 'self'; worker-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.Header().Set("Permissions-Policy", "microphone=(self)")
 	sendBytes(w, 200, mime, data)
 	return true

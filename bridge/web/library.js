@@ -11,7 +11,7 @@ function tickTimers() {
 }
 
 function removeButton(text, label, action) {
-  const button = node("button", "quiet compact-action", text);
+  const button = node("button", "outline compact-action", text);
   button.type = "button";
   button.setAttribute("aria-label", `${text} ${label}`);
   button.onclick = async () => {

@@ -12,6 +12,19 @@ let screenHits = [];
 const occupiedCode = 4001; // wsCatOccupied
 const updateInstall = installer();
 const phoneLayout = matchMedia("(max-width: 620px), (max-width: 920px) and (orientation: portrait)");
+const viewport = window.visualViewport;
+function syncVisualHeight() {
+  // iOS can resize only the visual viewport for the keyboard. Don't override user zoom.
+  if (viewport.scale === 1) {
+    document.documentElement.style.setProperty("--visual-height", `${viewport.height}px`);
+  } else {
+    document.documentElement.style.removeProperty("--visual-height");
+  }
+}
+if (viewport) {
+  viewport.addEventListener("resize", syncVisualHeight);
+  syncVisualHeight();
+}
 const idle = idleWatch({
   isBusy: () => busyMode(state.view?.mode) || audioBusy() || state.view?.sending || state.view?.resetting || state.view?.sharingPhoto,
   onIdle: () => pause("idle"),
@@ -91,7 +104,7 @@ function renderCurrent() {
   $("screen-controls").hidden = !ready;
   renderVolume();
   renderVoice(d, state.view?.voicePending);
-  $("phone-controls").hidden = !state.view?.virtual;
+  $("phone-controls").hidden = $("phone-destination").hidden = !state.view?.virtual;
   const micAvailable = canCaptureMic();
   const busyCall = inCall();
   $("talk").disabled = !active || !micAvailable || micStopping() || busyCall || resting;
@@ -100,7 +113,7 @@ function renderCurrent() {
   say("mic-help", window.isSecureContext ? "This browser can’t capture microphone audio." :
     "Mic needs localhost or an HTTPS opentunnel.xyz link");
   $("text").disabled = !d || resting || state.view.virtual && (!active || busyCall);
-  $("text").placeholder = state.view?.parentMessage || (d?.cat?.configured === false ? "Say hi to design your cat…" : "Say something to your cat…");
+  $("text").placeholder = state.view?.parentMessage || (d?.cat?.configured === false ? "Say hi to design your cat…" : "Message your cat…");
   $("send").disabled = $("text").disabled || !!state.view?.sending || !!state.view?.resetting;
   $("share-photo").disabled = !d || !!state.view?.sharingPhoto || state.view?.virtual && !active;
   $("reset").hidden = !!state.app?.scope;

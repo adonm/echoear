@@ -2,25 +2,38 @@ import {api, request} from "./api.js";
 import {$, node, say} from "./dom.js";
 import {state} from "./state.js";
 
-const dialog = node("dialog");
+const dialog = node("dialog", "photo-library");
+dialog.id = "photo-library";
 dialog.setAttribute("aria-labelledby", "photo-library-heading");
 dialog.innerHTML = `
-  <form id="photo-library-search">
-    <p class="eyebrow">LAN / Family photos</p>
-    <h2 id="photo-library-heading">Photo Library</h2>
-    <label for="photo-library-cat">Cat</label>
-    <select id="photo-library-cat"></select>
-    <label><input id="photo-library-allow" type="checkbox" disabled> Allow this cat to use the photo library</label>
-    <label for="photo-library-query">Find photos by name, caption, album or label</label>
-    <input id="photo-library-query" type="search" maxlength="160" placeholder="Leave blank for recent photos">
-    <div class="row">
-      <button id="photo-library-find" type="submit" disabled>Find photos</button>
-      <button id="photo-library-people" class="quiet" type="button" disabled>People</button>
-      <button id="photo-library-close" class="quiet" type="button">Close</button>
+  <header>
+    <div>
+      <p class="eyebrow">On your network / Family photos</p>
+      <h2 id="photo-library-heading">Photo Library</h2>
     </div>
-  </form>
-  <p id="photo-library-status" class="note" role="status"></p>
-  <ol id="photo-library-results"></ol>`;
+    <form method="dialog"><button id="photo-library-close" class="outline" type="submit" autofocus>Close</button></form>
+  </header>
+  <div class="photo-body">
+    <p class="small">Manage which cats can see your library, organize photos, and review people groups.</p>
+    <div class="photo-toolbar" role="group" aria-label="Photo access">
+      <label data-field for="photo-library-cat">Cat or device <select id="photo-library-cat"></select></label>
+      <label class="switch" for="photo-library-allow">
+        <input id="photo-library-allow" type="checkbox" role="switch" disabled> Allow photo access for this cat
+      </label>
+    </div>
+    <search>
+      <form id="photo-library-search" class="photo-search">
+        <label data-field for="photo-library-query">Find photos by name, caption, album or label
+          <input id="photo-library-query" type="search" maxlength="160" enterkeyhint="search"
+                 autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Leave blank for recent photos">
+        </label>
+        <button id="photo-library-find" type="submit" disabled>Find photos</button>
+        <button id="photo-library-people" class="outline" type="button" disabled>People</button>
+      </form>
+    </search>
+    <p id="photo-library-status" class="photo-status" role="status" tabindex="-1"></p>
+    <ol id="photo-library-results" class="photo-results" role="list"></ol>
+  </div>`;
 document.body.append(dialog);
 const cats = $("photo-library-cat");
 const allow = $("photo-library-allow");
@@ -44,8 +57,10 @@ function setPhotoLibrary(authorized) {
 }
 
 function previewButton(current, path, item, stamp) {
-  const preview = node("button", "quiet", "Load preview");
+  const preview = node("button", "outline", "Load preview");
+  preview.setAttribute("aria-label", `Load preview: ${item.title || "Library face"}`);
   preview.onclick = async () => {
+    const focused = document.activeElement === preview;
     preview.disabled = true;
     try {
       await api(current, path, {method:"POST", body:{op:"prepare", handle:item.handle}});
@@ -62,6 +77,10 @@ function previewButton(current, path, item, stamp) {
       img.alt = item.title || "Library face";
       img.width = item.face === undefined ? 180 : 96;
       preview.replaceWith(img);
+      if (focused && document.activeElement === document.body) {
+        img.tabIndex = -1;
+        img.focus();
+      }
     } catch {
       if (revision === stamp) say("photo-library-status", "Could not load this photo.");
       preview.disabled = false;
@@ -71,14 +90,18 @@ function previewButton(current, path, item, stamp) {
 }
 
 function showResult(current, path, item, stamp) {
-  const row = node("li");
-  const title = node("p", "small", item.title || "Photo");
+  const row = node("li", "card");
+  const title = node("h3", "", item.title || "Photo");
+  const field = node("label", "", "Labels");
+  field.setAttribute("data-field", "");
   const labels = node("input");
   labels.placeholder = "e.g. Grandma, Beach";
   labels.setAttribute("aria-label", `Labels for ${item.title || "photo"}`);
   labels.value = item.tags.join(", ");
   labels.maxLength = 600;
-  const save = node("button", "quiet", "Save labels");
+  field.append(labels);
+  const save = node("button", "outline", "Save labels");
+  save.setAttribute("aria-label", `Save labels: ${item.title || "Photo"}`);
   save.onclick = async () => {
     save.disabled = true;
     try {
@@ -92,17 +115,18 @@ function showResult(current, path, item, stamp) {
       save.disabled = false;
     }
   };
-  row.append(title, previewButton(current, path, item, stamp), labels, save);
+  row.append(title, previewButton(current, path, item, stamp), field, save);
   results.append(row);
 }
 
 function listButton(label, action) {
-  const button = node("button", "quiet", label);
+  const button = node("button", "outline", label);
   button.onclick = action;
   return button;
 }
 
 async function showPeople(offset = 0, cluster = "") {
+  const focusStatus = results.contains(document.activeElement);
   resetResults();
   const current = state.app, stamp = revision;
   if (!current || current.scope || !cats.value || !allow.checked) return;
@@ -128,8 +152,10 @@ async function showPeople(offset = 0, cluster = "") {
         mergeTarget ? `Merge destination: ${mergeTarget.name || "unnamed group"}. Choose a different group to merge.` :
           "Review and confirm faces before a name can match them.");
       for (const group of data.people) {
-        const row = node("li");
-        row.append(node("p", "small", `${group.name || "Unnamed group"} · ${group.confirmed} of ${group.total} confirmed`),
+        const row = node("li", "card");
+        const confirmed = node("span", "badge", `${group.confirmed} of ${group.total} confirmed`);
+        confirmed.dataset.variant = "secondary";
+        row.append(node("h3", "", group.name || "Unnamed group"), confirmed,
           listButton("Review faces", () => showPeople(0, group.id)),
           listButton("Use as merge destination", () => { mergeTarget = group; showPeople(offset); }));
         if (mergeTarget && mergeTarget.id !== group.id) {
@@ -142,34 +168,43 @@ async function showPeople(offset = 0, cluster = "") {
       }
     } else {
       say("photo-library-status", "Only confirmed faces are searchable by this name.");
-      const edit = node("li");
+      const edit = node("li", "card photo-wide");
+      const field = node("label", "", "Person name");
+      field.setAttribute("data-field", "");
+      field.htmlFor = "photo-person-name";
       const name = node("input");
+      name.id = field.htmlFor;
       name.value = data.name;
       name.placeholder = "e.g. Grandma";
       name.maxLength = 80;
-      name.setAttribute("aria-label", "Person name");
-      edit.append(listButton("Back to People", () => showPeople()), name,
+      field.append(name);
+      edit.append(listButton("Back to People", () => showPeople()), field,
         listButton("Save name", post(() => ({op:"person-name", cluster, name:name.value}), () => showPeople(offset, cluster))));
       results.append(edit);
       for (const item of data.faces) {
-        const row = node("li");
+        const row = node("li", "card");
+        const badge = node("span", "badge", item.confirmed ? "Confirmed" : "Suggested");
+        badge.dataset.variant = item.confirmed ? "success" : "secondary";
         const action = (op, label) => listButton(label, post(() => ({op, handle:item.handle, face:item.face}),
           () => showPeople(0, cluster)));
-        row.append(node("p", "small", item.confirmed ? "Confirmed" : "Suggested"),
-          previewButton(current, path, item, stamp));
+        row.append(badge, previewButton(current, path, item, stamp));
         if (!item.confirmed) row.append(action("face-confirm", "Confirm match"));
         row.append(action("face-reject", "Reject"), action("face-split", "Split into new group"));
         results.append(row);
       }
     }
     if (offset || data.next) {
-      const page = node("li");
+      const page = node("li", "row wrap photo-wide");
       if (offset) page.append(listButton("Previous page", () => showPeople(Math.max(0, offset - (cluster ? 6 : 12)), cluster)));
       if (data.next) page.append(listButton("Next page", () => showPeople(data.next, cluster)));
       results.append(page);
     }
   } catch {
     if (stamp === revision) say("photo-library-status", "Photo people unavailable.");
+  } finally {
+    if (focusStatus && stamp === revision && dialog.open && !dialog.contains(document.activeElement)) {
+      $("photo-library-status").focus();
+    }
   }
 }
 
@@ -177,6 +212,7 @@ async function refresh(search = false) {
   resetResults();
   const current = state.app, stamp = revision;
   allow.disabled = find.disabled = peopleButton.disabled = true;
+  if (!search) allow.checked = false;
   if (!current || current.scope || !cats.value) return;
   const path = `/api/library?device_id=${encodeURIComponent(cats.value)}`;
   const q = search ? `&q=${encodeURIComponent($("photo-library-query").value.trim() || "*")}` : "";
@@ -193,7 +229,8 @@ async function refresh(search = false) {
     peopleButton.disabled = find.disabled;
     say("photo-library-status", !data.ready ? "Waiting for fresh Ente metadata." :
       data.hidden ? "The library is hidden from this cat." :
-      search && !data.items.length ? "No matching photos." : "");
+      search ? data.items.length ? `${data.items.length} photo${data.items.length === 1 ? "" : "s"} found.` : "No matching photos." :
+      "Search for photos or open People to review face groups.");
     for (const item of data.items) showResult(current, path, item, stamp);
   } catch {
     if (revision === stamp) say("photo-library-status", "Photo library unavailable.");
@@ -212,7 +249,6 @@ $("library-toggle").onclick = () => {
   say("photo-library-status", cats.value ? "" : "No cats found.");
   refresh();
 };
-$("photo-library-close").onclick = () => dialog.close();
 dialog.onclose = () => { resetResults(); mergeTarget = null; };
 cats.onchange = () => { mergeTarget = null; refresh(); };
 $("photo-library-people").onclick = () => showPeople();

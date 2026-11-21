@@ -2,70 +2,38 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="htmx-config" content='{"history":false,"mode":"same-origin","includeIndicatorCSS":false}'>
   <title>EchoEar · Parent controls</title>
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="https://unpkg.com/@knadh/oat@1.1.0/oat.min.css" integrity="sha384-W8Z3f/RFchsEaPcbktneR+q+yniOOmbyw/5T4SLu439RBvA92XMmMoZWdjkpDQhH" crossorigin="anonymous">
   <link rel="stylesheet" href="/app/style.css">
+  <script src="https://unpkg.com/@knadh/oat@1.1.0/oat.min.js" integrity="sha384-VsJCNQuL4en6VCTEdp+V2Pn5YLddcJL5gHhToiWjiYB+Ozp8/YDchNaEzvQTvUHj" crossorigin="anonymous" async></script>
+  <script src="https://unpkg.com/htmx.org@4.0.2/dist/htmx.min.js" integrity="sha384-6NzMyCdh08UZ4b4M17SJJKQLdDijx4z2IqqKLKD0Q/PzCFQLpFuk3konY0WgqbTy" crossorigin="anonymous" async></script>
   <script type="module" src="/app/parent.js"></script>
 </head>
-<body>
+<body class="parent-page">
   <header class="masthead">
-    <div class="brand"><span class="wordmark">EchoEar</span><h1>Parent controls</h1></div>
-    <a class="button quiet" href="/app">Back to Cat Club</a>
+    <div><span class="eyebrow">EchoEar / Family settings</span><h1>Parent controls</h1></div>
+    <nav aria-label="Cat Club"><a class="button outline" href="/app">← Cat Club</a></nav>
   </header>
   <main class="parent-layout">
-    <p class="small">Rules stay with each device, even if you change its cat. Incoming calls and voice notes are declined while its cat is resting.</p>
-    <form id="parent-auth" class="panel parent-panel" aria-labelledby="access-heading">
-      <h2 id="access-heading">Parent access</h2>
-      <label for="bridge-token">LAN bridge token</label>
-      <input type="password" id="bridge-token" autocomplete="off" required>
-      <label for="parent-token">Parent token</label>
-      <input type="password" id="parent-token" autocomplete="off" required>
-      <button class="accent">Open controls</button>
-    </form>
-    <section id="parent-controls" class="panel parent-panel" aria-labelledby="devices-heading" hidden>
-      <div class="row wrap">
-        <h2 id="devices-heading">Devices</h2>
-        <button type="button" id="parent-refresh" class="quiet">Refresh usage</button>
-        <button type="button" id="parent-signout" class="quiet">Sign out</button>
-      </div>
-      <label for="parent-device">Cat or device</label>
-      <select id="parent-device"></select>
-      <p id="no-devices" hidden>No cats or devices are registered.</p>
-      <div id="parent-selected" class="parent-panel" hidden>
-        <h3>Usage today</h3>
-        <p id="parent-status"></p>
-        <p id="parent-usage" class="small"></p>
-        <h3>Activity in the last 7 days</h3>
-        <dl id="parent-activity" class="diag-fields"></dl>
-        <a id="parent-history">Open this cat's chat history</a>
-        <form id="parent-settings" class="parent-panel">
-          <h3>Quiet hours and daily limit</h3>
-          <label for="parent-timezone">IANA time zone (for example, America/New_York)</label>
-          <input id="parent-timezone" required maxlength="64" spellcheck="false">
-          <div class="row wrap">
-            <div><label for="parent-start">Quiet from</label><input id="parent-start" type="time"></div>
-            <div><label for="parent-end">Quiet until</label><input id="parent-end" type="time"></div>
-          </div>
-          <p class="small">Leave both quiet times blank to turn off quiet hours.</p>
-          <label for="parent-budget">Daily minutes for Talk, apps, and calls (0 = no limit)</label>
-          <input id="parent-budget" type="number" min="0" max="1440" required>
-          <button class="accent">Save rules</button>
-        </form>
-        <form id="parent-actions" class="parent-panel">
-          <h3>Pause and unlock</h3>
-          <label for="parent-minutes">Minutes to pause or override rules</label>
-          <input id="parent-minutes" type="number" value="15" min="1" max="1440" required>
-          <div class="row wrap">
-            <button class="quiet" value="pause">Pause</button>
-            <button class="accent" value="unlock">Unlock and override</button>
-            <button class="quiet" value="end_override" formnovalidate>End override</button>
-          </div>
-          <p id="parent-until" class="small"></p>
-        </form>
-      </div>
-    </section>
+    <p class="parent-intro">Rules stay with each device, even if you change its cat. Incoming calls and voice notes are declined while its cat is resting.</p>
     <p id="parent-note" class="note" role="status"></p>
+    <form id="parent-auth" class="card parent-panel" method="post" aria-labelledby="access-heading">
+      <h2 id="access-heading">Parent access</h2>
+      <p class="small">Use both tokens on your local network. The parent token is kept only until you sign out or leave this page.</p>
+      <label data-field for="bridge-token">LAN bridge token
+        <input type="password" id="bridge-token" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label data-field for="parent-token">Parent token
+        <input type="password" id="parent-token" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="parent-note" required>
+      </label>
+      <button type="submit">Open controls</button>
+    </form>
+    <section id="parent-controls" class="parent-panel" aria-labelledby="devices-heading" hidden></section>
+    <noscript><p>JavaScript is required to open parent controls.</p></noscript>
   </main>
 </body>
 </html>

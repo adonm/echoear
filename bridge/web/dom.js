@@ -5,9 +5,8 @@ const setLocal = (key, val) => { try { localStorage.setItem(key, val); } catch {
 
 const wide = matchMedia("(min-width: 921px)");
 function colors(el, cat) {
-  const hex = value => /^#[a-f\d]{6}$/i.test(value || "");
-  el.style.setProperty("--cat", hex(cat?.face_bg) ? cat.face_bg : "#f3f4f6");
-  el.style.setProperty("--cat-accent", hex(cat?.accent_color) ? cat.accent_color : "#60a5fa");
+  if (/^#[a-f\d]{6}$/i.test(cat?.accent_color || "")) el.style.setProperty("--cat-accent", cat.accent_color);
+  else el.style.removeProperty("--cat-accent");
 }
 const isLive = d => !!(d?.ws_connected ?? d?.ws);
 const persisted = d => /^virt-[0-9a-f]{8}$/.test(d?.device_id || "");

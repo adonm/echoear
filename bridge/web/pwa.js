@@ -8,7 +8,7 @@ export function installAssets(view, app) {
 export function installer() {
   const manifest = document.getElementById("phone-manifest"), icon = document.getElementById("phone-icon");
   const install = document.getElementById("install-phone"), hint = document.getElementById("phone-install-hint");
-  const theme = document.querySelector("meta[name=theme-color]");
+  const themes = [...document.querySelectorAll("meta[name=theme-color]")].map(meta => [meta, meta.content]);
   const standalone = matchMedia("(display-mode: standalone)");
   const ios = /iPad|iPhone|iPod/i.test(navigator.userAgent) || navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
   let prompt, registered = false, installed = false;
@@ -38,7 +38,8 @@ export function installer() {
 
   return (view, app) => {
     const assets = window.isSecureContext && installAssets(view, app);
-    theme.content = assets && /^#[a-f\d]{6}$/i.test(view.device?.cat?.mark_color) ? view.device.cat.mark_color : "#151722";
+    const mark = assets && /^#[a-f\d]{6}$/i.test(view.device?.cat?.mark_color) && view.device.cat.mark_color;
+    for (const [meta, fallback] of themes) meta.content = mark || fallback;
     if (assets?.manifest === (manifest.getAttribute("href") || undefined)) return;
     prompt = null;
     installed = false;
