@@ -1,4 +1,4 @@
-# EchoEar evals
+# Lark evals
 
 Run from the repo root with Bash and Go 1.26:
 
@@ -61,13 +61,13 @@ delay. This measures bridge text reply latency, not time to audible speech
 or real model speed.
 
 For a real replay, prepare a disposable loopback OpenCode instance with its
-own config/data/cache/state/workspace, the EchoEar agent revision to test, and
-**only** the EchoEar MCP connected to a separate local bridge with a temporary
-database and no Turso sync or production devices. Use a mock cat/device if the
+own config/data/cache/state/workspace, the `echoear` agent revision to test, and
+**only** the `echoear` MCP connected to a separate local bridge with a temporary
+database and no Turso sync or production devices. Use a mock companion/device if the
 prompt needs on-screen state. Follow the [dedicated installation notes](../README.md#dedicated-opencode)
 for config layout; make sure the MCP proxy inherits the test bridge's
 `ECHOEAR_BRIDGE_PORT` and `ECHOEAR_BRIDGE_TOKEN`, not the installed ones.
-Select the model in that OpenCode's EchoEar agent configuration. The CLI uses
+Select the model in that OpenCode's `echoear` agent configuration. The CLI uses
 that selection as-is.
 
 ```sh
@@ -99,7 +99,7 @@ From the repo root:
 ECHOEAR_SMOKE_CONFIG_HOME=/path/to/disposable/config ./scripts/check.sh --real-model
 ```
 
-This verifies Code Mode's four EchoEar tools against a disposable virtual device
-and cleans up the device and session. It uses the EchoEar agent's configured
+This verifies Code Mode's four companion tools against a disposable virtual device
+and cleans up the device and session. It uses the `echoear` agent's configured
 model and fails on real provider errors (including exhausted quota). This
 smoke is not part of `--live` or CI.
