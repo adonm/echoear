@@ -79,9 +79,9 @@ func TestDenseSpriteRasterAndMirror(t *testing.T) {
 }
 
 func TestSpriteRuns(t *testing.T) {
-	art, err := compileSprite([]string{"ppXX", ".kk."}, map[string]string{"X": "#f5b895"}, 6, 9, 3)
+	art, err := compileSprite([]string{"ppXX", ".kk."}, map[string]string{"X": "#f5ad7e"}, 6, 9, 3)
 	if err != nil || strings.Count(art, "<rect ") != 2 ||
-		!strings.Contains(art, `<rect x="6" y="9" width="12" height="3" fill="#F5B895"/>`) ||
+		!strings.Contains(art, `<rect x="6" y="9" width="12" height="3" fill="#F5AD7E"/>`) ||
 		!strings.Contains(art, `shape-rendering="crispEdges"`) {
 		t.Fatalf("%s: %v", art, err)
 	}

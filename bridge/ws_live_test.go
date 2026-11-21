@@ -102,7 +102,7 @@ function onTick(){if(text==="Live tap")text="Live reset";}`
 	phone := testConnectWS(t, base, token, true)
 	phone.json(t, object{"ev": "hello", "role": "web", "device_id": phoneID, "character": "New Cat", "firmware": "web", "volume": 65})
 	face := phone.until(t, hasWS("svg", "cat-ring"))
-	if !hasWS("svg", "#F3F4F6")(face) || !hasWS("svg", "Say hi to meet me!")(face) {
+	if !hasWS("svg", "#FFF2E7")(face) || !hasWS("svg", "Say hi to meet me!")(face) {
 		t.Fatal("live Phone Cat did not start blank")
 	}
 	viewer.until(t, hasWS("peers", phoneID))

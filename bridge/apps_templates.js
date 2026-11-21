@@ -6,7 +6,7 @@ app = (() => {
   const theme = d.theme || "warm";
   const [bg, paper, ink, accent, border] = templatePalettes[theme];
   const [buttonRadius, cardRadius] = templateRadii;
-  const defaults = ["#E54962", "#FFB82E", "#127D79", "#465DD1"];
+  const defaults = ["#CB6B8F", "#D5A051", "#528A77", "#687DAF"];
   const assert = (ok, msg) => { if (!ok) throw new TypeError(msg); };
   const count = (a, lo, hi) => Array.isArray(a) && a.length >= lo && a.length <= hi;
   const integer = (n, lo, hi) => Number.isInteger(n) && n >= lo && n <= hi;
@@ -25,14 +25,17 @@ app = (() => {
   const screen = art => `<svg viewBox="0 0 360 360">${rect(0,0,360,360,0,bg)}${rect(49,55,262,235,cardRadius,paper,border)}${txt(180,78,title)}${art}</svg>`;
   const choice = (id, label) => ({id, label: String(label)});
   const addArt = (svg, art) => svg.replace("</svg>",art+"</svg>");
-  const pixel = (name,x,y,scale=2,tint="") => templatePixel(name,x,y,scale,tint);
+  const sticker = (name,x,y,size,palette) => ui.sticker(name,{x:x-Math.floor(size/2),y:y-Math.floor(size/2),size,palette});
   const menu = (badge, prompt, choices, footer="") => addArt(
-    ui.choices({title, theme, badge, prompt, choices, footer}), pixel("spark",274,81,2,ui.palette.a));
+    ui.choices({title, theme, badge, prompt, choices, footer}), sticker("spark",279,83,23));
   const tap = () => chime("tap");
   const win = () => chime("celebrate");
-  const iconColors = {star:ui.palette.a, heart:ui.palette.r, triangle:ui.palette.g,
-    diamond:ui.palette.l, square:ui.palette.o, circle:ui.palette.s, moon:ui.palette.l,
-    sun:ui.palette.a, cloud:ui.palette.s};
+  const tileArt = (name,x,y) => {
+    if (name === "circle") return rect(x-10,y-10,20,20,10,ui.palette.s,border);
+    if (name === "square") return rect(x-10,y-10,20,20,5,ui.palette.p,border);
+    const path = name === "triangle" ? "M0-10L10 9H-10Z" : name === "diamond" ? "M0-11L10 0 0 11-10 0Z" : "";
+    return path ? `<path d="${path}" transform="translate(${x} ${y})" fill="${name === "triangle" ? ui.palette.m : ui.palette.l}" stroke="${border}" stroke-width="2" stroke-linejoin="round"/>` : sticker(name,x,y,30);
+  };
 
   // Quiz and picture math share the answer, feedback, and replay loop.
   function questions(qs, picture) {
@@ -48,8 +51,8 @@ app = (() => {
           answered ? (q.answer === s.picked ? "Correct!" : "Good try!") : "");
         if (picture && !answered) {
           let art = "";
-          for (const [n,y,c] of [[q.left,150,ui.palette.r],[q.right,169,ui.palette.m]]) {
-            for (let i=0;i<n;i++) art += pixel("dot",Math.round(180+(i-(n-1)/2)*21),y,3,c);
+          for (const [n,y,name] of [[q.left,148,"apple"],[q.right,166,"fish"]]) {
+            for (let i=0;i<n;i++) art += sticker(name,Math.round(180+(i-(n-1)/2)*21),y,18);
           }
           svg = addArt(svg,art);
         }
@@ -73,7 +76,7 @@ app = (() => {
   case "reader": {
     assert((label(d.text, 60000) || count(d.pages,1,512)) && (d.fontSize === undefined || integer(d.fontSize,14,18)), "reader needs text or pages; fontSize is 14–18");
     const book = ui.pagedText({...d,title,theme});
-    return {...book, render(s) { return addArt(book.render(s),pixel("book",180,46,2,ui.palette.l)); }};
+    return {...book, render(s) { return addArt(book.render(s),sticker("book",180,38,30)); }};
   }
   case "quiz": {
     const qs = d.questions || [{prompt:"Which one can fly?",choices:["Fish","Bird","Dog"],answer:1}];
@@ -83,17 +86,17 @@ app = (() => {
   }
   case "picture-math": {
     const ps = d.problems || [{left:2,right:3},{left:4,right:1},{left:3,right:4}];
-    assert(count(ps,1,32) && ps.every(p => integer(p.left,0,8) && integer(p.right,0,8)), "picture-math needs 1–32 problems with 0–8 dots per row");
+    assert(count(ps,1,32) && ps.every(p => integer(p.left,0,8) && integer(p.right,0,8)), "picture-math needs 1–32 problems with 0–8 pictures per row");
     return questions(ps.map((p,i) => {
       const n = p.left+p.right, answer = i%3, choices = [n+1,n+2];
       choices.splice(answer,0,n);
-      return {...p,prompt:"How many dots in all?",answer,choices};
+      return {...p,prompt:"How many in all?",answer,choices};
     }),true);
   }
   case "spot-the-difference": {
     const tiles = d.tiles || [
-      {left:"star",right:"star"},{left:"square",right:"square"},{left:"circle",right:"diamond"},
-      {left:"heart",right:"heart"},{left:"triangle",right:"triangle"},{left:"diamond",right:"diamond"},
+      {left:"owl",right:"owl"},{left:"gift",right:"gift"},{left:"sun",right:"moon"},
+      {left:"heart",right:"heart"},{left:"rocket",right:"rocket"},{left:"fox",right:"fox"},
     ];
     assert(count(tiles,4,6) && tiles.some(t => t.left !== t.right), "spot-the-difference needs 4–6 tile pairs and at least one difference");
     const foundAll = s => tiles.every((t,i) => t.left === t.right || s.found.includes(i));
@@ -105,7 +108,7 @@ app = (() => {
           const x = 77+(i%2)*112, y = 117+Math.floor(i/2)*49;
           const c = s.found.includes(i) ? "#D1FAE5" : "#EDE6F3";
           art += hit("pair-"+i,x,y,94,32,rect(x,y,94,32,8,c,border)+
-            pixel(t.left,x+25,y+17,3,iconColors[t.left])+pixel(t.right,x+71,y+17,3,iconColors[t.right]));
+            tileArt(t.left,x+25,y+16)+tileArt(t.right,x+68,y+16));
         });
         if (foundAll(s)) art += button("again",137,265,86,22,"Again");
         return screen(art);
@@ -131,12 +134,12 @@ app = (() => {
     return {
       init: () => ({lines:[],color:0,last:null}),
       render(s) {
-        let art = pixel("pencil",86,73,2,ui.palette.y)+rect(62,94,236,140,10,bg);
+        let art = sticker("wand",86,73,30)+rect(62,94,236,140,10,bg);
         art += hit("canvas",68,100,224,130,rect(68,100,224,130,8,paper)+s.lines.map(([a,b,x,y,i]) =>
           a === x && b === y ? dot(x,y,3,c[i]) : `<line x1="${a}" y1="${b}" x2="${x}" y2="${y}" stroke="${c[i]}" stroke-width="6" stroke-linecap="round"/>`).join(""));
         c.forEach((v,i) => {
           const x = 70+i*42;
-          art += hit("ink-"+i,x,247,25,26,rect(x,247,26,26,6,s.color === i ? ink : bg)+pixel("dot",x+13,260,5,v));
+          art += hit("ink-"+i,x,247,25,26,rect(x,247,26,26,6,s.color === i ? ink : bg)+dot(x+13,260,8,v));
         });
         return screen(art+button("clear",239,247,49,32,"Clear"));
       },
@@ -151,15 +154,15 @@ app = (() => {
     };
   }
   case "pet": {
-    const name = d.name || "Bean", c = d.pet_color || ui.palette.l;
+    const name = d.name || "Bean", c = d.pet_color || ui.palette.r;
     assert(label(name,24) && color(c), "pet needs a short name and a #RRGGBB pet_color");
     const actions = ["Feed","Play","Nap"];
     const initial = {full:2,joy:2,energy:2,note:`Hello, I'm ${name}!`};
     return {
       init: () => ({...initial,...storeGet("pet")}),
       render(s) {
-        let art = txt(180,101,s.note,14)+pixel("bean",180,150,3,c)
-          +pixel("spark",127,147,2,ui.palette.a)+pixel("spark",235,133,2,ui.palette.l);
+        let art = txt(180,101,s.note,14)+sticker("bunny",180,151,98,{fur:c})
+          +sticker("spark",115,148,24)+sticker("heart",244,130,23,"lavender");
         ["Full","Joy","Energy"].forEach((k,i) => {
           const x = 101+i*79;
           art += txt(x,202,k,13);
@@ -185,7 +188,7 @@ app = (() => {
       init: () => ({left:seconds,end:0}),
       render(s) {
         const m = Math.floor(s.left/60), t = String(s.left%60).padStart(2,"0");
-        return screen(pixel("timer",180,106,3,ui.palette.a)+txt(180,170,`${m}:${t}`,54)+txt(180,205,s.end ? "Counting down" : s.left ? "Ready?" : "Time is up!")+
+        return screen(sticker("sun",180,109,43)+txt(180,170,`${m}:${t}`,54)+txt(180,205,s.end ? "Counting down" : s.left ? "Ready?" : "Time is up!")+
           button(s.end ? "reset" : "start",117,228,126,44,s.end ? "Reset" : "Start",ui.palette.p));
       },
       onTap(s,_,id) {
@@ -218,9 +221,9 @@ app = (() => {
         s.deck.forEach((v,i) => {
           const shown = s.open.includes(i) || s.found.includes(i);
           const x = 72+i%3*77, y = 112+Math.floor(i/3)*50;
-          const glyph = ["moon","star","sun","cloud"][cards.indexOf(v)] || "star";
-          art += hit("card-"+i,x,y,59,32,rect(x,y,59,32,8,shown ? paper : ui.palette.d,border)+
-            (shown ? pixel(glyph,x+8,y+16,1,iconColors[glyph])+txt(x+34,y+21,v,10) : pixel("spark",x+30,y+17,3,ui.palette.p)));
+          const glyph = templateStickerNames.includes(v.toLowerCase()) ? v.toLowerCase() : ["moon","star","sun","cloud"][cards.indexOf(v)];
+          art += hit("card-"+i,x,y,59,32,rect(x,y,59,32,8,shown ? paper : "#EDE6F3",border)+
+            (shown ? sticker(glyph,x+12,y+16,19)+txt(x+38,y+21,Array.from(v).slice(0,7).join(""),9) : sticker("spark",x+30,y+16,24,"lavender")));
         });
         if (won) art += button("again",133,262,94,25,"Again",ui.palette.p);
         return screen(art);
@@ -241,8 +244,8 @@ app = (() => {
     return {
       init: () => ({bursts:[]}),
       render(s) {
-        const art = pixel("spark",109,123,2,ui.palette.l)+pixel("spark",249,170,2,ui.palette.a)
-          +pixel("spark",137,198,2,ui.palette.s)+s.bursts.map(([x,y,i]) => pixel("burst",x,y,5,c[i])).join("");
+        const art = sticker("spark",109,123,24,"lavender")+sticker("moon",246,136,44)
+          +sticker("spark",137,198,18,"sky")+s.bursts.map(([x,y,i]) => sticker("star",x,y,48,{fur:c[i],outline:"#A695C6"})).join("");
         return screen(txt(180,273,"Tap for fireworks",14)+hit("sky",68,95,224,145,rect(68,95,224,145,cardRadius,templatePalettes.night[0])+art));
       },
       onTap(s,_,id,x,y) {

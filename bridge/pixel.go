@@ -11,10 +11,10 @@ import (
 )
 
 var larkPalette = map[string]string{
-	".": "transparent", "k": "#1A1722", "w": "#FAF6F0", "p": "#F5B895",
-	"m": "#5EEAD4", "l": "#C4B5FD", "s": "#7DD3FC", "y": "#FDE047",
-	"r": "#FB7185", "g": "#4ADE80", "a": "#F59E0B", "b": "#9A5B25",
-	"n": "#64748B", "d": "#2B2438", "c": "#FBCFE8", "o": "#FB923C",
+	".": "transparent", "k": "#4C3036", "w": "#FFF8ED", "p": "#F5AD7E",
+	"m": "#94D4BA", "l": "#BFA8E5", "s": "#9CBFE8", "y": "#FFE49B",
+	"r": "#DF92AE", "g": "#ACC280", "a": "#EAC071", "b": "#7C583D",
+	"n": "#86798D", "d": "#43354E", "c": "#FFD0D6", "o": "#CD806F",
 }
 
 const maxSpriteSide = 64
@@ -442,25 +442,6 @@ func autoSpritePose(rows []string, pose string, p map[string]string, mirror bool
 		edit(w/2, h*3/4, 'l')
 	}
 	return rows
-}
-
-var larkLogoSprite = []string{
-	"................",
-	"......kk.....a..",
-	".....kpk......a.",
-	"....kppkkk.....a",
-	"...kppwwkwk..a.a",
-	"...kppwwwwkk..a.",
-	"...kppwwwwkak.a.",
-	"..kppwwwckkk....",
-	"..kpbpwwwwk.....",
-	".kppbbpwwk......",
-	"kpppbppwk.......",
-	"kbbpppkk........",
-	".kkkkkk.........",
-	".....k.k........",
-	"...bbbbbbbb.....",
-	"................",
 }
 
 var defaultStarterCatSprite = companionSprite{

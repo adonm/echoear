@@ -91,8 +91,11 @@ func (s *sceneView) control(b bounds, t tile) {
 	} else if icon == "plus" || icon == "minus" {
 		is, ix, iy = 30, x+w/2-15, y+h/2-15
 	} else if icon != "" {
-		size = 18
-		ix, tx = x+w/2-(runeLen(text)*size/2+26)/2, tx+12
+		const gap = 7
+		size = fitLabel(text, 18, w-is-gap-10)
+		width := labelWidth(text, size)
+		ix = x + (w-is-gap-width)/2
+		tx = ix + is + gap + width/2
 	}
 	border := fg
 	if (bg == menuCard || bg == menuSecondary) && fg == menuInk {
@@ -439,9 +442,7 @@ func (h *wsHub) statsScene(d *wsDevice) sceneView {
 }
 
 var starterCatArt = func() string {
-	sprite := defaultStarterCatSprite
-	sprite.bg = "#F3F4F6"
-	art, err := compileCompanionSprite(sprite)
+	art, _, err := compileCompanion(object{"species": "cat", "palette": "peach", "eyes": "sparkle", "markings": "tabby"})
 	if err != nil {
 		panic(err)
 	}
@@ -449,16 +450,11 @@ var starterCatArt = func() string {
 }()
 
 func defaultFaceSVG(faceBG, markColor, accentColor string, _ bool) string {
-	if faceBG == "#F3F4F6" && markColor == "#CBD5E1" && accentColor == "#60A5FA" {
+	p := storybookPalettes["peach"]
+	if faceBG == p.bg && markColor == p.furShadow && accentColor == p.blush {
 		return starterCatArt
 	}
-	if markColor == "#CBD5E1" {
-		markColor = larkPalette["o"]
-	}
-	if accentColor == "#60A5FA" {
-		accentColor = larkPalette["c"]
-	}
-	return strings.NewReplacer("#F3F4F6", faceBG, larkPalette["o"], markColor, larkPalette["c"], accentColor).Replace(starterCatArt)
+	return strings.NewReplacer(p.bg, faceBG, p.furShadow, markColor, p.blush, accentColor).Replace(starterCatArt)
 }
 
 func defaultFaceArtwork(faceBG, markColor, accentColor string, configured, tagged bool) string {

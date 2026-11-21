@@ -43,8 +43,8 @@ func TestAppTemplatesHitCoordinates(t *testing.T) {
 				}
 				check := func(view svgScreen) {
 					t.Helper()
-					if !strings.Contains(view.source, `shape-rendering="crispEdges"`) {
-						t.Fatal("missing pixel art")
+					if !strings.Contains(view.source, `data-sticker="`) {
+						t.Fatal("missing Storybook art")
 					}
 					if warnings := appLayoutWarnings([]svgScreen{view}, geometry.shape == "round"); len(warnings) != 0 {
 						t.Fatal(warnings)
@@ -88,10 +88,10 @@ func TestAppTemplatesHitCoordinates(t *testing.T) {
 					click("tap", "ink-1", 124, 260)
 					click("drag", "canvas", 150, 130)
 				}
-				sprites := strings.Count(view.raw, `shape-rendering="crispEdges"`)
+				bursts := strings.Count(view.raw, `data-sticker="star"`)
 				click(tc.action, tc.id, tc.x, tc.y)
-				if tc.template == "fireworks" && strings.Count(view.raw, `shape-rendering="crispEdges"`) != sprites+1 {
-					t.Fatal("tap did not add a pixel burst")
+				if tc.template == "fireworks" && strings.Count(view.raw, `data-sticker="star"`) != bursts+1 {
+					t.Fatal("tap did not add a Storybook burst")
 				}
 				if tc.expected != "" && !strings.Contains(view.raw, tc.expected) {
 					t.Fatalf("after input expected %q in %s", tc.expected, view.raw)

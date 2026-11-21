@@ -315,7 +315,7 @@ func TestScopedTunnelIsolationAndOwnedLifecycle(t *testing.T) {
 	testRequest(t, "POST", base+"/api/reset", "unit", object{"device_id": id}, 200)
 	faceSeen, catSeen := false, false
 	conn.until(t, func(f wsFrame) bool {
-		faceSeen = faceSeen || hasWS("svg", "#F3F4F6")(f)
+		faceSeen = faceSeen || hasWS("svg", "#FFF2E7")(f)
 		catSeen = catSeen || hasWS("cat", `"configured":false`)(f)
 		return faceSeen && catSeen
 	})

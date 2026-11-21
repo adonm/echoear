@@ -185,8 +185,8 @@ func TestCatToolAndLiveFace(t *testing.T) {
 		return toolTest(t, base, "patch", object{"device_id": id, "cat": args}, fail)
 	}
 	blank := call(false, "get", object{})["cat"].(object)
-	if blank["name"] != "New Cat" || blank["face_bg"] != "#F3F4F6" || blank["mark_color"] != "#CBD5E1" ||
-		blank["accent_color"] != "#60A5FA" || blank["voice"] != heartVoice || blank["face_svg"] != blankCat().FaceSVG {
+	if blank["name"] != "New Cat" || blank["face_bg"] != "#FFF2E7" || blank["mark_color"] != "#CD806F" ||
+		blank["accent_color"] != "#ED8F87" || blank["voice"] != heartVoice || blank["face_svg"] != blankCat().FaceSVG {
 		t.Fatal("invalid blank starter", blank)
 	}
 	if got := turnPrompt(peer{DeviceID: id}, true, "voice", "Hi", blankCat()); got != "[New Cat ("+id+") · web · voice · setup]\nHi" {
@@ -432,7 +432,7 @@ func TestFaceSVGPaletteChanges(t *testing.T) {
 		!strings.Contains(designed.FaceSVG, "#123456") || strings.Contains(designed.FaceSVG, blank.FaceBG) {
 		t.Fatal("palette did not regenerate the blank/default face", err)
 	}
-	face := `<svg><rect width="360" height="360" fill="#123456"/><circle r="25" fill="#CBD5E1"/>
+	face := `<svg><rect width="360" height="360" fill="#123456"/><circle r="25" fill="` + blank.MarkColor + `"/>
 		<g data-pose="idle"><circle cx="95" cy="110" r="15" fill="#AA00FF"/></g></svg>`
 	custom, _, err := updateCat(designed, object{"face_svg": face}, deviceVoices{})
 	if err != nil {
@@ -550,7 +550,7 @@ func TestCatReassign(t *testing.T) {
 			expectValue(t, canceled, toID)
 			wantName, wantBG, wantVoice, wantSID := "Target", "#7BE3C6", "bm_george", toSID
 			if mode == "move" {
-				wantName, wantBG, wantVoice, wantSID = "New Cat", "#F3F4F6", heartVoice, ""
+				wantName, wantBG, wantVoice, wantSID = "New Cat", "#FFF2E7", heartVoice, ""
 			} else {
 				expectValue(t, titles, toSID+":EchoEar: Target ("+fromID+")")
 			}

@@ -231,6 +231,27 @@ func installAppUI(vm *goja.Runtime, tapChime func()) {
 		}
 		return vm.ToValue(screenHit(bounds{opts.X, opts.Y, width, len(rows) * opts.Scale}, opts.ID, opts.ID, art))
 	})
+	_ = ui.Set("sticker", func(c goja.FunctionCall) goja.Value {
+		name, err := readUIValue[string](decode(c.Argument(0), "sticker name"), stickerNameSchema, "sticker.name")
+		if err != nil {
+			panic(vm.NewTypeError("%s", err))
+		}
+		opts := stickerOptions{}
+		if arg := c.Argument(1); !goja.IsUndefined(arg) {
+			opts, err = readUIValue[stickerOptions](decode(arg, "sticker options"), uiStickerOpts, "sticker options")
+			if err != nil {
+				panic(vm.NewTypeError("%s", err))
+			}
+		}
+		if opts.Size == 0 {
+			opts.Size = 64
+		}
+		art, err := compileSticker(name, opts)
+		if err != nil {
+			panic(vm.NewTypeError("%s", err))
+		}
+		return vm.ToValue(art)
+	})
 	_ = ui.Set("screen", func(c goja.FunctionCall) goja.Value {
 		spec, err := readUIValue[declarativeScreen](decode(c.Argument(0), "screen"), declarativeScreenSchema, "screen")
 		if err != nil {

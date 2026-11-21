@@ -123,7 +123,7 @@ func TestJSDeclarativeScreen(t *testing.T) {
 	code := `function render() {
 		if (!Object.isFrozen(ui.palette) || Object.keys(ui.palette).length !== 16) throw Error("palette");
 		ui.palette.p = "lime";
-		if (ui.palette.p !== "#F5B895") throw Error("changed palette");
+		if (ui.palette.p !== "#F5AD7E") throw Error("changed palette");
 		const sprite = ui.sprite(["XX",".X"], {x:3,y:6,scale:3,palette:{X:"#010203"}});
 		if (!sprite.includes('width="6"') || !sprite.includes('fill="#010203"')) throw Error("sprite");
 		const mirror = ui.sprite(["k.","pk"], {scale:3,mirror:true,id:"test"});

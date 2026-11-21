@@ -73,9 +73,9 @@ func (s *e2eSuite) apps(t *testing.T) {
 						if tc.name == "fireworks" {
 							// Its pop is an audio effect, not a firmware chime.
 							c.ack(t, c.op(t, "tts", "state", `"end"`))
-							sprites := strings.Count(c.svg, `shape-rendering="crispEdges"`)
-							c.sceneWhere(t, "new pixel burst", func(f wsFrame) bool {
-								return strings.Count(string(f.data), `shape-rendering=\"crispEdges\"`) > sprites
+							bursts := strings.Count(c.svg, `data-sticker="star"`)
+							c.sceneWhere(t, "new Storybook burst", func(f wsFrame) bool {
+								return strings.Count(string(f.data), `data-sticker=\"star\"`) > bursts
 							})
 						} else if tc.after != "" {
 							c.scene(t, tc.after)

@@ -29,8 +29,8 @@ func (s sceneView) svg(face string) string {
 }
 
 func svgRect(x, y, w, h, r int, fill, stroke string, sw int) string {
-	return fmt.Sprintf(`<rect x="%d" y="%d" width="%d" height="%d" rx="%d" fill="%s" stroke="%s" stroke-width="%d"/>`,
-		x, y, w, h, r, fill, stroke, sw)
+	return fmt.Sprintf(`<rect x="%d" y="%d" width="%d" height="%d" rx="%d" ry="%d" fill="%s" stroke="%s" stroke-width="%d"/>`,
+		x, y, w, h, r, r, fill, stroke, sw)
 }
 
 func svgCircle(x, y, r int, fill string) string {
@@ -106,7 +106,11 @@ func catChrome(cat catState, pose catPose) sceneView {
 			svgLabel(180, 262, 14, strconv.Itoa(pose.volume)+"%", menuInk)
 	}
 	if !cat.Configured && pose.mood == "idle" && !pose.meter {
-		s.art += svgLabel(180, 277, 14, "Say hi to meet me!", "#475569")
+		x := 180
+		if pose.battery >= 0 {
+			x = 153
+		}
+		s.art += svgLabel(x, 50, 14, "Say hi to meet me!", uiContrastInk(cat.FaceBG))
 	}
 	switch pose.mood {
 	case "", "idle":

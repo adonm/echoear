@@ -391,6 +391,24 @@ func TestBuildDeliveryRespectsParentPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildProposesStorybookCompanion(t *testing.T) {
+	stub := &buildStub{allow: make(chan struct{}), reply: `{"companion":{"species":"owl","palette":"mint","accessory":"scarf"}}`}
+	b, _ := stubBuildBridge(t, stub, true, nil)
+	who := peer{DeviceID: "echoear-storybook-build", Character: "Bean"}
+	job, err := b.builders.enqueue(t.Context(), who, buildIntent{kind: "face"}, "Make me a mint owl wearing a scarf")
+	if err != nil || job == "" {
+		t.Fatal(job, err)
+	}
+	expectValue(t, stub.prompted, job)
+	close(stub.allow)
+	expectValue(t, stub.deleted, job)
+	waitBuildState(t, b, job, "ready")
+	cat := b.catFor(who)
+	if !cat.Configured || cat.FaceBG != "#E8F7EE" || !strings.Contains(cat.FaceSVG, `data-part="eyes"`) {
+		t.Fatal("did not apply the proposed Storybook form")
+	}
+}
+
 func TestBuildRejectsNewerAppAndFace(t *testing.T) {
 	for _, kind := range []string{"edit", "face", "new"} {
 		t.Run(kind, func(t *testing.T) {

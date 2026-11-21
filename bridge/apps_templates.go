@@ -6,7 +6,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"strings"
 )
 
 //go:embed apps_templates.js
@@ -28,7 +27,7 @@ var templateCatalog = func() map[string]appTemplate {
 	text := object{"type": "string"}
 	num := object{"type": "integer"}
 	array := func(item object) object { return object{"type": "array", "items": item} }
-	shape := object{"type": "string", "enum": []string{"star", "circle", "diamond", "square", "triangle", "heart"}}
+	shape := object{"type": "string", "enum": append(slices.Clone(stickerNameSchema["enum"].([]string)), "circle", "diamond", "square", "triangle")}
 	return map[string]appTemplate{
 		"reader":              {"Story", object{"text": text, "pages": array(object{"anyOf": []object{text, closedObject(object{"title": text, "text": text}, "text")}}), "fontSize": num}},
 		"quiz":                {"Quiz", object{"questions": array(closedObject(object{"prompt": text, "choices": array(text), "answer": num}, "prompt", "choices", "answer"))}},
@@ -86,7 +85,7 @@ func validateTemplateValue(v any, schema object, path string) error {
 				}
 			}
 		}
-		return fieldError(path, "expected a sprite, text, meter, or grid block")
+		return fieldError(path, "expected a sticker, sprite, text, meter, or grid block")
 	}
 	if branches, ok := schema["anyOf"].([]object); ok {
 		for _, branch := range branches {
@@ -225,53 +224,6 @@ func (a *appInstance) installTemplate() (string, error) {
 	}
 	_ = a.vm.Set("templatePalettes", palettes)
 	_ = a.vm.Set("templateRadii", []int{uiButtonRadius, uiCardRadius})
-	_ = a.vm.Set("templatePixel", func(name string, x, y, scale int, tint string) string {
-		rows := templateSprites[name]
-		if rows == nil {
-			return ""
-		}
-		var overrides map[string]string
-		if tint != "" {
-			overrides = map[string]string{"p": tint}
-		}
-		art, err := compileSprite(rows, overrides, x-len(rows[0])*scale/2, y-len(rows)*scale/2, scale)
-		if err != nil {
-			panic(a.vm.NewTypeError("%s", err))
-		}
-		return art
-	})
+	_ = a.vm.Set("templateStickerNames", stickerNameSchema["enum"])
 	return appTemplatesJS, nil
 }
-
-var templateSprites = func() map[string][]string {
-	art := map[string]string{
-		"star":     "...p.... ...p.... .ppppp.. ..ppp... .ppppp.. .p...p.. ........ ........",
-		"heart":    ".pp.pp.. ppppppp. pwppppp. ppppppp. .ppppp.. ..ppp... ...p.... ........",
-		"triangle": "...p.... ...p.... ..ppp... ..ppp... .ppppp.. .ppppp.. ppppppp. ........",
-		"diamond":  "...p.... ..ppp... .ppppp.. ppppppp. .ppppp.. ..ppp... ...p.... ........",
-		"square":   "........ .pppppp. .pwwppp. .pppppp. .pppppp. .pppppp. .pppppp. ........",
-		"circle":   "..ppp... .ppppp.. pppwppp. ppppppp. ppppppp. .ppppp.. ..ppp... ........",
-		"moon":     "...pp... ..pp.... .pp..... .pp..... .pppp..p ..ppppp. ...ppp.. ........",
-		"sun":      "...p.... .p...p.. ..ppp... p.ppp.p. ..ppp... .p...p.. ...p.... ........",
-		"cloud":    "...pp... ..pppp.. .pppppp. pppppppp pwwppppp .pppppp. ........ ........",
-		"spark":    "...p.... ...w.... ...w..p. pwwwww.. ...w.... .p.w.... ...p.... ........",
-		"dot":      ".pp. pwpp pppp .pp.",
-		"book":     "........ .pp..pp. pwwppwwp pwwppwwp pwwppwwp pppppppp ...pp... ........",
-		"pencil":   "......rp .....rpp ....ppa. ...ppa.. ..ppa... .ppa.... bca..... k.......",
-		"timer":    "..pppp.. ...pp... .pppppp. .pwwwwp. .pwpwwp. .pwppwp. .pwwwwp. ..pppp..",
-		"burst":    "p...p...p .p.....p. ....w.... ...wpw... p.wpppw.p ...wpw... ....w.... .p.....p. p...p...p",
-	}
-	rows := make(map[string][]string, len(art))
-	for name, grid := range art {
-		rows[name] = strings.Fields(grid)
-	}
-	rows["bean"] = mirrorSpriteRows(strings.Fields(`
-		................ ................ ................ ......kk........ .....kppk....... .....kpck.......
-		.....kpcck...... .....kpcck...... .....kpcck...... .....kpcck...... .....kpcckkkkkkk ....kpccpppppppp
-		...kppcpppppllll ...kppppplwwwwww ..kpppplwwwwwwww ..kppplwkkkkwwww ..kpppwwkwkkkwww ..kpppwwksmkkwww
-		..kpppwwkmmkkwww ..kpppwwwkkkwwww ..kpcccwwwwwwwwr ...kpccwwwwwwwrr ...kpppwwwwwwwwk ....kpppwwwkwkkw
-		.....kkppwwwkkww ......kkppwwwwww ........kkkkkkkk ................ ....m........... ....m...........
-		..mmmmm......... ....m...........
-	`))
-	return rows
-}()

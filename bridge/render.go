@@ -244,7 +244,7 @@ func (n *svgNode) asGroup() *svgNode {
 
 var (
 	svgTags           = wordSet("svg g defs linearGradient radialGradient stop path rect circle ellipse line polygon polyline text image")
-	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering aria-label data-id data-hit data-pose data-part data-pixel-runs")
+	svgAttrs          = wordSet("d x y x1 y1 x2 y2 width height rx ry r cx cy fx fy points fill fill-opacity fill-rule stroke stroke-opacity stroke-width stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity transform gradientTransform gradientUnits spreadMethod offset stop-color stop-opacity font-size font-weight font-family text-anchor shape-rendering aria-label data-id data-hit data-pose data-part data-pixel-runs data-sticker")
 	svgNumber         = regexp.MustCompile(`[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?`)
 	svgPath           = regexp.MustCompile(`^[MmZzLlHhVvCcSsQqTtAa0-9Ee.,+\s-]*$`)
 	svgScalar         = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:%|px)?$`)
@@ -344,7 +344,7 @@ func cleanSVGAttr(k, v string) (string, bool) {
 	switch k {
 	case "id":
 		return v, svgID.MatchString(v)
-	case "data-id", "data-part":
+	case "data-id", "data-part", "data-sticker":
 		return v, svgID.MatchString(v)
 	case "aria-label":
 		return shortText(v, 128, false), v != ""
@@ -622,7 +622,7 @@ func (m *svgGlyphMetrics) glyph(r rune, previous sfnt.GlyphIndex, kern bool) (id
 	return
 }
 
-func fitLabel(text string, size, width int) int {
+func labelWidth(text string, size int) int {
 	var buf sfnt.Buffer
 	ppem := fixed.I(size)
 	var advance fixed.Int26_6
@@ -631,7 +631,11 @@ func fitLabel(text string, size, width int) int {
 		w, _ := boldSVGFont.GlyphAdvance(&buf, glyph, ppem, font.HintingNone)
 		advance += w
 	}
-	return min(size, size*width/max(1, advance.Ceil()))
+	return advance.Ceil()
+}
+
+func fitLabel(text string, size, width int) int {
+	return min(size, size*width/max(1, labelWidth(text, size)))
 }
 
 func outlineText(n *svgNode, style svgTextStyle) (svgBounds, bool) {
@@ -782,7 +786,7 @@ func prepareScene(raw string, exit bool) (preparedScene, error) {
 	}
 	background := root.background()
 	if exit && !hasExit {
-		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" ry="16" fill="#FFFAEE" stroke="#1A1926" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#1A1926">Home</text></g></svg>`)
+		pill, _ := parseSVG(`<svg><g data-id="echoear-exit" data-hit="137,304,86,32"><rect x="137" y="304" width="86" height="32" rx="16" ry="16" fill="#FFF2E7" stroke="#76463F" stroke-width="3"/><text x="180" y="326" text-anchor="middle" font-size="19" font-weight="bold" fill="#4C3036">Home</text></g></svg>`)
 		_ = walk(pill, rasterx.Identity, svgTextStyle{}, false, 4)
 		if root.attr["transform"] != "" || root.attr["opacity"] != "" {
 			// Keep the bridge's escape hatch outside the author's transform/opacity.
@@ -920,7 +924,7 @@ func directStyle(n *svgNode) bool {
 	for k, v := range n.attr {
 		switch k {
 		case "x", "y", "width", "height", "viewBox", "xmlns", "transform", "shape-rendering",
-			"aria-label", "data-id", "data-hit", "data-echoear-hit", "data-pose", "data-part":
+			"aria-label", "data-id", "data-hit", "data-echoear-hit", "data-pose", "data-part", "data-sticker":
 		case "d", "data-pixel-runs":
 			if len(n.pixelRuns) == 0 {
 				return false

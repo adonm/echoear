@@ -27,6 +27,7 @@ var declarativeScreenSchema = func() object {
 		"actions": uiArray(action, 0, 3),
 		"body": uiArray(object{"oneOf": []object{
 			closedObject(object{"type": tag("sprite"), "rows": pixelRowsSchema, "scale": uiInt(1, 128), "palette": pixelPaletteSchema, "id": uiIDSchema, "mirror": flags}, "type", "rows"),
+			closedObject(object{"type": tag("sticker"), "name": stickerNameSchema, "size": uiInt(12, 240), "palette": storybookPaletteSchema, "id": uiIDSchema}, "type", "name"),
 			closedObject(object{"type": tag("text"), "text": uiString(512), "size": uiInt(10, 40), "bold": flags, "muted": flags}, "type", "text"),
 			closedObject(object{"type": tag("meter"), "label": uiString(80), "value": object{"type": "number"},
 				"max": object{"type": "number"}, "color": uiColorSchema}, "type", "label", "value", "max"),
@@ -49,13 +50,13 @@ type declarativeScreen struct {
 }
 
 type screenBlock struct {
-	Type, ID, Text, Label, Color string
-	Size, Scale, Cols            int
-	Bold, Muted, Mirror          bool
-	Value, Max                   float64
-	Rows                         []string
-	Palette                      map[string]string
-	Items                        []screenTile
+	Type, ID, Text, Label, Color, Name string
+	Size, Scale, Cols                  int
+	Bold, Muted, Mirror                bool
+	Value, Max                         float64
+	Rows                               []string
+	Palette                            any
+	Items                              []screenTile
 }
 
 type screenAction struct{ ID, Label, Variant string }
@@ -201,12 +202,32 @@ func (s declarativeScreen) svg() (string, error) {
 				}
 				w, h := cols*scale, len(b.Rows)*scale
 				x := 180 - w/2
-				art, err := compileSprite(b.Rows, b.Palette, x, 0, scale, b.Mirror)
+				var overrides map[string]string
+				if raw, ok := b.Palette.(object); ok {
+					overrides = make(map[string]string, len(raw))
+					for key, value := range raw {
+						overrides[key] = str(value)
+					}
+				}
+				art, err := compileSprite(b.Rows, overrides, x, 0, scale, b.Mirror)
 				if err != nil {
 					return "", err
 				}
 				add(h, func(y int) string {
 					return screenHit(bounds{x, y, w, h}, b.ID, b.ID, fmt.Sprintf(`<g transform="translate(0 %d)">%s</g>`, y, art))
+				})
+			case "sticker":
+				size := b.Size
+				if size == 0 {
+					size = 84
+				}
+				size = min(bottom-top, max(12, size*density/100))
+				art, err := compileSticker(b.Name, stickerOptions{X: 180 - size/2, Size: size, Palette: b.Palette, ID: b.ID})
+				if err != nil {
+					return "", err
+				}
+				add(size, func(y int) string {
+					return fmt.Sprintf(`<g transform="translate(0 %d)">%s</g>`, y, art)
 				})
 			case "text":
 				size := b.Size
