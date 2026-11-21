@@ -100,7 +100,7 @@ func writeCat(ctx context.Context, tx *sql.Tx, id string, c catState) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO cats (device_id,`+activeCatColumns+`,updated_at) VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(device_id) DO UPDATE SET name=excluded.name,configured=excluded.configured,face_bg=excluded.face_bg,
 		mark_color=excluded.mark_color,accent_color=excluded.accent_color,personality=excluded.personality,
-		face_svg=excluded.face_svg,updated_at=excluded.updated_at`,
+		face_svg=excluded.face_svg,updated_at=max(cats.updated_at+1,excluded.updated_at)`,
 		id, c.Name, c.Configured, c.FaceBG, c.MarkColor, c.AccentColor, c.Personality, c.FaceSVG, time.Now().UnixMilli())
 	return err
 }
