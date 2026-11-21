@@ -192,6 +192,9 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		key = ev.ID
 	}
 	a := d.scene.actions[key]
+	if native && !d.acceptPointerRevision(a.kind, ev.RevLo) {
+		return
+	}
 	if d.callState != callNone {
 		if d.scene.call != d.callID {
 			return
@@ -293,6 +296,19 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 		}
 	case "call-peer":
 		h.startCall(d, a.value)
+	}
+}
+
+func (d *wsDevice) acceptPointerRevision(action string, rev *uint16) bool {
+	switch action {
+	case "stop", "rec-cancel", "rec-send", "listen", "reply", "call-peer",
+		"call-answer", "call-decline", "call-hangup", "call-mute":
+		if rev == nil {
+			return !d.caps.PointerRev
+		}
+		return *rev == d.nativeRev
+	default:
+		return true
 	}
 }
 

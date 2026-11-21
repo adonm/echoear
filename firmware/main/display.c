@@ -35,6 +35,7 @@ static bool first_frame;
 static frame_bounds_t dirty_bounds;
 static atomic_int brightness = BRIGHT;
 static atomic_uint last_touch;
+static atomic_uint shown_rev;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -83,11 +84,16 @@ static void paint_task(void *arg)
             atomic_store(&brightness, DIM);
         }
         frame_bounds_t area = dirty_bounds;
+        unsigned rev = atomic_load_explicit(&telemetry_io.last_frame_rev, memory_order_relaxed);
         dirty_bounds = (frame_bounds_t){ 0 };
         xSemaphoreGive(fb_lock);
         int level = atomic_load(&brightness);
         if (level != applied && bsp_display_brightness_set(level) == ESP_OK) applied = level;
-        if (area.x0 < area.x1) blit(area);
+        if (area.x0 < area.x1 && blit(area) == ESP_OK) {
+            xSemaphoreTake(fb_lock, portMAX_DELAY);
+            if (linked && dirty_bounds.x0 == dirty_bounds.x1) atomic_store(&shown_rev, rev);
+            xSemaphoreGive(fb_lock);
+        }
     }
 }
 
@@ -96,6 +102,7 @@ void display_set_link(bool connected)
     xSemaphoreTake(fb_lock, portMAX_DELAY);
     linked = connected;
     first_frame = connected;
+    atomic_store(&shown_rev, 0);
     if (!connected) {
         display_show_offline();
         dirty_bounds = (frame_bounds_t){ 0, 0, FRAME_WIDTH, FRAME_HEIGHT };
@@ -142,6 +149,7 @@ bool display_is_sleeping(void)
 static void touch_task(void *arg)
 {
     touch_gesture_t gesture = { 0 };
+    uint16_t press_rev = 0;
     TickType_t tick = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&tick, pdMS_TO_TICKS(30));
@@ -152,10 +160,10 @@ static void touch_task(void *arg)
         bool pressed = count && p.x < FRAME_WIDTH && p.y < FRAME_HEIGHT;
         touch_event_t event = touch_gesture_update(&gesture, pressed, p.x, p.y, now_ms());
         switch (event.kind) {
-        case TOUCH_PRESS: display_wake(); break;
-        case TOUCH_TAP: ws_client_pointer("tap", event.x, event.y); break;
-        case TOUCH_DRAG: ws_client_pointer("drag", event.x, event.y); break;
-        case TOUCH_UP: ws_client_pointer("up", event.x, event.y); break;
+        case TOUCH_PRESS: press_rev = atomic_load(&shown_rev); display_wake(); break;
+        case TOUCH_TAP: ws_client_pointer("tap", event.x, event.y, press_rev); break;
+        case TOUCH_DRAG: ws_client_pointer("drag", event.x, event.y, atomic_load(&shown_rev)); break;
+        case TOUCH_UP: ws_client_pointer("up", event.x, event.y, atomic_load(&shown_rev)); break;
         case TOUCH_NONE: break;
         }
     }

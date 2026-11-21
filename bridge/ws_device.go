@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"image"
 	"log"
 	"maps"
 	"math"
@@ -19,6 +20,7 @@ const idleSleep = 120 * time.Second
 var phoneID = regexp.MustCompile(`^phone-[0-9a-f]{4}$`)
 
 type wsCaps struct {
+	PointerRev     *bool `json:"pointer_rev,omitempty"`
 	BridgeEndpoint *bool `json:"bridge_endpoint,omitempty"`
 	Battery        *bool `json:"battery,omitempty"`
 	HeadPads       *bool `json:"head_pads,omitempty"`
@@ -28,6 +30,7 @@ type wsCaps struct {
 }
 
 type deviceCaps struct {
+	PointerRev     bool `json:"pointer_rev,omitempty"`
 	BridgeEndpoint bool `json:"bridge_endpoint,omitempty"`
 	Battery        bool `json:"battery"`
 	HeadPads       bool `json:"head_pads"`
@@ -45,6 +48,7 @@ func helloCaps(ev wsEvent, board string) deviceCaps {
 	}
 	vocat := ev.Role == "device" && board == "esp-vocat"
 	return deviceCaps{
+		PointerRev:     value(ev.Caps.PointerRev, false),
 		BridgeEndpoint: value(ev.Caps.BridgeEndpoint, false),
 		Battery:        value(ev.Caps.Battery, value(ev.HasBattery, vocat)),
 		HeadPads:       value(ev.Caps.HeadPads, vocat),
@@ -105,22 +109,23 @@ type wsDevice struct {
 	appView    svgScreen
 	appGen     uint64
 
-	scene    sceneView
-	view     *sceneView
-	pending  *sceneView
-	card     *sceneView
-	drawer   string
-	menuPage int
-	homePage int
-	menuData *menuContent
-	statsAt  time.Time
-	rev      uint64
-	pose     catPose
-	moodAt   time.Time
-	last     time.Time
-	meter    time.Time
-	pet      time.Time
-	asleep   bool
+	scene     sceneView
+	view      *sceneView
+	pending   *sceneView
+	card      *sceneView
+	drawer    string
+	menuPage  int
+	homePage  int
+	menuData  *menuContent
+	statsAt   time.Time
+	rev       uint64
+	nativeRev uint16
+	pose      catPose
+	moodAt    time.Time
+	last      time.Time
+	meter     time.Time
+	pet       time.Time
+	asleep    bool
 
 	callState                   callState
 	callID                      uint32
@@ -742,6 +747,7 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 	for d.renderNext != nil && h.active(d) {
 		r, gen, prev, rev := *d.renderNext, d.renderGen, d.svg, d.rev+1
 		web := d.client.role == "web"
+		oldScene, pointerRev := d.scene, d.caps.PointerRev
 		var geometry screenGeometry
 		if d.client.role == "device" {
 			geometry = d.screen
@@ -766,10 +772,16 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 		}
 		var svgWire, native wsFrame
 		var rawBytes int
-		if err == nil && (r.full && r.app == nil || screen.source != prev.source) {
+		interactionChanged := pointerRev && !web &&
+			(r.view.call != oldScene.call || !maps.Equal(r.view.actions, oldScene.actions) || !slices.Equal(screen.hits, prev.hits))
+		if err == nil && (r.full && r.app == nil || screen.source != prev.source || interactionChanged) {
 			start := time.Now()
 			if screen.fb != nil {
 				rect := dirtyRect(prev.fb, screen.fb, geometry)
+				if rect.Empty() && interactionChanged {
+					// Identical pixels can still map to different call peers or targets.
+					rect = image.Rect(0, 0, 1, 1)
+				}
 				if !rect.Empty() {
 					native = displayFrame(screen.fb, rect, rev, geometry.width)
 					rawBytes = 12 + rect.Dx()*rect.Dy()*2
@@ -798,6 +810,7 @@ func (h *wsHub) renderFrames(d *wsDevice) {
 			h.trackFrame(d, screen.render, len(svgWire.data), len(screen.source), "svg")
 		} else if native.data != nil {
 			d.client.enqueue(native)
+			d.nativeRev = uint16(rev)
 			r.trace.measure(diagRender, screen.render)
 			codec := "RGB565"
 			if native.data[9] == 1 {

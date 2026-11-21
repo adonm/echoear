@@ -38,6 +38,7 @@ typedef struct {
     uint32_t session;
     uint32_t audio_id;
     bool aborted;
+    uint16_t rev_lo;
     int x, y;
     char target[MEDIA_TARGET_CAP];
 } input_t;
@@ -164,7 +165,7 @@ static void enqueue(input_t input)
     enqueue_session(input);
 }
 
-void ws_client_pointer(const char *event, int x, int y)
+void ws_client_pointer(const char *event, int x, int y, uint16_t rev_lo)
 {
     uint32_t session = ready_socket_session();
     if (!session) return;
@@ -173,7 +174,7 @@ void ws_client_pointer(const char *event, int x, int y)
     else if (!strcmp(event, "drag")) kind = INPUT_DRAG;
     else if (!strcmp(event, "up")) kind = INPUT_UP;
     else return;
-    enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y });
+    enqueue_session((input_t){ .kind = kind, .session = session, .x = x, .y = y, .rev_lo = rev_lo });
 }
 
 bool ws_client_rec_start(uint32_t session, const char *target)
@@ -250,7 +251,8 @@ static void send_input(const input_t *input)
     }
     const char *event = input->kind == INPUT_DRAG ? "drag" : input->kind == INPUT_UP ? "up" : "tap";
     cJSON *json = event_json(event);
-    bool ok = cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y);
+    bool ok = cJSON_AddNumberToObject(json, "x", input->x) && cJSON_AddNumberToObject(json, "y", input->y) &&
+              cJSON_AddNumberToObject(json, "rev_lo", input->rev_lo);
     if (ok) send_json(session, json);
     else cJSON_Delete(json);
 }
@@ -298,7 +300,7 @@ static bool send_telemetry(uint32_t session, bool hello)
                            "\"ip\":\"%s\",\"firmware\":\"%s\",\"proto\":2,\"width\":%d,\"height\":%d,"
                            "\"shape\":\"" BOARD_SHAPE "\",\"board\":\"" BOARD_NAME "\","
                             "\"caps\":{\"battery\":%s,\"head_pads\":%s,\"call\":%s,\"call_pcm\":%s,\"drag\":%s,"
-                            "\"bridge_endpoint\":%s}",
+                            "\"pointer_rev\":true,\"bridge_endpoint\":%s}",
                            device_id, wifi_character(), ip, esp_app_get_description()->version, FRAME_WIDTH, FRAME_HEIGHT,
                            BOARD_HAS_BATTERY ? "true" : "false", BOARD_HAS_HEAD_PADS ? "true" : "false",
                              call, call, BOARD_HAS_DRAG ? "true" : "false", media_audio_ready() ? "true" : "false");
