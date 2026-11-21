@@ -33,29 +33,57 @@ func testEndpointSettings() *endpointSettings {
 }
 
 func TestEndpointWaitsForContinuation(t *testing.T) {
-	for _, text := range []string{"", "Once upon a time there was a frog, and then.", "Could you set a timer for?", "Can you draw a dragon?"} {
+	for _, text := range []string{"", "Once upon a time there was a frog, and then.", "Could you set a timer for?",
+		"Draw a purple frog, um.", "Try doing it with the...", "This is something I want to", "First I want a castle."} {
 		var p endpointPolicy
-		if got := p.step(time.Second, true, text); got != endpointWait {
+		p.observe(time.Second, true)
+		if got := p.decision(time.Second, tunedEndpoint.silence(p, text)); got != endpointWait {
 			t.Fatal(got)
 		}
-		if got := p.step(5*time.Second, false, text); got != endpointWait {
+		p.observe(5*time.Second, false)
+		if got := p.decision(5*time.Second, tunedEndpoint.silence(p, text)); got != endpointWait {
 			t.Fatalf("%q prematurely committed at 4-second pause", text)
 		}
-		p.step(5200*time.Millisecond, true, text) // Voice resumes.
-		if got := p.step(6*time.Second, false, text); got != endpointWait {
+		p.observe(5200*time.Millisecond, true)
+		p.observe(6*time.Second, false)
+		if got := p.decision(6*time.Second, tunedEndpoint.silence(p, text)); got != endpointWait {
 			t.Fatalf("%q kept the old speech deadline", text)
 		}
-		if got := p.step(9600*time.Millisecond, false, text); got != endpointCommit {
+		if got := p.decision(9600*time.Millisecond, tunedEndpoint.silence(p, text)); got != endpointCommit {
 			t.Fatalf("%q did not commit after the new end", text)
 		}
 	}
-	var quick, empty endpointPolicy
-	quick.step(time.Second, true, "Start a timer for ninety seconds")
-	if got := quick.step(1600*time.Millisecond, false, "Start a timer for ninety seconds"); got != endpointCommit {
-		t.Fatalf("complete timer did not skip the long wait: %v", got)
+	var p, empty endpointPolicy
+	p.observe(time.Second, true)
+	p.observe(2*time.Second, false)
+	for _, tc := range []struct {
+		text string
+		wait time.Duration
+	}{
+		{"Start a timer for ninety seconds.", tunedEndpoint.quick},
+		{"Where do the ducks go?", tunedEndpoint.quick},
+		{"What's eight?", tunedEndpoint.quick},
+		{"How are you?", tunedEndpoint.quick},
+		{"Can you draw a dragon?", tunedEndpoint.complete},
+		{"Tell me a knock knock joke!", tunedEndpoint.complete},
+		{"Start a timer for 90 seconds", tunedEndpoint.uncertain},
+		{"I found a crystal.", tunedEndpoint.patient},
+		{"When I was nine?", tunedEndpoint.patient},
+	} {
+		if got := tunedEndpoint.silence(p, tc.text); got != tc.wait {
+			t.Errorf("%q scored %v, want %v", tc.text, got, tc.wait)
+		}
 	}
-	if got := empty.step(endpointIdle, false, ""); got != endpointDiscard {
+	p.last = p.first + tunedEndpoint.storySpan
+	if got := tunedEndpoint.silence(p, "Where do the ducks go?"); got != tunedEndpoint.patient {
+		t.Fatalf("long story scored %v, want patient", got)
+	}
+	if got := empty.decision(endpointIdle, tunedEndpoint.patient); got != endpointDiscard {
 		t.Fatalf("initial silence did not discard: %v", got)
+	}
+	p.inVoice = true
+	if got := p.decision(endpointLimit, tunedEndpoint.patient); got != endpointCommit {
+		t.Fatalf("maximum duration did not commit: %v", got)
 	}
 }
 
@@ -64,14 +92,15 @@ func TestEndpointAccumulatorPreservesOriginalPCM(t *testing.T) {
 	vad := &testEndpointVAD{}
 	frame := bytes.Repeat([]byte{46, 0}, endpointBytes/2)
 	quiet := make([]byte, endpointBytes)
-	u.add(frame[:50], vad, "")
-	u.add(frame[50:], vad, "")
+	u.add(frame[:50], vad)
+	u.add(frame[50:], vad)
 	for range 200 {
-		if got := u.add(quiet, vad, "Once upon a time"); got != endpointWait {
+		u.add(quiet, vad)
+		if got := u.policy.decision(pcmDuration(len(u.pcm)), tunedEndpoint.patient); got != endpointWait {
 			t.Fatalf("unexpected decision %v", got)
 		}
 	}
-	u.add(frame, vad, "")
+	u.add(frame, vad)
 	want := slices.Concat(frame, make([]byte, 200*endpointBytes), frame)
 	if !bytes.Equal(u.clip(), want) {
 		t.Fatal("accumulated PCM changed")
@@ -82,7 +111,7 @@ func TestEndpointAccumulatorPreservesOriginalPCM(t *testing.T) {
 }
 
 func TestEndpointWebSendCancelAndAuto(t *testing.T) {
-	clips := make(chan []byte, 4)
+	clips := make(chan []byte, 8)
 	b, base := wsHarness(t, func(b *bridge, dir string) {
 		b.endpoint = testEndpointSettings()
 		b.stt = func(_ context.Context, pcm []byte) (string, error) {
@@ -139,23 +168,89 @@ func TestEndpointWebSendCancelAndAuto(t *testing.T) {
 	d.until(t, hasWS("rec", `"action":"stop"`))
 	d.json(t, object{"ev": "rec_end"})
 	d.until(t, hasWS("mode", `"mode":"idle"`))
-	select {
-	case got := <-clips:
-		voices := bytes.Count(got, frame)
-		if voices != 2 {
-			t.Fatalf("whole clip did not contain exactly both clauses (got %d)", voices)
-		}
-	default:
+	var last []byte
+	for len(clips) != 0 {
+		last = <-clips
+	}
+	if last == nil {
 		t.Fatal("automatic endpoint did not transcribe")
 	}
-	if len(clips) != 0 {
-		t.Fatal("capture was transcribed more than once")
+	if voices := bytes.Count(last, frame); voices != 2 {
+		t.Fatalf("final clip did not contain both clauses (got %d)", voices)
 	}
 	b.diag.mu.Lock()
 	n := len(b.diag.metrics[diagEndpoint].items)
 	b.diag.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("got %d end-to-commit samples, want 1 for the observed endpoint", n)
+	}
+}
+
+func TestEndpointSpeculatesWithoutClosingMicAndReusesLatestPause(t *testing.T) {
+	frame := bytes.Repeat([]byte{17, 0}, endpointBytes/2)
+	first := make(chan struct{}, 1)
+	firstCanceled := make(chan struct{}, 1)
+	second := make(chan int, 1)
+	var decodes atomic.Int32
+	b, base := wsHarness(t, func(b *bridge, _ string) {
+		b.endpoint = testEndpointSettings()
+		b.stt = func(ctx context.Context, pcm []byte) (string, error) {
+			switch decodes.Add(1) {
+			case 1:
+				first <- struct{}{}
+				<-ctx.Done()
+				firstCanceled <- struct{}{}
+				// A stale completion must not shorten the next pause.
+				return "Where is that dinosaur?", nil
+			case 2:
+				second <- bytes.Count(pcm, frame)
+				return "Where is that dinosaur hiding?", nil
+			default:
+				t.Error("already transcribed the silence; do not decode it again")
+				return "", nil
+			}
+		}
+	})
+	const id = "phone-e025"
+	d := testConnectWS(t, base, "unit", false)
+	d.json(t, object{"ev": "hello", "role": "web", "device_id": id, "character": "Echo", "caps": object{"bridge_endpoint": true}})
+	d.until(t, hasWS("capabilities", `"bridge_endpoint":true`))
+	d.json(t, object{"ev": "rec_request"})
+	d.until(t, hasWS("rec", `"endpoint":"bridge"`))
+	d.json(t, object{"ev": "rec_start"})
+	appendPCM := func(p []byte) {
+		d.write(t, maskedFrame(wsBinary, true, append([]byte{micPrefix}, p...)))
+	}
+	quiet := make([]byte, 4*endpointBytes)
+	appendPCM(frame)
+	for range 8 {
+		appendPCM(quiet)
+	}
+	expectValue(t, first, struct{}{})
+	b.ws.mu.Lock()
+	stillListening := b.ws.devices[id].recording.phase == captureOpen
+	b.ws.mu.Unlock()
+	if !stillListening {
+		t.Fatal("speculation changed the mic state")
+	}
+	appendPCM(frame)
+	expectValue(t, firstCanceled, struct{}{})
+	for range 8 {
+		appendPCM(quiet)
+	}
+	expectValue(t, second, 2)
+	for range 5 {
+		appendPCM(quiet)
+	}
+	d.until(t, hasWS("rec", `"action":"stop"`))
+	d.json(t, object{"ev": "rec_end"})
+	eventually(t, func() bool {
+		b.diag.mu.Lock()
+		defer b.diag.mu.Unlock()
+		return len(b.diag.metrics[diagEndpoint].items) == 1
+	})
+	if decodes.Load() != 2 {
+		t.Fatal("finalization did not reuse the latest valid pause")
 	}
 }
 

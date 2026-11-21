@@ -16,6 +16,7 @@ type endpointCapture struct {
 	result    chan captureResult
 	listening chan struct{}
 	deadline  *time.Timer // Hub owns and stops the wall-clock watchdog.
+	commitAt  time.Time   // Hub writes before closing packets.
 }
 
 type micPacket struct {
@@ -24,11 +25,18 @@ type micPacket struct {
 }
 
 type captureResult struct {
-	pcm            []byte
-	text           string
-	err            error
-	stt, wallDelay time.Duration
-	hasEnd         bool
+	pcm              []byte
+	text             string
+	err              error
+	stt, endToCommit time.Duration
+	hasEnd           bool
+}
+
+type pauseTranscript struct {
+	last time.Duration
+	text string
+	err  error
+	stt  time.Duration
 }
 
 func (h *wsHub) startEndpoint(d *wsDevice) {
@@ -53,37 +61,96 @@ func (h *wsHub) captureEndpoint(d *wsDevice, c *endpointCapture) {
 	}
 	var u utterance
 	var end time.Time
+	var cached pauseTranscript
+	var probe <-chan pauseTranscript
+	var probeCancel context.CancelFunc
+	var attempted bool
+	silence := tunedEndpoint.patient
+	defer func() {
+		if probeCancel != nil {
+			probeCancel()
+		}
+	}()
+	accept := func(result pauseTranscript) {
+		probeCancel()
+		probe, probeCancel = nil, nil
+		if !u.policy.inVoice && result.last == u.policy.last && result.err == nil && result.text != "" {
+			cached = result
+			silence = tunedEndpoint.silence(u.policy, result.text)
+		}
+	}
 	for c.ctx.Err() == nil {
 		select {
 		case <-c.ctx.Done():
 			return
+		case result := <-probe:
+			accept(result)
 		case packet, more := <-c.packets:
 			if !more {
-				result := captureResult{pcm: u.clip(), hasEnd: !end.IsZero() && !u.policy.inVoice}
+				// Send may close the mic during a probe. Reuse a completed
+				// result only for the same silence, including any DMA tail.
+				select {
+				case ready := <-probe:
+					accept(ready)
+				default:
+				}
+				if probeCancel != nil {
+					probeCancel()
+				}
+				result := captureResult{pcm: u.clip(), hasEnd: !end.IsZero() && !u.policy.inVoice && !end.After(c.commitAt)}
 				if len(result.pcm) != 0 && c.ctx.Err() == nil {
-					start := time.Now()
-					result.text, result.err = h.b.decodeClip(c.ctx, result.pcm)
-					result.stt = time.Since(start)
+					if cached.text != "" {
+						result.text, result.stt = cached.text, cached.stt
+					} else {
+						start := time.Now()
+						result.text, result.err = h.b.decodeClip(c.ctx, result.pcm)
+						result.stt = time.Since(start)
+					}
 					if result.hasEnd {
-						result.wallDelay = time.Since(end)
+						result.endToCommit = c.commitAt.Sub(end)
 					}
 				}
 				c.result <- result
 				return
 			}
-			decision := u.add(packet.pcm, vad, "")
-			if u.policy.voiced {
-				at := time.Duration(len(u.pcm)/2) * time.Second / sampleRate
-				end = packet.at.Add(u.policy.last - at)
-			}
-			if decision != endpointWait {
-				h.mu.Lock()
-				// Don't stop on an old decision while more speech is queued.
-				if h.active(d) && d.recording.endpoint == c && d.recording.open() && len(c.packets) == 0 {
-					h.recordingControl(d, time.Now(), decision == endpointDiscard)
+			previous := u.policy.last
+			u.add(packet.pcm, vad)
+			if u.policy.inVoice || previous != u.policy.last {
+				attempted, cached, silence = false, pauseTranscript{}, tunedEndpoint.patient
+				if probeCancel != nil {
+					probeCancel()
 				}
-				h.mu.Unlock()
 			}
+			if u.policy.voiced && (previous != u.policy.last || end.IsZero()) {
+				end = packet.at.Add(u.policy.last - pcmDuration(len(u.pcm)))
+			}
+		}
+		if len(c.packets) != 0 || c.ctx.Err() != nil {
+			continue
+		}
+		at := pcmDuration(len(u.pcm))
+		decision := u.policy.decision(at, silence)
+		if vad == nil {
+			decision = endpointWait // Leave Send and the watchdog available on native init failure.
+		}
+		if decision != endpointWait {
+			h.mu.Lock()
+			// Don't stop on an old decision while more speech is queued.
+			if h.active(d) && d.recording.endpoint == c && d.recording.phase == captureOpen && len(c.packets) == 0 {
+				h.recordingControl(d, time.Now(), decision == endpointDiscard)
+			}
+			h.mu.Unlock()
+		} else if !attempted && probe == nil && u.policy.paused(at, tunedEndpoint.probe) {
+			attempted = true
+			ctx, cancel := context.WithCancel(c.ctx)
+			result := make(chan pauseTranscript, 1)
+			probe, probeCancel = result, cancel
+			// The prefix is immutable; the capture worker only appends.
+			go func(pcm []byte, last time.Duration) {
+				start := time.Now()
+				text, err := h.b.decodeClip(ctx, pcm)
+				result <- pauseTranscript{last: last, text: text, err: err, stt: time.Since(start)}
+			}(u.pcm, u.policy.last)
 		}
 	}
 }
@@ -92,6 +159,9 @@ func (h *wsHub) finishEndpoint(d *wsDevice, now time.Time) {
 	c := d.recording.endpoint
 	d.recording.endpoint = nil
 	c.deadline.Stop()
+	if c.commitAt.IsZero() {
+		c.commitAt = now
+	}
 	close(c.packets)
 	close(c.listening)
 	d.recording.clear()
@@ -131,13 +201,14 @@ func (h *wsHub) maybeStartVoice(d *wsDevice, now time.Time) bool {
 			}
 			h.mu.Unlock()
 		}
-		traceFrom(ctx).measure(diagSTT, result.stt)
+		trace := traceFrom(ctx)
+		trace.measure(diagSTT, result.stt)
+		if result.hasEnd {
+			trace.measure(diagEndpoint, result.endToCommit)
+		}
 		if result.err != nil {
 			h.turnError(d, id, "Could not hear that. Try again.")
 			return
-		}
-		if result.hasEnd {
-			traceFrom(ctx).measure(diagEndpoint, result.wallDelay)
 		}
 		if result.text == "" {
 			h.finishTurn(d, id, nil, nil)

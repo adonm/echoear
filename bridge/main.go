@@ -56,6 +56,10 @@ func run() error {
 	if err := checkParakeetModel(path); err != nil {
 		return err
 	}
+	vadPath := filepath.Join(local, "stt-models", sileroModel)
+	if err := checkEndpointModel(vadPath); err != nil {
+		return err
+	}
 	parakeet, err := openParakeet(path)
 	if err != nil {
 		return err
@@ -64,13 +68,7 @@ func run() error {
 	if _, err := parakeet.transcribe(context.Background(), make([]byte, sampleRate*2)); err != nil {
 		return err
 	}
-	var endpointConfig *endpointSettings
-	if path := os.Getenv("ECHOEAR_SILERO_VAD_MODEL"); path != "" {
-		if err := checkEndpointModel(path); err != nil {
-			return err
-		}
-		endpointConfig = &endpointSettings{newVAD: func() endpointVAD { return newSileroVAD(path) }}
-	}
+	endpointConfig := &endpointSettings{newVAD: func() endpointVAD { return newSileroVAD(vadPath) }}
 	ocURL, ocPassword := os.Getenv("ECHOEAR_OPENCODE_URL"), os.Getenv("ECHOEAR_OPENCODE_PASSWORD")
 	ocAPI, err := openCodeUpstream(pooledClient(), state, ocURL, ocPassword)
 	if err != nil {

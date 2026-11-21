@@ -66,6 +66,27 @@ install_kokoro() (
 )
 install_kokoro
 
+install_silero() (
+    local name=silero_vad_v5.onnx checksum=6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396
+    local models="$data/stt-models" destination staged
+    destination="$models/$name"
+    verify() { printf '%s  %s\n' "$checksum" "$1" | sha256sum --check --status; }
+    if [[ -f "$destination" ]] && verify "$destination"; then
+        return 0
+    fi
+    mkdir -p -- "$models"
+    staged=$(mktemp "$models/.$name.XXXXXXXX")
+    trap 'rm -f -- "$staged"' EXIT
+    curl --fail --silent --show-error --location --output "$staged" \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$name"
+    if ! verify "$staged"; then
+        printf 'Silero v5 model failed SHA-256 verification.\n' >&2
+        return 1
+    fi
+    mv -fT -- "$staged" "$destination"
+)
+install_silero
+
 bridge_bin="$data/echoear-bridge"
 build_tmp=$(mktemp "$bridge_bin.XXXXXXXX")
 stt_stage=$(mktemp -d)
@@ -156,7 +177,7 @@ settings = {
 if sys.argv[2] != "false":
     settings["GGML_VK_VISIBLE_DEVICES"] = sys.argv[2]
 kept = [line for line in old.splitlines(keepends=True)
-        if line.strip().partition("=")[0].rstrip() not in settings.keys() | {"ECHOEAR_STT"}]
+        if line.strip().partition("=")[0].rstrip() not in settings.keys() | {"ECHOEAR_STT", "ECHOEAR_SILERO_VAD_MODEL"}]
 text = "".join(kept)
 if text and not text.endswith("\n"):
     text += "\n"
