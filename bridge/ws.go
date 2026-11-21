@@ -126,6 +126,9 @@ func (h *wsHub) serveScope(w http.ResponseWriter, r *http.Request, scope *virtua
 		return err
 	}
 	ctx, cancel := context.WithCancel(r.Context())
+	if scope != nil || !libraryLAN(r) {
+		ctx = withoutPhotoAccess(ctx)
+	}
 	c := &wsClient{wire: wire, ctx: ctx, cancel: cancel, out: make(chan wsFrame, 192), scope: scope}
 	wire.onPong = c.pong
 	h.mu.Lock()

@@ -959,8 +959,13 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		for _, d := range devices {
-			if h.active(d) && d.app != nil {
-				h.closeApp(d.app, time.Now())
+			if h.active(d) {
+				if d.app != nil {
+					h.closeApp(d.app, time.Now())
+				} else if d.photos != nil {
+					h.clearView(d)
+					h.render(d, time.Now(), true)
+				}
 			}
 		}
 		return object{"ok": true, "devices": ids, "title": "", "hit_ids": []string{}}, nil

@@ -7,6 +7,8 @@ import {tickTimers} from "./library.js";
 import {disconnect, renderCurrent, select} from "./live.js";
 import {state} from "./state.js";
 
+let photoLibrary;
+
 function credentials(note = "") {
   say("auth-note", note);
   $("token-cancel").hidden = !state.app;
@@ -14,6 +16,7 @@ function credentials(note = "") {
 }
 
 function stop() {
+  photoLibrary?.setPhotoLibrary(false);
   setDiagnostics(false);
   $("diagnostics-toggle").hidden = true;
   clearInterval(state.poll);
@@ -71,6 +74,11 @@ async function authorize(token) {
       refreshDevices();
       refreshTunnel();
       state.poll = setInterval(() => { refreshDevices(); refreshTunnel(); }, 5000);
+      const current = state.app;
+      import("./photo-library.js").then(module => {
+        photoLibrary = module;
+        if (state.app === current) module.setPhotoLibrary(true);
+      }).catch(() => {});
     }
   } catch {
     credentials("Could not reach the bridge. Check the connection and try again.");

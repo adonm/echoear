@@ -1,7 +1,7 @@
 import {request} from "./api.js";
 
 const activePhotos = new Map();
-const photoHref = /^photo:(photo-[0-9a-f]{8})$/;
+const photoHref = /^photo:(photo-[0-9a-f]{8}|lib-[0-9a-f]{32})$/;
 
 function retainPhotos(ids) {
   for (const [id, entry] of activePhotos) {
@@ -23,15 +23,17 @@ function stagePhotos(svg, token) {
     image.removeAttribute("href");
     if (!match) continue;
     const [, id] = match;
+    const library = id.startsWith("lib-");
     ids.add(id);
     let entry = activePhotos.get(id);
     if (!entry) {
       entry = {request:new AbortController()};
       activePhotos.set(id, entry);
-      entry.promise = request(token, `/api/photos/${id}`, {signal:entry.request.signal})
+      const url = library ? `/api/library/thumbnail/${id}` : `/api/photos/${id}`;
+      entry.promise = request(token, url, {signal:entry.request.signal})
         .then(res => res.ok ? res.blob() : null)
         .then(blob => {
-          if (blob?.type === "image/png" && !entry.request.signal.aborted) {
+          if (blob?.type === (library ? "image/jpeg" : "image/png") && !entry.request.signal.aborted) {
             entry.url = URL.createObjectURL(blob);
           }
         }).catch(() => {});

@@ -184,11 +184,15 @@ var mcpTools = func() []object {
 	update := schema(object{"name": text, "title": text, "code": object{"type": "string", "maxLength": 16384},
 		"svg": text, "data": appTemplateSchema(""), "tick_ms": number, "max_ticks": number,
 		"expected_version": object{"type": "integer", "minimum": 0}}, "name")
+	appData := appTemplateSchema("")
+	fields := appData["properties"].(object)
+	fields["handles"], fields["access"] = array(text), text
 	return []object{
 		tool("state", "Read live state by slice. device_id adds me.device, me.cat and me.active_app; app_name adds full saved app source, settings and state.",
 			schema(object{"device_id": text, "include": array(enum(stateSlices...)), "memory_scopes": array(text),
 				"app_name": text, "include_code": flag, "messages_limit": object{"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
-				"messages_cursor": schema(object{"before_ts": number, "before_id": text}, "before_ts", "before_id")})),
+				"messages_cursor": schema(object{"before_ts": number, "before_id": text}, "before_ts", "before_id"),
+				"photos":          schema(object{"access": text, "query": text, "person": text, "limit": object{"type": "integer", "minimum": 1, "maximum": 8}}, "access")})),
 		tool("patch", "Change devices, cats, timers, memory or saved apps. Memory and app batches are atomic. Stop running apps before changing slugs. Deletes run before renames and ignore missing slugs; renames update timers. Cancel timers before deleting their app. Cat defaults to update; create timers with in_seconds or at.",
 			schema(object{"device_id": text,
 				"device": schema(object{"volume": object{"type": "integer", "minimum": 0, "maximum": 100}, "auto_volume": flag, "sleep": flag, "voice": voice}),
@@ -203,7 +207,7 @@ var mcpTools = func() []object {
 				"timer":  schema(object{"op": enum("set", "update", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),
 		tool("app", "Launch a data-only template, display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
-				"template": enum(templateNames()...), "data": appTemplateSchema(""),
+				"template": enum(append(templateNames(), "slideshow")...), "data": appData,
 				"save_current": schema(object{"name": text, "title": text}, "name"),
 				"load":         text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
 		tool("emit", "Start or hang up a call, send intercom, or play notes/effects. Receipts describe queued or skipped deliveries, not playback. Calls use exact device IDs, never all.",
@@ -342,6 +346,9 @@ func (b *bridge) callMCP(ctx context.Context, name string, args object) (object,
 	case "patch":
 		return b.mcpPatch(ctx, args)
 	case "app":
+		if str(args["template"]) == "slideshow" {
+			return b.launchPhotoShow(ctx, args)
+		}
 		return b.runApp(ctx, args)
 	case "emit":
 		return b.mcpEmit(ctx, args)

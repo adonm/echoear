@@ -206,6 +206,7 @@ func (h *wsHub) beginTurn(d *wsDevice, now time.Time, keepView bool, source stri
 	d.drawer, d.card, d.pending = "", nil, nil
 	if !keepView {
 		d.view = nil
+		h.dropPhotoShow(d)
 	}
 	ctx, cancel := context.WithTimeout(d.client.ctx, turnTimeout)
 	ctx = h.b.traceTurn(ctx, d.who.DeviceID, d.cat.Name, source, now)
@@ -387,7 +388,7 @@ func (h *wsHub) runTurn(ctx context.Context, d *wsDevice, id uint64, text, sourc
 		h.turnError(d, id, "Chat is not ready yet.")
 		return
 	}
-	gen, err := h.b.generateReply(ctx, ctx, d.who, text, turnOptions{source: source, web: d.virtual(),
+	gen, err := h.b.generateReply(ctx, ctx, d.who, text, turnOptions{source: source, web: d.virtual(), scoped: d.client.scope != nil,
 		publish: func(stream *AudioStream, start time.Time) { h.publish(d, id, ctx, stream, start) }})
 	if err != nil {
 		h.turnError(d, id, "Could not finish that turn.")

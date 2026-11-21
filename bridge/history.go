@@ -282,6 +282,9 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 				return nil, problem(409, "Cat is in a call")
 			}
 			b.ws.startTurn(d, now, false, "typed", func(ctx context.Context, turn uint64) {
+				if scope != "" || r.Context().Value(photoScopeContext{}) != nil {
+					ctx = withoutPhotoAccess(ctx)
+				}
 				b.ws.runTurn(ctx, d, turn, text, "typed", nil)
 			})
 			b.ws.mu.Unlock()
@@ -307,6 +310,9 @@ func (b *bridge) chatAPI(r *http.Request, path, scope string) (any, error) {
 	}
 	if b.oc == nil {
 		return nil, problem(503, "Chat unavailable")
+	}
+	if scope != "" {
+		ctx = withoutPhotoAccess(ctx)
 	}
 	out, err := b.turn(ctx, sender, text)
 	if ctx.Err() != nil {
