@@ -284,28 +284,137 @@ func TestAccessibleRecordingControls(t *testing.T) {
 	}
 }
 
-func TestAccessibleStopAndFaceInterrupt(t *testing.T) {
-	b, base := wsHarness(t, nil)
+func stopTestHarness(t *testing.T, id string) (*bridge, string, <-chan string) {
+	t.Helper()
+	const path = "/api/session/ses-stop/interrupt"
+	interrupts := make(chan string, 4)
+	b, base := wsHarness(t, func(b *bridge, dir string) {
+		b.oc = testOpenCode(t, b.root, dir, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != path {
+				http.NotFound(w, r)
+				return
+			}
+			interrupts <- r.URL.Path
+			_, _ = io.WriteString(w, `{"data":{"interrupted":true}}`)
+		})
+		if err := b.oc.save(id, "ses-stop"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return b, base, interrupts
+}
+
+func TestThinkingStopRequiresThreeTaps(t *testing.T) {
 	const id = "echoear-stop"
+	b, base, interrupts := stopTestHarness(t, id)
 	dev := testConnectWS(t, base, "unit", false)
 	dev.hello(t, id, "Cake")
 	mirror := testConnectWS(t, base, "unit", true)
 	mirror.watch(t, id)
-	for _, target := range []string{"stop", "cat-ring"} {
-		cancelled := make(chan struct{})
+	cancelled := make(chan bool, 1)
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	now := time.Now()
+	b.ws.startTurn(d, now, false, "typed", func(ctx context.Context, _ uint64) {
+		<-ctx.Done()
+		cancelled <- true
+	})
+	// The rasterizer cannot commit the thinking frame while the hub lock is held.
+	b.ws.pointer(d, wsEvent{Event: "tap", X: 180, Y: 180}, now, true)
+	b.ws.mu.Unlock()
+	mirror.until(t, hasWS("svg", `aria-label=\"Stop\"`))
+	mirror.until(t, hasWS("svg", `stroke-width=\"6\"`))
+
+	stillThinking := func(taps int) {
+		t.Helper()
 		b.ws.mu.Lock()
-		b.ws.startTurn(b.ws.devices[id], time.Now(), false, "typed", func(ctx context.Context, _ uint64) {
-			<-ctx.Done()
-			close(cancelled)
-		})
+		busy, count := d.busy, d.stopTaps
 		b.ws.mu.Unlock()
-		mirror.until(t, hasWS("svg", `data-id=\"stop\"`))
-		mirror.json(t, object{"ev": "tap", "id": target})
-		mirror.until(t, hasWS("svg", `data-id=\"menu\"`))
+		if !busy || count != taps {
+			t.Fatalf("want ongoing turn with %d Stop taps, busy=%t taps=%d", taps, busy, count)
+		}
 		select {
 		case <-cancelled:
-		case <-time.After(2 * time.Second):
-			t.Fatal("did not interrupt thinking with", target)
+			t.Fatal("turn canceled before confirmation")
+		case got := <-interrupts:
+			t.Fatalf("early upstream interrupt: %s", got)
+		default:
 		}
+	}
+
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 180})
+	dev.barrier(t)
+	mirror.json(t, object{"ev": "tap", "id": "cat-ring"})
+	mirror.barrier(t)
+	stillThinking(0)
+
+	tap := func(label string, count int) {
+		t.Helper()
+		mirror.json(t, object{"ev": "tap", "id": "stop"})
+		mirror.until(t, hasWS("svg", `aria-label=\"`+label+`\"`))
+		dev.until(t, hasWS("chime", `"kind":"tap"`))
+		stillThinking(count)
+	}
+	tap("Tap 2×", 1)
+	tap("Tap 1×", 2)
+	mirror.until(t, hasWS("svg", `aria-label=\"Stop\"`))
+	stillThinking(0)
+	tap("Tap 2×", 1)
+	tap("Tap 1×", 2)
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 315})
+	dev.until(t, hasWS("chime", `"kind":"cancel"`))
+	mirror.until(t, hasWS("svg", `data-id=\"menu\"`))
+	expectValue(t, cancelled, true)
+	expectValue(t, interrupts, "/api/session/ses-stop/interrupt")
+	b.ws.mu.Lock()
+	defer b.ws.mu.Unlock()
+	if d.busy || d.stopTaps != 0 || !d.stopTapAt.IsZero() {
+		t.Fatal("Stop did not clear the turn and confirmation state")
+	}
+}
+
+func TestSpeakingStopAbortsPlaybackWithoutUpstreamInterrupt(t *testing.T) {
+	const id = "echoear-speaking-stop"
+	b, base, interrupts := stopTestHarness(t, id)
+	dev := testConnectWS(t, base, "unit", false)
+	dev.hello(t, id, "Cake")
+	mirror := testConnectWS(t, base, "unit", true)
+	mirror.watch(t, id)
+
+	stream := newAudioStream()
+	stream.append([]byte{1, 0})
+	b.ws.mu.Lock()
+	d := b.ws.devices[id]
+	b.ws.startTurn(d, time.Now(), false, "typed", func(ctx context.Context, _ uint64) { <-ctx.Done() })
+	turn := d.turn
+	b.ws.mu.Unlock()
+	mirror.until(t, hasWS("svg", `aria-label=\"Stop\"`))
+	mirror.json(t, object{"ev": "tap", "id": "stop"})
+	mirror.until(t, hasWS("svg", `aria-label=\"Tap 2×\"`))
+	b.ws.mu.Lock()
+	playback := b.ws.play(d, stream)
+	b.ws.mu.Unlock()
+	dev.until(t, hasWS("tts", `"state":"start"`))
+	b.ws.finishTurn(d, turn, nil, nil)
+	mirror.until(t, hasWS("svg", `aria-label=\"Stop\"`))
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 180})
+	dev.barrier(t)
+	if playback.Err() != nil {
+		t.Fatal("face tap stopped playback")
+	}
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 315})
+	dev.until(t, hasWS("tts", `"state":"abort"`))
+	mirror.until(t, hasWS("svg", `data-id=\"menu\"`))
+	if playback.Err() == nil {
+		t.Fatal("one Stop tap did not stop playback")
+	}
+
+	dev.json(t, object{"ev": "tap", "x": 180, "y": 180})
+	dev.until(t, hasWS("rec", `"action":"start"`))
+	b.oc.mu.Lock()
+	pending := b.oc.interrupts[id]
+	b.oc.mu.Unlock()
+	if pending || len(interrupts) != 0 {
+		t.Fatal("stopping speech or starting an idle recording interrupted OpenCode")
 	}
 }

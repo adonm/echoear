@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 )
@@ -32,7 +33,7 @@ func (h *wsHub) clearRecording(d *wsDevice) {
 
 func (h *wsHub) startRecording(d *wsDevice, target string, now time.Time, request bool) {
 	h.wake(d, now)
-	h.cancelTurn(d)
+	h.cancelTurn(d, "recording")
 	d.drawer, d.card, d.pending, d.view = "", nil, nil, nil
 	h.stopPlayback(d, true)
 	d.recAt, d.recOpen, d.recTarget, d.mic = now, !request, target, nil
@@ -126,10 +127,15 @@ func (h *wsHub) endRecording(d *wsDevice, ev wsEvent, now time.Time) {
 	})
 }
 
-func (h *wsHub) cancelTurn(d *wsDevice) {
-	if h.b.oc != nil {
+func (h *wsHub) interruptTurn(d *wsDevice, reason string) {
+	if d.busy && h.b.oc != nil {
+		log.Printf("ws interrupt device=%s reason=%s", d.who.DeviceID, reason)
 		h.b.oc.interruptDevice(d.who.DeviceID)
 	}
+}
+
+func (h *wsHub) cancelTurn(d *wsDevice, reason string) {
+	h.interruptTurn(d, reason)
 	h.cancelLocalTurn(d)
 }
 
@@ -137,6 +143,7 @@ func (h *wsHub) cancelLocalTurn(d *wsDevice) {
 	d.turn++
 	d.trace = nil
 	d.busy = false
+	d.resetStopTaps()
 	d.agentSetScene = false
 	if d.cancel != nil {
 		d.cancel()
@@ -145,11 +152,7 @@ func (h *wsHub) cancelLocalTurn(d *wsDevice) {
 }
 
 func (h *wsHub) startTurn(d *wsDevice, now time.Time, keepView bool, source string, run func(context.Context, uint64)) {
-	if d.busy {
-		h.cancelTurn(d)
-	} else {
-		h.cancelLocalTurn(d)
-	}
+	h.cancelTurn(d, "superseded")
 	h.beginTurn(d, now, keepView, source, run)
 }
 
@@ -616,7 +619,7 @@ func (h *wsHub) deliverOnline(sender peer, recipients []peer, voice, text string
 			continue
 		}
 		view := (intercomCard{sender, text, cat}).scene(false)
-		h.cancelTurn(d)
+		h.cancelTurn(d, "intercom")
 		h.stopPlayback(d, true)
 		if !d.recAt.IsZero() {
 			h.push(d, object{"op": "rec", "action": "stop", "target": d.recTarget}, false)

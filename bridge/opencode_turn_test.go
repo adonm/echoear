@@ -329,11 +329,16 @@ func TestOpenCodeCancelAndReset(t *testing.T) {
 			})
 			c := testConnectWS(t, base, "unit", false)
 			c.hello(t, id, "Cake")
+			if action != "reset" {
+				b.ws.mu.Lock()
+				b.ws.devices[id].busy = true
+				b.ws.mu.Unlock()
+			}
 			reset := make(chan error, 1)
 			switch action {
 			case "cancel":
 				b.ws.mu.Lock()
-				b.ws.cancelTurn(b.ws.devices[id])
+				b.ws.cancelTurn(b.ws.devices[id], "stop")
 				b.ws.mu.Unlock()
 			case "reset":
 				go func() {

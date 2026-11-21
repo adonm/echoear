@@ -141,6 +141,8 @@ type wsDevice struct {
 	trace          *turnTrace
 	cancel         context.CancelFunc
 	busy           bool
+	stopTaps       int
+	stopTapAt      time.Time
 	agentSetScene  bool
 
 	audio      uint64
@@ -505,7 +507,7 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		h.endCall(old, "disconnected")
 		h.dropApp(old)
 		h.clearRecording(old)
-		h.cancelTurn(old)
+		h.cancelTurn(old, "reconnect")
 		h.stopPlayback(old, true)
 		d.rev = old.rev
 	}
@@ -615,6 +617,13 @@ type renderRequest struct {
 	trace  *turnTrace
 }
 
+func (d *wsDevice) catPose(now time.Time, mood string) catPose {
+	p := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
+	p.blink = p.blink || now.Before(d.pet)
+	p.stopTaps = d.stopTaps
+	return p
+}
+
 func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	switch d.drawer {
 	case drawerGames, drawerMemories, drawerHistory:
@@ -631,10 +640,13 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 		mood = "sleepy"
 	case d.recOpen || !d.recAt.IsZero():
 		mood = "listening"
-	case d.ttsStarted || d.awaitAck:
-		mood = "speaking"
 	case d.busy:
 		mood = "thinking"
+	case d.ttsStarted || d.awaitAck:
+		mood = "speaking"
+	}
+	if mood != "thinking" || d.stopTapsExpired(now) {
+		d.resetStopTaps()
 	}
 	changed := mood != d.pose.mood
 	if changed {
@@ -643,8 +655,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	if changed && d.virtual() {
 		h.push(d, object{"op": "mode", "mode": mood}, false)
 	}
-	pose := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
-	pose.blink = pose.blink || now.Before(d.pet)
+	pose := d.catPose(now, mood)
 	d.pose = pose
 	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace}
 	switch {
@@ -707,7 +718,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	}
 	if r.cat == nil && r.app == nil && (mood == "thinking" || mood == "speaking") {
 		r.view.actions = maps.Clone(r.view.actions)
-		r.view.stopControl()
+		r.view.stopControl(pose.stopTaps)
 	}
 	d.renderGen++
 	d.renderNext = &r
@@ -854,10 +865,10 @@ func (h *wsHub) animate(ctx context.Context) {
 					h.render(d, now, false)
 				case d.drawer == "stats" && !d.asleep && now.Sub(d.statsAt) >= diagInterval:
 					h.render(d, now, false)
+				case d.stopTapsExpired(now):
+					h.render(d, now, false)
 				case (d.drawer == "" || d.asleep) && (d.app == nil && d.view == nil || d.asleep || !d.recAt.IsZero()):
-					p := poseFrame(now, d.moodAt, d.last, d.pose.mood, d.pct, d.vol, d.charging, now.Before(d.meter))
-					p.blink = p.blink || now.Before(d.pet)
-					if p != d.pose {
+					if d.catPose(now, d.pose.mood) != d.pose {
 						h.render(d, now, false)
 					}
 				}

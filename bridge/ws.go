@@ -258,7 +258,7 @@ func (h *wsHub) detach(c *wsClient) {
 		h.dropApp(d)
 		delete(h.devices, d.key)
 		h.clearRecording(d)
-		h.cancelTurn(d)
+		h.cancelTurn(d, "disconnect")
 		h.stopPlayback(d, false)
 		h.broadcastPeers()
 	}
@@ -273,7 +273,7 @@ func (h *wsHub) disconnectDevice(id string) {
 		h.dropApp(d)
 		delete(h.devices, id)
 		h.clearRecording(d)
-		h.cancelTurn(d)
+		h.cancelTurn(d, "disconnect")
 		h.stopPlayback(d, false)
 		h.broadcastPeers()
 	}

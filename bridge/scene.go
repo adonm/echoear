@@ -53,13 +53,14 @@ func (s *sceneView) button(id, name string, a sceneAction, x, y, w, h int, art s
 }
 
 type catPose struct {
-	mood    string
-	blink   bool
-	dot     int
-	battery int
-	charge  bool
-	volume  int
-	meter   bool
+	mood     string
+	blink    bool
+	dot      int
+	stopTaps int
+	battery  int
+	charge   bool
+	volume   int
+	meter    bool
 }
 
 func catChrome(cat catState, pose catPose) sceneView {
@@ -73,14 +74,13 @@ func catChrome(cat catState, pose catPose) sceneView {
 	case "speaking":
 		ringColor, ringWidth = "#0284C7", 5
 	}
-	a, name := sceneAction{"listen", ""}, "Talk"
-	active := pose.mood == "thinking" || pose.mood == "speaking"
-	if active {
-		a, name = sceneAction{"stop", ""}, "Stop"
+	ring := fmt.Sprintf(`<circle cx="180" cy="180" r="172" fill="none" stroke="%s" stroke-width="%d"/>`, ringColor, ringWidth)
+	if pose.mood == "thinking" || pose.mood == "speaking" {
+		s.art += ring
+	} else {
+		s.button("cat-ring", "Talk", sceneAction{"listen", ""}, 8, 8, 344, 344, ring)
 	}
-	s.button("cat-ring", name, a, 8, 8, 344, 344,
-		fmt.Sprintf(`<circle cx="180" cy="180" r="172" fill="none" stroke="%s" stroke-width="%d"/>`, ringColor, ringWidth))
-	if pose.battery >= 0 {
+	if pose.battery >= 0 && pose.mood != "listening" && pose.mood != "thinking" {
 		s.art += svgRect(258, 46, 6, 7, 2, catInk, "none", 0) + svgRect(229, 41, 31, 17, 5, "#FFFAEE", catInk, 2)
 		if pose.battery > 0 {
 			batteryColor := "#39D1A0"
@@ -112,8 +112,21 @@ func catChrome(cat catState, pose catPose) sceneView {
 			svgCircle(124, 50, 5, "#FF6978") + svgLabel(187, 56, 18, "Listening…", "#FFFFFF")
 		s.control(bounds{56, 284, 114, 52}, actionTile("rec-cancel", "Cancel", "cancel", dangerPalette))
 		s.control(bounds{190, 284, 114, 52}, actionTile("rec-send", "Send", "check", answerPalette))
-	case "thinking", "speaking":
-		s.stopControl()
+	case "thinking":
+		// Pulse just the top arc so native displays only send a small dirty rectangle.
+		s.art += fmt.Sprintf(`<path d="M137 13.5 A172 172 0 0 1 223 13.5" fill="none" stroke="#FCD34D" stroke-width="%d" stroke-linecap="round"/>`, 5+pose.dot) +
+			svgRect(103, 30, 154, 40, 20, "#202538", "none", 0) +
+			svgLabel(197, 56, 18, "Thinking", "#FFFFFF")
+		for i := range 3 {
+			radius, color := 3, "#B47A28"
+			if i == pose.dot {
+				radius, color = 5, "#F59E0B"
+			}
+			s.art += svgCircle(124+12*i, 50, radius, color)
+		}
+		s.stopControl(pose.stopTaps)
+	case "speaking":
+		s.stopControl(0)
 	}
 	return s
 }
@@ -183,8 +196,11 @@ func poseFrame(now, since, idle time.Time, mood string, pct, volume int, charge,
 	if mood == "idle" || mood == "listening" {
 		p.blink = now.Sub(idle)%(3500*time.Millisecond) >= 3350*time.Millisecond
 	}
-	if mood == "listening" {
+	switch mood {
+	case "listening":
 		p.dot = int(now.Sub(since)/(300*time.Millisecond)) % 3
+	case "thinking":
+		p.dot = int(now.Sub(since)/(360*time.Millisecond)) % 3
 	}
 	return p
 }

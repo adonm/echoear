@@ -306,7 +306,7 @@ func TestFacePoseCacheReusesFramesAndHitboxes(t *testing.T) {
 	prior := make([]svgScreen, len(poses))
 	for i, svg := range poses {
 		screen, err := cache.build(svg, false, roundScreen)
-		if err != nil || len(screen.fb) != screenSize*screenSize || hitID(screen.hits, 180, 180) != "cat-ring" {
+		if err != nil || len(screen.fb) != screenSize*screenSize || len(screen.hits) == 0 {
 			t.Fatalf("pose %d did not build: %v", i, err)
 		}
 		prior[i] = screen
@@ -330,6 +330,50 @@ func TestFacePoseCacheReusesFramesAndHitboxes(t *testing.T) {
 		_, _ = cache.build(poses[0], false, roundScreen)
 	}); allocs != 0 {
 		t.Fatalf("cache hit allocated %.2f times", allocs)
+	}
+}
+
+func TestThinkingFramesAndStopLabels(t *testing.T) {
+	for _, geom := range []screenGeometry{roundScreen, {320, 240, "rect"}} {
+		t.Run(strconv.Itoa(geom.width), func(t *testing.T) {
+			side := min(geom.width, geom.height)
+			top := image.Rect(0, 0, geom.width, 70*side/360)
+			bottom := image.Rect(0, 292*side/360, geom.width, geom.height)
+			var prevLabel []uint16
+			for taps, label := range []string{"Stop", "Tap 2×", "Tap 1×"} {
+				var prevDot []uint16
+				for dot := range 3 {
+					raw := catSVG(blankCat(), catPose{mood: "thinking", dot: dot, stopTaps: taps, battery: 80})
+					screen, err := buildScreen(raw, false, geom)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if warnings := layoutWarnings(screen.hits, geom.shape == "round"); len(warnings) != 0 {
+						t.Error(warnings)
+					}
+					if len(screen.hits) != 1 || hitID(screen.hits, 180, 315) != "stop" ||
+						!strings.Contains(screen.source, `aria-label="`+label+`"`) ||
+						!strings.Contains(screen.source, "Thinking") {
+						t.Fatalf("missing Thinking status or %q Stop control: %v", label, screen.hits)
+					}
+					if dot == 0 {
+						if prevLabel != nil {
+							rect := dirtyRect(prevLabel, screen.fb, geom)
+							if rect.Empty() || !rect.In(bottom) {
+								t.Errorf("%s: expected a visible label update at the bottom, got %v", label, rect)
+							}
+						}
+						prevLabel = screen.fb
+					} else {
+						rect := dirtyRect(prevDot, screen.fb, geom)
+						if rect.Empty() || !rect.In(top) || rect.Min.Y >= 30*side/360 || rect.Max.Y <= 50*side/360 {
+							t.Errorf("%s dot %d: ring and dots should animate only at the top, got %v", label, dot, rect)
+						}
+					}
+					prevDot = screen.fb
+				}
+			}
+		})
 	}
 }
 

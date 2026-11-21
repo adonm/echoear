@@ -198,9 +198,7 @@ func (h *wsHub) showPhoto(device, id string) bool {
 	if d == nil || !h.active(d) {
 		return false
 	}
-	if d.busy && h.b.oc != nil {
-		h.b.oc.interruptDevice(d.who.DeviceID)
-	}
+	h.interruptTurn(d, "photo")
 	h.stopCatTurn(d)
 	h.clearView(d)
 	now := time.Now()

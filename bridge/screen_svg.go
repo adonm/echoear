@@ -103,8 +103,12 @@ func (s *sceneView) control(b bounds, t tile) {
 	s.button(t.id, name, t.action, x, y, w, h, art)
 }
 
-func (s *sceneView) stopControl() {
-	s.control(bounds{120, 292, 120, 46}, actionTile("stop", "Stop", "stop", palette{"#32263C", "#FFE3E8"}))
+func (s *sceneView) stopControl(taps int) {
+	label := "Stop"
+	if taps > 0 {
+		label = fmt.Sprintf("Tap %d×", 3-taps)
+	}
+	s.control(bounds{120, 292, 120, 46}, actionTile("stop", label, "stop", palette{"#32263C", "#FFE3E8"}))
 }
 
 func menuHeader(title string) sceneView {

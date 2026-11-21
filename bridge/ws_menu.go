@@ -265,9 +265,9 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	case "rec-cancel", "rec-send":
 		h.recordingControl(d, now, a.kind == "rec-cancel")
 	case "stop":
-		h.leaveScene(d, now)
+		h.tapStop(d, now)
 	case "cat":
-		h.leaveScene(d, now)
+		h.leaveScene(d, now, "leave-scene")
 	case "dismiss":
 		d.card = nil
 		h.render(d, now, false)
@@ -283,6 +283,9 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 			h.push(d, object{"op": "error", "status": 502, "error": err.Error()}, true)
 		}
 	case "listen", "reply":
+		if key == "cat-ring" && (d.busy || d.ttsStarted || d.awaitAck) {
+			return // The previous idle frame may still have a Talk target.
+		}
 		if !d.recAt.IsZero() {
 			h.recordingControl(d, now, false)
 		} else {
@@ -293,12 +296,39 @@ func (h *wsHub) pointer(d *wsDevice, ev wsEvent, now time.Time, native bool) {
 	}
 }
 
-func (h *wsHub) leaveScene(d *wsDevice, now time.Time) {
+const stopTapWindow = 2500 * time.Millisecond
+
+func (d *wsDevice) resetStopTaps() {
+	d.stopTaps, d.stopTapAt = 0, time.Time{}
+}
+
+func (d *wsDevice) stopTapsExpired(now time.Time) bool {
+	return d.stopTaps != 0 && now.Sub(d.stopTapAt) > stopTapWindow
+}
+
+func (h *wsHub) tapStop(d *wsDevice, now time.Time) {
 	if d.busy {
-		h.cancelTurn(d)
-	} else {
-		h.cancelLocalTurn(d)
+		if d.stopTapsExpired(now) {
+			d.resetStopTaps()
+		}
+		if d.stopTaps == 0 {
+			d.stopTapAt = now
+		}
+		d.stopTaps++
+		if d.stopTaps < 3 {
+			h.chime(d, "tap")
+			h.render(d, now, false)
+			return
+		}
+	} else if !d.ttsStarted && !d.awaitAck {
+		return // A tap on an old frame after playback ended.
 	}
+	h.leaveScene(d, now, "stop")
+	h.chime(d, "cancel")
+}
+
+func (h *wsHub) leaveScene(d *wsDevice, now time.Time, reason string) {
+	h.cancelTurn(d, reason)
 	h.stopPlayback(d, true)
 	h.clearView(d)
 	h.render(d, now, true)

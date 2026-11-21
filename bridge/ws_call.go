@@ -39,11 +39,7 @@ func (h *wsHub) canCall(d *wsDevice, peerID string) bool {
 }
 
 func (h *wsHub) interruptForCall(d *wsDevice, now time.Time) {
-	if d.busy {
-		h.cancelTurn(d)
-	} else {
-		h.cancelLocalTurn(d)
-	}
+	h.cancelTurn(d, "call")
 	h.stopPlayback(d, true)
 	h.abortCallRecording(d)
 	h.clearView(d)
