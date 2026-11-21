@@ -106,7 +106,7 @@ app = (() => {
     assert(count(tiles,4,6) && tiles.some(t => t.left !== t.right), "spot-the-difference needs 4–6 tile pairs and at least one difference");
     const foundAll = s => tiles.every((t,i) => t.left === t.right || s.found.includes(i));
     return {
-      init: () => ({found:[], note:"Tap any pair that differs"}),
+      init: () => ({found:[], note:"Tap differing pairs"}),
       render(s) {
         let art = txt(180,107,s.note,14);
         tiles.forEach((t,i) => {
@@ -121,7 +121,7 @@ app = (() => {
         if (id === "again") return this.init();
         const i = Number(id.slice(5)), t = tiles[i];
         if (!id.startsWith("pair-") || !t || s.found.includes(i)) return;
-        if (t.left === t.right) { tap(); return {...s,note:"That pair is the same"}; }
+        if (t.left === t.right) { tap(); return {...s,note:"That pair matches"}; }
         const next = {found:[...s.found,i],note:"Nice find!"};
         if (foundAll(next)) { win(); next.note = "Found them all!"; } else tap();
         return next;

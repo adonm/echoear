@@ -139,3 +139,26 @@ func TestAppTemplateSaveAndMemoryRefresh(t *testing.T) {
 	toolTest(t, base, "app", object{"devices": id, "template": "quiz",
 		"data": object{"questions": []object{{"prompt": "Q", "choices": []string{"A", "B"}, "answer": 0, "typo": true}}}}, true)
 }
+
+func TestAppTemplateCountdownRearmsAfterFinish(t *testing.T) {
+	_, base := wsHarness(t, nil)
+	const id = "echoear-countdown"
+	board := testConnectWS(t, base, "unit", false)
+	board.helloV2(t, id, "Cake")
+	toolTest(t, base, "app", object{"devices": id, "template": "timer", "data": object{"seconds": 1}}, false)
+	board.until(t, isDisplay)
+	for range 2 {
+		a := stateMe(t, base, id)["active_app"].(object)
+		if a["ticks_left"] != json.Number("0") {
+			t.Fatal("idle timer scheduled ticks", a)
+		}
+		board.json(t, object{"ev": "tap", "x": 180, "y": 250})
+		board.until(t, hasWS("chime", `"kind":"intercom"`)) // Celebrate at zero.
+		board.until(t, isDisplay)
+		a = stateMe(t, base, id)["active_app"].(object)
+		s := a["state"].(object)
+		if s["left"] != json.Number("0") || s["end"] != json.Number("0") || a["ticks_left"] != json.Number("0") {
+			t.Fatal(a)
+		}
+	}
+}
