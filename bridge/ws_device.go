@@ -102,6 +102,8 @@ type wsDevice struct {
 	appView    svgScreen
 	appGen     uint64
 
+	lastAppError object
+
 	scene    sceneView
 	view     *sceneView
 	pending  *sceneView

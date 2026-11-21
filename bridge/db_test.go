@@ -153,9 +153,12 @@ func TestTursoMigration(t *testing.T) {
 			t.Fatalf("%s rows = %d, want %d: %v", name, count, n, err)
 		}
 	}
-	for name, n := range map[string]int{"meta": 6, "cats": 3, "saved_cats": 3, "devices": 2, "virtual_clients": 1, "tunnels": 1, "sessions": 3,
+	for name, n := range map[string]int{"cats": 3, "saved_cats": 3, "devices": 2, "virtual_clients": 1, "tunnels": 1, "sessions": 3,
 		"voices": 2, "chat_events": 2, "messages": 1, "memory": 0, "apps": 0, "timers": 0} {
 		assertRows(name, n)
+	}
+	if marker, err := db.getMeta(t.Context(), "migrated_app_templates"); err != nil || marker != "1" {
+		t.Fatalf("app template migration marker = %q: %v", marker, err)
 	}
 	for _, want := range []peer{cake, mint} {
 		if got, _, err := deviceStore(db).get(want.DeviceID); err != nil || got != want {

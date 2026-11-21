@@ -28,10 +28,11 @@ type savedApp struct {
 
 const appColumns = "name,title,kind,svg,code,tick_ms,max_ticks,author,updated_at,template,data_json"
 
-func scanApp(row rowScanner) (savedApp, error) {
+func scanApp(row rowScanner, extra ...any) (savedApp, error) {
 	var a savedApp
 	var data string
-	err := row.Scan(&a.Name, &a.Title, &a.Kind, &a.SVG, &a.Code, &a.TickMS, &a.MaxTicks, &a.Author, &a.Version, &a.Template, &data)
+	fields := []any{&a.Name, &a.Title, &a.Kind, &a.SVG, &a.Code, &a.TickMS, &a.MaxTicks, &a.Author, &a.Version, &a.Template, &data}
+	err := row.Scan(append(fields, extra...)...)
 	a.Data = json.RawMessage(data)
 	return a, err
 }
@@ -59,15 +60,13 @@ func (b *bridge) savedAppState(ctx context.Context, name string) (object, error)
 	if b.db == nil {
 		return nil, problem(503, "Apps unavailable")
 	}
-	a, err := b.loadApp(ctx, name)
-	if err != nil {
-		if api, ok := err.(*apiError); ok && api.status == 404 {
-			return nil, problem(404, "saved app not found")
-		}
-		return nil, err
-	}
 	var state string
-	if err := b.db.QueryRowContext(ctx, "SELECT json_group_object(key,json(value_json)) FROM memory WHERE scope=?", "app:"+name).Scan(&state); err != nil {
+	a, err := scanApp(b.db.QueryRowContext(ctx, `SELECT `+appColumns+`,
+		(SELECT json_group_object(key,json(value_json)) FROM memory WHERE scope=?) FROM apps WHERE name=?`, "app:"+name, name), &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, problem(404, "saved app not found")
+	}
+	if err != nil {
 		return nil, problem(502, "Cannot read saved app")
 	}
 	out := a.summary()
@@ -179,7 +178,11 @@ func (b *bridge) deleteSavedApp(ctx context.Context, name string) (bool, error) 
 	if !slugRE.MatchString(name) {
 		return false, problem(400, "Invalid app name")
 	}
-	deleted, _, err := b.editSavedApps(ctx, []string{name}, nil)
+	out, err := b.editSavedApps(ctx, []string{name}, nil, nil)
+	if err != nil {
+		return false, err
+	}
+	deleted := out["deleted"].([]string)
 	return len(deleted) != 0, err
 }
 
@@ -236,76 +239,98 @@ func (b *bridge) patchSavedApps(ctx context.Context, args object) (object, error
 			renames = append(renames, edit)
 		}
 	}
-	if len(names)+len(renames) == 0 {
-		return nil, fieldError("apps", "expected at least one delete or rename")
+	var updates []object
+	if raw, exists := args["update"]; exists {
+		items, ok := raw.([]any)
+		if !ok {
+			items = []any{raw}
+		}
+		for _, item := range items {
+			update, ok := item.(object)
+			if !ok {
+				return nil, fieldError("apps.update", "expected an update object")
+			}
+			updates = append(updates, update)
+		}
 	}
-	deleted, renamed, err := b.editSavedApps(ctx, names, renames)
-	return object{"deleted": deleted, "renamed": renamed}, err
+	if len(names)+len(renames)+len(updates) == 0 {
+		return nil, fieldError("apps", "expected at least one delete, rename, or update")
+	}
+	return b.editSavedApps(ctx, names, renames, updates)
 }
 
 var errSavedAppEdit = problem(502, "Cannot edit saved apps")
 
-func (b *bridge) editSavedApps(ctx context.Context, names []string, renames []appRename) ([]string, []object, error) {
+func (b *bridge) editSavedApps(ctx context.Context, names []string, renames []appRename, updates []object) (object, error) {
 	if b.db == nil {
-		return nil, nil, problem(503, "Apps unavailable")
+		return nil, problem(503, "Apps unavailable")
 	}
-	deleted, renamed, err := b.transactSavedAppEdits(ctx, names, renames)
-	if err == nil && len(deleted)+len(renamed) != 0 {
+	out, err := b.transactSavedAppEdits(ctx, names, renames, updates)
+	if err == nil && len(out["deleted"].([]string))+len(out["renamed"].([]object))+len(updates) != 0 {
 		b.appsChanged()
 	}
-	return deleted, renamed, err
+	return out, err
 }
 
-func (b *bridge) transactSavedAppEdits(ctx context.Context, names []string, renames []appRename) ([]string, []object, error) {
-	// Keep the running-app check and commit atomic with device app installation.
-	if b.ws != nil {
+func (b *bridge) transactSavedAppEdits(ctx context.Context, names []string, renames []appRename, updates []object) (object, error) {
+	// Slug changes must be atomic with device app installation. Updates only
+	// touch disk; rendering their preview must not block the hub.
+	if b.ws != nil && len(names)+len(renames) > 0 {
 		b.ws.mu.Lock()
 		defer b.ws.mu.Unlock()
 	}
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, nil, errSavedAppEdit
+		return nil, errSavedAppEdit
 	}
 	defer tx.Rollback()
 	deleted, renamed := []string{}, []object{}
 	for _, name := range names {
 		result, err := tx.ExecContext(ctx, "DELETE FROM apps WHERE name=?", name)
 		if err != nil {
-			return nil, nil, errSavedAppEdit
+			return nil, errSavedAppEdit
 		}
 		n, err := result.RowsAffected()
 		if err != nil {
-			return nil, nil, errSavedAppEdit
+			return nil, errSavedAppEdit
 		}
 		if n == 0 {
 			continue
 		}
 		if b.ws.appRunning(name) {
-			return nil, nil, problem(409, "saved app is running: "+name)
+			return nil, problem(409, "saved app is running: "+name)
 		}
 		var armed bool
 		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM timers WHERE app_name=?)", name).Scan(&armed); err != nil {
-			return nil, nil, errSavedAppEdit
+			return nil, errSavedAppEdit
 		}
 		if armed {
-			return nil, nil, problem(409, "saved app is used by an armed timer: "+name)
+			return nil, problem(409, "saved app is used by an armed timer: "+name)
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM memory WHERE scope=?", "app:"+name); err != nil {
-			return nil, nil, errSavedAppEdit
+			return nil, errSavedAppEdit
 		}
 		deleted = append(deleted, name)
 	}
 	for _, edit := range renames {
 		result, err := b.renameSavedApp(ctx, tx, edit)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		renamed = append(renamed, result)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, nil, errSavedAppEdit
+	updated := []object{}
+	for _, edit := range updates {
+		saved, err := b.updateSavedApp(ctx, tx, edit)
+		if err != nil {
+			return nil, err
+		}
+		updated = append(updated, saved.summary())
 	}
-	return deleted, renamed, nil
+	if err := tx.Commit(); err != nil {
+		return nil, errSavedAppEdit
+	}
+	return object{"deleted": deleted, "renamed": renamed, "updated": updated}, nil
 }
 
 func (h *wsHub) appRunning(name string) bool {
@@ -357,7 +382,8 @@ func (b *bridge) renameSavedApp(ctx context.Context, tx *sql.Tx, edit appRename)
 	if edit.title != "" {
 		title = edit.title
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE apps SET name=?,title=?,updated_at=? WHERE name=?", edit.to, title, time.Now().UnixMilli(), edit.from); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE apps SET name=?,title=?,updated_at=max(updated_at+1,?) WHERE name=?",
+		edit.to, title, time.Now().UnixMilli(), edit.from); err != nil {
 		return nil, errSavedAppEdit
 	}
 	return object{"from": edit.from, "to": edit.to, "title": title}, nil
@@ -881,6 +907,12 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 	if h == nil {
 		return nil, problem(503, "Device hub unavailable")
 	}
+	if raw, present := args["save_current"]; present {
+		if len(args) != 2 || len(ids) != 1 {
+			return nil, problem(400, "Use save_current with one device only")
+		}
+		return b.saveCurrentApp(ctx, ids[0], raw)
+	}
 	if raw, present := args["state_patch"]; present {
 		if len(args) != 2 {
 			return nil, problem(400, "Use state_patch with devices only")
@@ -982,23 +1014,8 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 	default:
 		return nil, problem(400, "Expected template, svg, code, or load")
 	}
-	for _, o := range []struct {
-		key       string
-		dest      *int
-		low, high int
-	}{
-		{"tick_ms", &a.TickMS, 250, 10000}, {"max_ticks", &a.MaxTicks, 1, 240},
-	} {
-		n, err := mcpUint(args, o.key)
-		if err != nil {
-			return nil, err
-		}
-		if n != nil {
-			*o.dest = int(min(uint64(o.high), max(uint64(o.low), *n)))
-		}
-	}
-	if a.TickMS != 0 && a.MaxTicks == 0 {
-		a.MaxTicks = 240
+	if err := a.setTiming(args); err != nil {
+		return nil, err
 	}
 	if a.SVG != "" {
 		clean, err := parseSVG(a.SVG)
@@ -1038,6 +1055,13 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 	}
 	inst, screens, err := initApp(a, players, memory, devices, initial, b.buildScreen)
 	if err != nil {
+		h.mu.Lock()
+		for i, d := range devices {
+			if h.active(d) && d.appGen == gens[i] {
+				d.lastAppError = appFailure(a, "launch", err, time.Now())
+			}
+		}
+		h.mu.Unlock()
 		return nil, problem(400, err.Error())
 	}
 	out := object{"ok": true, "devices": ids, "title": a.Title, "hit_ids": appHitIDs(screens...)}
@@ -1068,10 +1092,15 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 		}
 	}
 	if loaded == a.Name {
-		// Rendering runs outside the hub lock; the saved slug may have been moved or deleted.
-		if _, err := b.loadApp(ctx, loaded); err != nil {
+		// Rendering runs outside the hub lock; the library may have changed.
+		current, err := b.loadApp(ctx, loaded)
+		if err != nil {
 			h.mu.Unlock()
 			return nil, err
+		}
+		if current.Version != a.Version {
+			h.mu.Unlock()
+			return nil, &versionConflict{current.Version}
 		}
 	}
 	if save != "" {
@@ -1106,6 +1135,7 @@ func (b *bridge) launchApp(ctx context.Context, args object, menu *menuContent) 
 	for i, d := range devices {
 		h.clearView(d)
 		d.app, d.appView, d.agentSetScene = inst, screens[i], d.busy
+		d.lastAppError = nil
 		h.wake(d, now)
 		h.render(d, now, false)
 	}
@@ -1164,6 +1194,10 @@ func appLayoutWarnings(views []svgScreen, round bool) []string {
 		}
 	}
 	return warnings
+}
+
+func appFailure(spec savedApp, action string, err error, now time.Time) object {
+	return object{"name": spec.Name, "title": spec.Title, "action": action, "error": truncate(err.Error(), 1024), "at": now.UTC()}
 }
 
 func (h *wsHub) activeAppState(a *appInstance) object {
@@ -1414,6 +1448,7 @@ func (h *wsHub) commitAppEvent(a *appInstance, ev appEvent, views []svgScreen, e
 	if err != nil {
 		for _, d := range a.devices {
 			if d != nil && h.active(d) {
+				d.lastAppError = appFailure(a.spec, ev.kind, err, now)
 				h.push(d, object{"op": "error", "status": 400, "error": err.Error()}, true)
 			}
 		}

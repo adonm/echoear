@@ -186,6 +186,9 @@ var mcpTools = func() []object {
 	rename := schema(object{"from": text, "to": text, "title": text}, "from")
 	rename["anyOf"] = []object{{"required": []string{"to"}}, {"required": []string{"title"}}}
 	jsonObject := object{"type": "object", "additionalProperties": true}
+	update := schema(object{"name": text, "title": text, "code": object{"type": "string", "maxLength": 16384},
+		"svg": text, "data": appTemplateSchema(""), "tick_ms": number, "max_ticks": number,
+		"expected_version": object{"type": "integer", "minimum": 0}}, "name")
 	return []object{
 		tool("state", "Read live state by slice. device_id adds me.device, me.cat and me.active_app; app_name adds full saved app source, settings and state.",
 			schema(object{"device_id": text, "include": array(enum(stateSlices...)), "memory_scopes": array(text),
@@ -198,11 +201,12 @@ var mcpTools = func() []object {
 					"slug": object{"type": "string", "description": "Saved cat slug for load/delete_saved"}, "configured": flag,
 					"save_profile": object{"type": "boolean", "description": "Save an updated cat as a reusable profile"}}),
 				"memory": object{"anyOf": []object{memory, array(memory)}},
-				"apps":   schema(object{"delete": array(text), "rename": array(rename)}),
+				"apps":   schema(object{"delete": array(text), "rename": array(rename), "update": object{"anyOf": []object{update, array(update)}}}),
 				"timer":  schema(object{"op": enum("set", "cancel"), "device_id": text, "id": text, "all": flag, "in_seconds": number, "at": text, "label": text, "say": text, "chime": enum(basicChimes...), "notes": notes, "wake_agent": flag, "app": text})})),
 		tool("app", "Launch a data-only template, display SVG, run/load/save/delete an app, exit to the cat, or shallow-patch running JS state. Players share state and render separately.",
 			schema(object{"devices": object{"anyOf": []object{text, array(text)}}, "title": text, "svg": text, "code": object{"type": "string", "maxLength": 16384},
 				"template": enum(templateNames()...), "data": appTemplateSchema(""),
+				"save_current": schema(object{"name": text, "title": text}, "name"),
 				"load": text, "save_as": text, "delete_saved": text, "initial_state": jsonObject, "state_patch": jsonObject, "tick_ms": number, "max_ticks": number, "exit": flag})),
 		tool("emit", "Call, send a spoken intercom and card, or play notes or effects. Use exact device IDs; calls cannot target all.",
 			schema(object{"to": text, "intercom": schema(object{"from": text, "text": text}, "from", "text"),
@@ -283,6 +287,7 @@ func (h *wsHub) deviceStatus(entry object, id string, full bool) {
 			entry["battery_pct"] = d.pct
 		}
 		if full {
+			entry["last_app_error"] = d.lastAppError
 			cat := d.cat
 			cat.Voice = d.voice
 			entry["cat"], entry["voice"] = cat, d.voice

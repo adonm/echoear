@@ -1,7 +1,8 @@
 app = (() => {
   "use strict";
-  const d = {...templateData, ...storeGet("content")};
-  const title = d.title || templateTitle;
+  const content = storeGet("content");
+  const d = {...templateData, ...content};
+  const title = content?.title || templateTitle;
   const theme = d.theme || "warm";
   const palettes = {
     warm: ["#6F423D", "#FFFAEE", "#392429", "#A45B48"],
