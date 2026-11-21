@@ -29,6 +29,7 @@ const (
 	diagTTSQueue
 	diagTTSInfer
 	diagFirstPCM
+	diagEndpoint
 	diagMetricCount
 )
 
@@ -36,6 +37,7 @@ var diagMetricNames = [diagMetricCount]string{
 	"stt_ms", "llm_first_ms", "llm_total_ms", "tts_first_ms", "e2e_ms",
 	"render_ms", "frame_bytes", "frame_raw_bytes",
 	"gate_ms", "first_sentence_ms", "tts_queue_ms", "tts_infer_ms", "first_pcm_ms",
+	"speech_end_to_commit_ms",
 }
 
 const diagInterval = 2 * time.Second
@@ -105,6 +107,7 @@ type diagTurn struct {
 	TTSInfer      *float64 `json:"tts_infer_ms"`
 	Render        *float64 `json:"render_ms"`
 	FirstPCM      *float64 `json:"first_pcm_ms"`
+	Endpoint      *float64 `json:"speech_end_to_commit_ms"`
 }
 
 type diagFrame struct {
@@ -158,6 +161,7 @@ func (t *turnTrace) measure(metric diagMetric, elapsed time.Duration) {
 		diagTTSFirst: &t.record.TTS, diagE2E: &t.record.E2E, diagRender: &t.record.Render,
 		diagGate: &t.record.Gate, diagFirstSentence: &t.record.FirstSentence,
 		diagTTSQueue: &t.record.TTSQueue, diagTTSInfer: &t.record.TTSInfer, diagFirstPCM: &t.record.FirstPCM,
+		diagEndpoint: &t.record.Endpoint,
 	}[metric]
 	if field != nil && *field == nil {
 		*field = &value

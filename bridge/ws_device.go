@@ -155,6 +155,8 @@ type wsDevice struct {
 	recIgnoreStart bool
 	recTail        bool // Legacy clients share the note and call PCM tag.
 	mic            []byte
+	capture        *endpointCapture
+	queuedVoice    *endpointCapture
 	turn           uint64
 	trace          *turnTrace
 	cancel         context.CancelFunc
@@ -541,6 +543,9 @@ func (h *wsHub) announce(d *wsDevice) {
 	c := d.client
 	if c.role == "web" {
 		c.enqueue(catFrame(d.who.DeviceID, d.cat, d.voice))
+		if d.caps.BridgeEndpoint && h.b.endpoint != nil {
+			h.push(d, object{"op": "capabilities", "bridge_endpoint": true}, false)
+		}
 	}
 	h.push(d, d.volumeFrame(false), true)
 	h.push(d, object{"op": "power", "brightness": d.brightness()}, true)
@@ -641,10 +646,11 @@ type renderRequest struct {
 	trace  *turnTrace
 }
 
-func (d *wsDevice) catPose(now time.Time, mood string) catPose {
+func (h *wsHub) catPose(d *wsDevice, now time.Time, mood string) catPose {
 	p := poseFrame(now, d.moodAt, d.last, mood, d.pct, d.vol, d.charging, now.Before(d.meter))
 	p.blink = p.blink || now.Before(d.pet)
 	p.stopTaps = d.stopTaps
+	p.canContinue = mood == "thinking" && h.b.endpoint != nil && d.caps.BridgeEndpoint && d.queuedVoice == nil
 	return p
 }
 
@@ -679,7 +685,7 @@ func (h *wsHub) render(d *wsDevice, now time.Time, full bool) {
 	if changed && d.virtual() {
 		h.push(d, object{"op": "mode", "mode": mood}, false)
 	}
-	pose := d.catPose(now, mood)
+	pose := h.catPose(d, now, mood)
 	d.pose = pose
 	r := renderRequest{full: full || d.renderNext != nil && d.renderNext.full, trace: d.trace}
 	switch {
@@ -902,7 +908,7 @@ func (h *wsHub) animate(ctx context.Context) {
 				case d.stopTapsExpired(now):
 					h.render(d, now, false)
 				case (d.drawer == "" || d.asleep) && (d.app == nil && d.view == nil || d.asleep || !d.recAt.IsZero()):
-					if d.catPose(now, d.pose.mood) != d.pose {
+					if h.catPose(d, now, d.pose.mood) != d.pose {
 						h.render(d, now, false)
 					}
 				}

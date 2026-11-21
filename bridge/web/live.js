@@ -113,6 +113,7 @@ function connect(attempt = 0) {
   disconnect();
   const cat = state.view;
   cat.mode = "";
+  cat.bridgeEndpoint = false;
   say("link-state", "Connecting…");
   updateStatus(cat.virtual ? `Joining as ${cat.device.character}…` : `Connecting to ${cat.device.character}…`);
   renderCurrent();
@@ -128,7 +129,7 @@ function connect(attempt = 0) {
     loadSavedCats();
     const micAvailable = canCaptureMic();
     send(cat.virtual ? {ev:"hello",role:"web",device_id:cat.id,character:cat.device.character,firmware:"web",
-      caps:{call:micAvailable,call_pcm:micAvailable,drag:true}}
+      caps:{call:micAvailable,call_pcm:micAvailable,drag:true,bridge_endpoint:micAvailable}}
       : {ev:"hello",role:"web"});
   };
   socket.onmessage = e => {
@@ -190,6 +191,9 @@ function command(msg) {
     return;
   }
   switch (msg.op) {
+    case "capabilities":
+      if (state.view.virtual) state.view.bridgeEndpoint = msg.bridge_endpoint === true;
+      break;
     case "cat":
       updateCat(msg);
       break;
@@ -267,8 +271,12 @@ function command(msg) {
       break;
     case "rec":
       if (state.view.virtual) {
-        if (msg.action === "start") startMic(msg.target || "");
-        else if (msg.action === "stop") endMic(!!msg.cancelled, !msg.cancelled);
+        if (msg.action === "start") startMic(msg.target || "", null, msg.endpoint);
+        else if (msg.action === "stop") {
+          // The bridge already has the endpoint; don't leave hardware tracks
+          // on waiting for a worklet quantum (the audio context may suspend).
+          endMic(!!msg.cancelled, !msg.cancelled, false, true);
+        }
       }
       break;
     case "tts":
