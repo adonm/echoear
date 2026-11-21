@@ -474,6 +474,12 @@ func (b *bridge) route(w http.ResponseWriter, r *http.Request, path string) (any
 		case path == "/":
 			http.Redirect(w, r, "/app", http.StatusFound)
 			return nil, nil
+		case path == "/app/parent":
+			if !parentLAN(r) {
+				return nil, problem(403, "Open parent controls directly on your LAN")
+			}
+			serveAppFile(w, "parent.html", "text/html; charset=utf-8")
+			return nil, nil
 		case serveApp(w, path):
 			return nil, nil
 		case path == "/ws" && b.ws != nil:

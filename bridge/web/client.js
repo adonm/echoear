@@ -23,6 +23,7 @@ function stop() {
   disconnect();
   $("workspace").hidden = true;
   $("sidebar-toggle").hidden = true;
+  $("parent-link").hidden = true;
   $("opencode-pairing").hidden = true;
   $("pair-links").replaceChildren();
   say("pair-note", "");
@@ -47,12 +48,14 @@ async function authorize(token) {
     stop();
     setLocal("echoear-token", token);
     state.app = {token, scope, devices:[], deviceVersion:0, sidebar:!scope && wide.matches, tunnel:null};
+    if (!scope) state.app.historyDevice = new URL(location.href).searchParams.get("device_id");
     loadVoiceCatalog(profile.voices);
     state.timerTick = setInterval(tickTimers, 1000);
     $("workspace").dataset.app = scope ? "scoped" : "lan";
     $("workspace").hidden = false;
     $("diagnostics-toggle").hidden = !!scope;
     $("sidebar-toggle").hidden = !!scope;
+    $("parent-link").hidden = !!scope;
     $("opencode-pairing").hidden = !!scope;
     $("credentials").close();
     $("token").value = "";

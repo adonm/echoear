@@ -168,7 +168,8 @@ async function refreshDevices() {
     current.devices = devices;
     const updated = devices.find(d => d.device_id === state.view?.id);
     if (!state.view?.id || !updated && state.view.virtual && !state.view.quick && !current.tunnelBusy) {
-      select(preferredCat(devices));
+      select(devices.find(d => d.device_id === current.historyDevice) || preferredCat(devices));
+      current.historyDevice = null;
     } else if (updated) {
       state.view.device = updated;
       renderCurrent();
