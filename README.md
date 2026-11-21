@@ -386,13 +386,12 @@ silent. App launches return `layout_warnings` for controls that overlap the
 Home button or clip on round displays. Custom exits can use `lark-exit`
 or the legacy `echoear-exit`.
 
-Lark pairs pixel art with Oat chrome: 32×32 companions and featured art,
-16×16 icons, a shared 16-color palette, and rounded cards. Show a screen
-with no JS or SVG:
+Lark pairs tinted Storybook vectors with Oat chrome. The nine templates share
+24 stickers; you can also show them with no JS or SVG:
 
 ```js
 app({devices: device_id, screen: {title: "Night sky", body: [
-  {type: "sprite", rows: [".y.", "yyy", ".y."], scale: 8},
+  {type: "sticker", name: "star", size: 72, palette: "amber"},
   {type: "text", text: "Wish on a star!"}
 ], actions: [{id: "wish", label: "Wish", variant: "primary"}]}, save_as: "night-sky"})
 ```
@@ -401,7 +400,8 @@ app({devices: device_id, screen: {title: "Night sky", body: [
 and grids of `{id, label, sprite?, sub?, active?, variant?}` items. It wraps
 text and fits controls above Home on both displays. For interactive behavior,
 return `ui.screen(spec)` from JS `render` and handle IDs in `onTap`.
-`ui.sprite(rows, {x, y, scale, palette, mirror})` returns a crisp SVG fragment.
+`ui.sticker(name, {x, y, size, palette, id})` returns a Storybook SVG fragment.
+`ui.sprite(rows, {x, y, scale, palette, mirror})` still returns a crisp pixel fragment.
 `ui.palette` exposes the read-only palette (`.` is transparent;
 `k w p m l s y r g a b n d c o` are colors).
 Boards blend warm dawn and dusk and a cooler night using the device's Parent
@@ -431,16 +431,20 @@ The bridge also writes private daily snapshots to `backups/echoear-YYYY-MM-DD.db
 under its data directory, keeps the seven latest, and reports the latest in
 **Diagnostics**.
 Active and saved forms are stored in `cats` and `saved_cats`.
-Both the device and browser use one editable `face_svg` for the companion's appearance.
-Set `patch({device_id, cat: {sprite: {rows}, save_profile: false}})` to shift
-forms with pixel rows instead of hand-written SVG. Full grids can be 2–64 pixels
-per side. With `mirror:true`, supply just the left half (16 columns for a 32×32
-companion). A 32×32 form uses 9 pixels per cell on VoCat and 6 on BOX-3.
-Optional `blink`, `talk`, `think`, and `sleep` maps override zero-based rows
-in the same format. Optional `palette` maps pixel keys to `#RRGGBB`.
-`face_svg` and `face_edits` still work for existing forms.
-The bridge renders shared artwork and the matching `data-pose` layer:
-`idle`, `blink`, `talk`, `listen`, `think`, or `sleep`.
+Shift instantly with `patch({device_id, cat: {companion: {species: "owl",
+palette: "lavender", accessory: "scarf"}, save_profile: false}})`. Ten species
+share eight colorways: peach, mint, lavender, sage, berry, amber, sky and
+midnight. Set `eyes`, `markings` or a palette object with `base` and hex tints
+to customize. Vector faces support `face_edits`; `face_svg` and pixel `sprite`
+patches still work. Existing saved artwork is unchanged.
+
+For bespoke art use `cat.portrait: {prompt, bg?, edit?}` instead. With a raw
+Console `OPENCODE_API_KEY` in the bridge environment, this sends a billed request
+to Nano Banana 2.1. `edit:true` sends the current sheet back as reference.
+The bridge aligns four poses from one sheet and uses them for the six face
+states. Only SVG references go into the database; private PNGs under the
+local `portraits/` directory do not sync to Turso. Without a key, use the
+instant vector companion.
 The canonical `messages` table drives browser history. The v2 migration
 backfills it from legacy bridge chat events and OpenCode session history.
 New rows contain user text, final companion replies, intercom, and display cards,
