@@ -334,7 +334,14 @@ static int integer(const cJSON *msg, const char *key, int lo, int hi)
 static void dispatch(const cJSON *msg)
 {
     const char *op = field(msg, "op");
-    if (!strcmp(op, "rec")) {
+    if (!strcmp(op, "hello_ok")) {
+        uint32_t session = ws_client_session();
+        if (session && atomic_load(&wifi_online)) {
+            atomic_store(&ready_session, session);
+            ESP_LOGI(TAG, "Bridge accepted hello");
+            xTaskNotifyGive(service);
+        }
+    } else if (!strcmp(op, "rec")) {
         const char *action = field(msg, "action"), *target = field(msg, "target");
         if (!strcmp(action, "stop")) {
             media_record_stop(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "cancelled")));
@@ -526,6 +533,7 @@ static void service_task(void *arg)
 {
     (void)arg;
     bool running = false;
+    uint32_t hello_sent = 0;
     int64_t after_status = 0;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(running ? 250 : 1000));
@@ -544,13 +552,12 @@ static void service_task(void *arg)
         }
         uint32_t session = ws_client_session();
         int64_t now = esp_timer_get_time() / 1000;
-        if (session && session != atomic_load(&ready_session)) {
-            if (send_telemetry(session, true) && session == ws_client_session()) {
-                atomic_store(&ready_session, session);
+        if (session && session != hello_sent) {
+            if (send_telemetry(session, true)) {
+                hello_sent = session;
                 after_status = now + STATUS_MS;
-                ESP_LOGI(TAG, "Bridge connected");
             }
-        } else if (session && now >= after_status) {
+        } else if (ready_socket_session() && now >= after_status) {
             send_telemetry(session, false);
             after_status = now + STATUS_MS;
         }

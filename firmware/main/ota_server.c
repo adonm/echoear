@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "media.h"
@@ -25,6 +26,13 @@
 #include "ws_client.h"
 
 static const char *TAG = "ota";
+
+static bool pending_verification(void)
+{
+    esp_ota_img_states_t state;
+    return esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
+           state == ESP_OTA_IMG_PENDING_VERIFY;
+}
 
 static esp_err_t text_response(httpd_req_t *request, const char *status, const char *message)
 {
@@ -108,7 +116,8 @@ static esp_err_t status_get(httpd_req_t *request)
              "\"free_heap\":%zu,\"min_free_heap\":%zu,\"free_psram\":%zu,\"uptime_s\":%" PRIu64 ",\"cpu_pct\":%u,"
              "\"firmware\":\"%s\",\"running_partition\":\"%s\","
              "\"board\":\"" BOARD_NAME "\",\"width\":%d,\"height\":%d,\"has_battery\":%s,"
-             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s"
+             "\"volume\":%d,\"battery_pct\":%s,\"battery_mv\":%s,\"charging\":%s,\"sleeping\":%s,\"ws_connected\":%s,"
+             "\"ota_pending\":%s"
              TELEMETRY_IO_JSON "}",
              device_id, wifi_character(), device_mac, ip, hw.wifi_rssi,
              hw.free_heap, hw.min_free_heap, hw.free_psram, hw.uptime_s, hw.cpu_pct,
@@ -116,6 +125,7 @@ static esp_err_t status_get(httpd_req_t *request)
              FRAME_WIDTH, FRAME_HEIGHT, BOARD_HAS_BATTERY ? "true" : "false",
              audio_get_volume(), pct, mv, BOARD_HAS_BATTERY ? (battery.charging ? "true" : "false") : "null",
              display_is_sleeping() ? "true" : "false", ws_client_connected() ? "true" : "false",
+             pending_verification() ? "true" : "false",
              TELEMETRY_IO_VALUES(hw));
     if (len < 0 || (size_t)len >= sizeof(json)) {
         return text_response(request, "500 Internal Server Error", "Status response too large\n");
@@ -304,16 +314,25 @@ esp_err_t ota_server_start(void)
     return err;
 }
 
-void ota_confirm_boot(void)
+void ota_check_boot(int64_t boot_us)
 {
-    esp_ota_img_states_t state;
-    if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
-        state == ESP_OTA_IMG_PENDING_VERIFY) {
-        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Confirmed OTA image after display and Wi-Fi initialized");
-        } else {
-            ESP_LOGE(TAG, "Confirm OTA image: %s", esp_err_to_name(err));
+    if (!pending_verification()) return;
+    if (media_audio_ready()) {
+        while (esp_timer_get_time() - boot_us < 45 * 1000000LL) {
+            if (ws_client_connected()) {
+                esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+                if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "Confirmed OTA image after bridge hello and audio initialization");
+                    return;
+                }
+                ESP_LOGE(TAG, "Confirm OTA image: %s", esp_err_to_name(err));
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
+    ESP_LOGE(TAG, "OTA boot health check failed (audio=%d, bridge=%d)", media_audio_ready(), ws_client_connected());
+    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+    ESP_LOGE(TAG, "Roll back OTA image: %s", esp_err_to_name(err));
+    // USB flashes may have no known-good OTA image. Keep local recovery reachable.
 }

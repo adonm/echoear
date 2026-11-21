@@ -7,6 +7,7 @@
 #include "ws_client.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "echoear";
@@ -14,11 +15,11 @@ static const char *TAG = "echoear";
 static void on_wifi(bool online, const char *ip)
 {
     ws_client_network_changed(online);
-    if (online) ota_confirm_boot();
 }
 
 void app_main(void)
 {
+    int64_t boot_us = esp_timer_get_time();
     esp_err_t nvs = nvs_flash_init();
     if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -33,5 +34,6 @@ void app_main(void)
     if (power_start() != ESP_OK) ESP_LOGW(TAG, "Battery monitor unavailable");
     ESP_ERROR_CHECK(wifi_start(on_wifi));
     ESP_ERROR_CHECK(ota_server_start());
+    ota_check_boot(boot_us);
     ESP_LOGI(TAG, "%s ready", device_id);
 }

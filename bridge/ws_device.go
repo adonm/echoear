@@ -515,6 +515,9 @@ func (h *wsHub) hello(c *wsClient, ev wsEvent, now time.Time) {
 		d.rev = old.rev
 	}
 	h.devices[d.key], c.device, c.role = d, d, ev.Role
+	if ev.Role == "device" {
+		c.enqueue(textFrame(object{"op": "hello_ok"}))
+	}
 	h.render(d, now, true)
 }
 
