@@ -24,7 +24,7 @@ var e2eTemplates = []e2eTemplate{
 	{"timer", `{"seconds":2}`, "start", "Counting down", 180, 250},
 	{"picture-math", `{"problems":[{"left":2,"right":3}]}`, "answer-0", "Correct!", 108, 203},
 	{"memory-match", `{}`, "card-0", "", 100, 127},
-	{"fireworks", `{}`, "sky", `r=\"4\"`, 180, 130},
+	{"fireworks", `{}`, "sky", "", 180, 130},
 }
 
 func (s *e2eSuite) activeApp(t *testing.T, c *e2eCat) object {
@@ -73,8 +73,11 @@ func (s *e2eSuite) apps(t *testing.T) {
 						if tc.name == "fireworks" {
 							// Its pop is an audio effect, not a firmware chime.
 							c.ack(t, c.op(t, "tts", "state", `"end"`))
-						}
-						if tc.after != "" {
+							sprites := strings.Count(c.svg, `shape-rendering="crispEdges"`)
+							c.sceneWhere(t, "new pixel burst", func(f wsFrame) bool {
+								return strings.Count(string(f.data), `shape-rendering=\"crispEdges\"`) > sprites
+							})
+						} else if tc.after != "" {
 							c.scene(t, tc.after)
 						} else {
 							c.expect(t, "native card flips", isDisplay)
